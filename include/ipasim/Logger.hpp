@@ -17,10 +17,12 @@
 #define SUBLANG_DEFAULT 0x01 // user default
 
 #include <winrt/base.h>
-#else
-__declspec(dllimport) __stdcall void OutputDebugStringA(const char *);
-__declspec(dllimport) __stdcall void OutputDebugStringW(const wchar_t *);
 #endif
+
+// C++/WinRT does not guarantee these Win32 debug declarations are visible to
+// Clang translation units. These are the real Kernel32 imports, not stubs.
+extern "C" __declspec(dllimport) void __stdcall OutputDebugStringA(const char *);
+extern "C" __declspec(dllimport) void __stdcall OutputDebugStringW(const wchar_t *);
 
 #define IPASIM_NORETURN [[noreturn]]
 
@@ -262,10 +264,12 @@ public:
     error(Message);
     errs() << winError() << "\n";
   }
+#if !defined(IPASIM_DISABLE_FATAL_ERRORS)
   IPASIM_NORETURN void fatalError(const std::string &Message) {
     error(Message);
     throw FatalError(Message.c_str());
   }
+#endif
   StreamTy &errs() { return E; }
   StreamTy &infs() { return O; }
   StreamTy &warns() { return E; }

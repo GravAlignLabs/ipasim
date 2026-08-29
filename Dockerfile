@@ -35,7 +35,7 @@ RUN powershell -c "choco install nuget.commandline --version 4.9.1 -y"
 RUN powershell -c "nuget install cppwinrt -Version 2017.4.6.1 -OutputDirectory C:/packages"
 
 # Install Node.js LTS.
-ADD https://nodejs.org/dist/v8.11.3/node-v8.11.3-x64.msi C:/temp/node-install.msi
+ADD https://nodejs.org/dist/v8.11.3/node-install.msi C:/temp/node-install.msi
 RUN start /wait msiexec.exe /i C:/temp/node-install.msi /l*vx "C:/temp/MSI-node-install.log" /qn ADDLOCAL=ALL
 
 # Install Visual Studio Build Tools.
@@ -80,7 +80,9 @@ RUN powershell -c "choco install cppcheck --version 1.87 -y"
 # Install Git. It's needed to compile LIEF.
 RUN powershell -c "choco install git --version 2.20.1 -y"
 
-# Start developer command prompt.
-ENTRYPOINT C:/BuildTools/Common7/Tools/VsDevCmd.bat -arch=x86 -host_arch=x86 &&
+# The emulator now hosts a 64-bit ARM64 guest address space. Start the Visual
+# Studio environment as x64 so CMake, libffi and native runtime dependencies do
+# not silently fall back to Win32.
+ENTRYPOINT C:/BuildTools/Common7/Tools/VsDevCmd.bat -arch=x64 -host_arch=x64 &&
 
 CMD powershell -f scripts/build.ps1

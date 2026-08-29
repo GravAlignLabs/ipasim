@@ -31,7 +31,8 @@ bool DylibSymbolIterator::operator!=(const DylibSymbolIterator &Other) {
 LIEF::MachO::Symbol &DylibSymbolIterator::operator*() { return *Symbols; }
 
 bool LoadedLibrary::isInRange(uint64_t Addr) {
-  return StartAddress <= Addr && Addr < StartAddress + Size;
+  const uint64_t Base = MappedStartAddress ? MappedStartAddress : StartAddress;
+  return Addr >= Base && Addr - Base < Size;
 }
 
 void LoadedLibrary::checkInRange(uint64_t Addr) {
@@ -42,8 +43,33 @@ void LoadedLibrary::checkInRange(uint64_t Addr) {
 uint64_t LoadedDylib::findSymbol(DynamicLoader &DL, const string &Name) {
   using namespace LIEF::MachO;
 
+  // LC_DYLD_EXPORTS_TRIE is authoritative for modern images and is parsed by
+  // ipaSim directly because the vendored LIEF version predates that command.
+  if (const ModernExport *Export = modernExport(Name)) {
+    switch (Export->Type) {
+    case ModernExport::Kind::Regular:
+      // Regular export-trie addresses are offsets from the Mach-O header.
+      return loadedImageBase() + Export->Value;
+    case ModernExport::Kind::Absolute:
+      return Export->Value;
+    case ModernExport::Kind::Reexport: {
+      const string &ImportName =
+          Export->ImportName.empty() ? Name : Export->ImportName;
+      return DL.resolveSymbol(*this, Export->LibOrdinal, ImportName);
+    }
+    case ModernExport::Kind::ThreadLocal:
+      Log.error() << "thread-local export " << Name
+                  << " requires TLS runtime support" << Log.end();
+      return 0;
+    case ModernExport::Kind::Resolver:
+      Log.error() << "resolver export " << Name
+                  << " requires resolver invocation support" << Log.end();
+      return 0;
+    }
+  }
+
   if (!Bin.has_symbol(Name)) {
-    // Try also re-exported libraries.
+    // Try also classic re-exported libraries.
     for (DylibCommand &Lib : Bin.libraries()) {
       if (Lib.command() != LOAD_COMMAND_TYPES::LC_REEXPORT_DYLIB)
         continue;
@@ -52,10 +78,9 @@ uint64_t LoadedDylib::findSymbol(DynamicLoader &DL, const string &Name) {
       if (!LL)
         continue;
 
-      // If the target library is DLL, it doesn't have underscore prefixes, so
-      // we need to remove it.
+      // Windows DLL exports do not carry Mach-O's leading underscore.
       uint64_t SymAddr;
-      if (!LL->hasUnderscorePrefix() && Name[0] == '_')
+      if (!LL->hasUnderscorePrefix() && !Name.empty() && Name[0] == '_')
         SymAddr = LL->findSymbol(DL, Name.substr(1));
       else
         SymAddr = LL->findSymbol(DL, Name);

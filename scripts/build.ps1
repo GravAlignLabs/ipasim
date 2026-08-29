@@ -8,11 +8,14 @@ pushd "C:/ipaSim/build"
 cmake -G Ninja "C:/ipaSim/src"
 
 if ($env:BUILD_TABLEGENS_ONLY -eq "1") {
-    # Sample build command to test incremental building. See also i14.
+    # Tablegen remains a host build-tool concern and can use the historical
+    # compiler-tool target.
     ninja tblgens-x86-Release
 } else {
-    # Build everything.
-    ninja ipaSim-x86-Debug ipaSim-x86-Release
+    # ARM64 iOS guests require a 64-bit Windows emulator process. Build the
+    # x64 runtime configurations by default; do not silently fall back to the
+    # historical Win32 emulator targets.
+    ninja ipaSim-x64-Debug ipaSim-x64-Release
 }
 $ExitCode = $LastExitCode
 

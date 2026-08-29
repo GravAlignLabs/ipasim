@@ -1,0 +1,322 @@
+name: Synthetic iOS IPA on Windows
+
+on:
+  pull_request:
+    paths:
+      - 'CMakeLists.txt'
+      - 'include/**'
+      - 'src/**'
+      - '.github/workflows/synthetic-hello-ipa.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: synthetic-hello-ipa-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios-fixtures:
+    name: Build synthetic iOS IPAs
+    runs-on: macos-15
+    timeout-minutes: 15
+
+    steps:
+      - name: Show Apple toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos clang --version
+
+      - name: Build minimal native and ipaSim-bootstrap IPAs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          root="$RUNNER_TEMP/minimal"
+          native_app="$root/native/Payload/HelloNative.app"
+          bootstrap_app="$root/bootstrap/Payload/HelloBootstrap.app"
+          out="$GITHUB_WORKSPACE/synthetic-output/minimal"
+          mkdir -p "$native_app" "$bootstrap_app" "$out"
+
+          cat > "$root/Hello.s" <<'ASM'
+          .section __TEXT,__text,regular,pure_instructions
+          .globl _main
+          .p2align 2
+          _main:
+              mov w0, #42
+              ret
+
+          .section __TEXT,__cstring,cstring_literals
+          hello_message:
+              .asciz "Hello from a GitHub-built iOS ARM64 IPA"
+          ASM
+
+          # Apple requires a dynamic iOS executable to link libSystem. Keep one
+          # completely normal copy as the real iOS loader fixture.
+          xcrun --sdk iphoneos clang \
+            -arch arm64 \
+            -target arm64-apple-ios15.0 \
+            -Wl,-e,_main \
+            "$root/Hello.s" \
+            -o "$native_app/HelloNative"
+
+          cat > "$native_app/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleDisplayName</key><string>Hello Native</string>
+            <key>CFBundleExecutable</key><string>HelloNative</string>
+            <key>CFBundleIdentifier</key><string>com.gravalign.ipasim.hello-native</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>HelloNative</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+            <key>MinimumOSVersion</key><string>15.0</string>
+            <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+          </dict></plist>
+          PLIST
+
+          file "$native_app/HelloNative" | tee "$out/native-file.txt"
+          xcrun otool -L "$native_app/HelloNative" | tee "$out/native-dependencies.txt"
+          xcrun nm -u "$native_app/HelloNative" | tee "$out/native-undefined.txt"
+
+          # This assembly fixture calls no libSystem functions. Prove that before
+          # making a bootstrap copy. The only libSystem relationship is Apple's
+          # mandatory load command, so redirecting that unused dependency to the
+          # real ipaSim host bridge tests loader+Unicorn execution without
+          # pretending to implement any guest symbol.
+          undefined="$(xcrun nm -u "$native_app/HelloNative" | sed '/^[[:space:]]*$/d')"
+          if [[ -n "$undefined" ]]; then
+            echo "Minimal fixture unexpectedly has undefined symbols:" >&2
+            echo "$undefined" >&2
+            exit 1
+          fi
+
+          cp "$native_app/HelloNative" "$bootstrap_app/HelloBootstrap"
+          sed 's/Hello Native/Hello Bootstrap/g; s/HelloNative/HelloBootstrap/g; s/hello-native/hello-bootstrap/g' \
+            "$native_app/Info.plist" > "$bootstrap_app/Info.plist"
+
+          system_dep="$(xcrun otool -L "$bootstrap_app/HelloBootstrap" | awk 'NR==2 {print $1}')"
+          if [[ "$system_dep" != /usr/lib/libSystem* ]]; then
+            echo "Expected libSystem as the minimal image dependency, got: $system_dep" >&2
+            exit 1
+          fi
+
+          xcrun install_name_tool -change "$system_dep" IpaSimDarwinHost.dll "$bootstrap_app/HelloBootstrap"
+          xcrun otool -L "$bootstrap_app/HelloBootstrap" | tee "$out/bootstrap-dependencies.txt"
+          xcrun nm -u "$bootstrap_app/HelloBootstrap" | tee "$out/bootstrap-undefined.txt"
+
+          if ! xcrun otool -L "$bootstrap_app/HelloBootstrap" | grep -q 'IpaSimDarwinHost.dll'; then
+            echo 'Bootstrap dependency redirect did not take effect.' >&2
+            exit 1
+          fi
+
+          (cd "$root/native" && /usr/bin/zip -qry "$out/HelloNative.ipa" Payload)
+          (cd "$root/bootstrap" && /usr/bin/zip -qry "$out/HelloBootstrap.ipa" Payload)
+          shasum -a 256 "$out/HelloNative.ipa" "$out/HelloBootstrap.ipa" | tee "$out/sha256.txt"
+
+      - name: Build UIKit Hello World IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          root="$RUNNER_TEMP/uikit"
+          app="$root/Payload/HelloUIKit.app"
+          out="$GITHUB_WORKSPACE/synthetic-output/uikit"
+          mkdir -p "$app" "$out"
+
+          cat > "$root/HelloUIKit.m" <<'OBJC'
+          #import <UIKit/UIKit.h>
+
+          @interface AppDelegate : UIResponder <UIApplicationDelegate>
+          @property(nonatomic, strong) UIWindow *window;
+          @end
+
+          @implementation AppDelegate
+          - (BOOL)application:(UIApplication *)application
+                  didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+              (void)application;
+              (void)launchOptions;
+              self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+              UIViewController *controller = [[UIViewController alloc] init];
+              controller.view.backgroundColor = [UIColor systemBackgroundColor];
+              UILabel *label = [[UILabel alloc] initWithFrame:controller.view.bounds];
+              label.text = @"Hello from ipaSim";
+              label.textAlignment = NSTextAlignmentCenter;
+              label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+              [controller.view addSubview:label];
+              self.window.rootViewController = controller;
+              [self.window makeKeyAndVisible];
+              return YES;
+          }
+          @end
+
+          int main(int argc, char **argv) {
+              @autoreleasepool {
+                  return UIApplicationMain(argc, argv, nil, NSStringFromClass([AppDelegate class]));
+              }
+          }
+          OBJC
+
+          xcrun --sdk iphoneos clang \
+            -arch arm64 \
+            -target arm64-apple-ios15.0 \
+            -fobjc-arc \
+            "$root/HelloUIKit.m" \
+            -framework UIKit \
+            -framework Foundation \
+            -o "$app/HelloUIKit"
+
+          cat > "$app/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleDisplayName</key><string>Hello UIKit</string>
+            <key>CFBundleExecutable</key><string>HelloUIKit</string>
+            <key>CFBundleIdentifier</key><string>com.gravalign.ipasim.hello-uikit</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>HelloUIKit</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+            <key>MinimumOSVersion</key><string>15.0</string>
+            <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+          </dict></plist>
+          PLIST
+
+          file "$app/HelloUIKit" | tee "$out/file.txt"
+          xcrun otool -L "$app/HelloUIKit" | tee "$out/dependencies.txt"
+          xcrun nm -u "$app/HelloUIKit" | tee "$out/undefined.txt"
+          (cd "$root" && /usr/bin/zip -qry "$out/HelloUIKit.ipa" Payload)
+          shasum -a 256 "$out/HelloUIKit.ipa" | tee "$out/sha256.txt"
+
+      - name: Upload synthetic IPAs
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-ios-ipas
+          if-no-files-found: error
+          path: synthetic-output/
+
+  run-on-windows:
+    name: Run synthetic IPA through ipaSim
+    needs: build-ios-fixtures
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      SCCACHE_GHA_ENABLED: 'true'
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+
+    steps:
+      - name: Check out ipaSim
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Fetch modern-core submodules
+        shell: pwsh
+        run: |
+          git submodule sync -- deps/llvm deps/LIEF deps/unicorn deps/Libffi
+          git submodule update --init --depth 1 --jobs 4 deps/llvm deps/LIEF deps/unicorn deps/Libffi
+
+      - name: Enter x64 MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Enable compiler result cache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Download synthetic IPAs
+        uses: actions/download-artifact@v4
+        with:
+          name: synthetic-ios-ipas
+          path: synthetic
+
+      - name: Configure and build ipaSim probe
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G Ninja
+          cmake --build build --target config-ipaSim-x64-Release -- -v
+          cmake --build build\ipaSim-x64-Release --target Arm64Smoke -- -v
+          cmake --build build\ipaSim-x64-Release --target IpaProbe -- -v
+
+      - name: Verify raw AArch64 execution
+        shell: pwsh
+        run: |
+          & 'build\ipaSim-x64-Release\bin\Arm64Smoke.exe'
+          if ($LASTEXITCODE -ne 0) { throw "Raw AArch64 execution failed: $LASTEXITCODE" }
+
+      - name: Execute bootstrap IPA on Windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ipa = Get-ChildItem synthetic -Recurse -Filter HelloBootstrap.ipa | Select-Object -First 1
+          if (-not $ipa) { throw 'HelloBootstrap.ipa was not found.' }
+          $zip = Join-Path $env:RUNNER_TEMP 'HelloBootstrap.zip'
+          $expanded = Join-Path $env:RUNNER_TEMP 'HelloBootstrap-expanded'
+          Copy-Item $ipa.FullName $zip -Force
+          Expand-Archive $zip $expanded -Force
+          $image = Join-Path $expanded 'Payload\HelloBootstrap.app\HelloBootstrap'
+          $probe = 'build\ipaSim-x64-Release\bin\IpaProbe.exe'
+          $log = Join-Path $env:RUNNER_TEMP 'bootstrap-ipasim.log'
+          $lines = @(& $probe --execute $image 2>&1)
+          $code = $LASTEXITCODE
+          $lines | Tee-Object -FilePath $log
+          if ($code -ne 0) { throw "Bootstrap IPA execution failed: $code" }
+          if (($lines -join "`n") -notmatch 'guest entry point returned X0=42') {
+            throw 'Guest returned without the expected X0=42 proof.'
+          }
+          '## Bootstrap IPA' | Add-Content $env:GITHUB_STEP_SUMMARY
+          'GitHub built an iOS ARM64 IPA; ipaSim loaded and executed its LC_MAIN entry point on Windows and observed X0=42.' | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Probe untouched native IPA boundary
+        shell: pwsh
+        run: |
+          $ipa = Get-ChildItem synthetic -Recurse -Filter HelloNative.ipa | Select-Object -First 1
+          $zip = Join-Path $env:RUNNER_TEMP 'HelloNative.zip'
+          $expanded = Join-Path $env:RUNNER_TEMP 'HelloNative-expanded'
+          Copy-Item $ipa.FullName $zip -Force
+          Expand-Archive $zip $expanded -Force
+          $image = Join-Path $expanded 'Payload\HelloNative.app\HelloNative'
+          $probe = 'build\ipaSim-x64-Release\bin\IpaProbe.exe'
+          $log = Join-Path $env:RUNNER_TEMP 'native-ipasim.log'
+          $lines = @(& $probe $image 2>&1)
+          $code = $LASTEXITCODE
+          $lines | Tee-Object -FilePath $log
+          if ($code -lt 0) { throw "Untouched native IPA probe crashed: $code" }
+          '## Untouched native IPA' | Add-Content $env:GITHUB_STEP_SUMMARY
+          ($lines | Select-Object -Last 40) | Add-Content $env:GITHUB_STEP_SUMMARY
+          exit 0
+
+      - name: Probe UIKit Hello World boundary
+        shell: pwsh
+        run: |
+          $ipa = Get-ChildItem synthetic -Recurse -Filter HelloUIKit.ipa | Select-Object -First 1
+          $zip = Join-Path $env:RUNNER_TEMP 'HelloUIKit.zip'
+          $expanded = Join-Path $env:RUNNER_TEMP 'HelloUIKit-expanded'
+          Copy-Item $ipa.FullName $zip -Force
+          Expand-Archive $zip $expanded -Force
+          $image = Join-Path $expanded 'Payload\HelloUIKit.app\HelloUIKit'
+          $probe = 'build\ipaSim-x64-Release\bin\IpaProbe.exe'
+          $log = Join-Path $env:RUNNER_TEMP 'uikit-ipasim.log'
+          $lines = @(& $probe $image 2>&1)
+          $code = $LASTEXITCODE
+          $lines | Tee-Object -FilePath $log
+          if ($code -lt 0) { throw "UIKit IPA probe crashed: $code" }
+          '## UIKit Hello World IPA' | Add-Content $env:GITHUB_STEP_SUMMARY
+          ($lines | Select-Object -Last 60) | Add-Content $env:GITHUB_STEP_SUMMARY
+          exit 0
+
+      - name: Upload Windows synthetic-IPA logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-ipa-windows-logs
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/*ipasim.log

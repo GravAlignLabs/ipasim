@@ -1,0 +1,14 @@
+LIBRARY IpaSimDarwinHost
+EXPORTS
+    socket=darwin_socket
+    connect=darwin_connect
+    getuid=darwin_getuid
+    geteuid=darwin_geteuid
+    getgid=darwin_getgid
+    getegid=darwin_getegid
+    open=darwin_open
+    lseek=darwin_lseek
+    read=darwin_read
+    write=darwin_write
+    mach_task_self_ DATA
+    vm_page_size DATA
