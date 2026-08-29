@@ -48,6 +48,39 @@ Work from the **first genuine non-cascading failure**.
 
 Prefer subsystem fixes over symbol-by-symbol exceptions when several failures share the same missing abstraction.
 
+## Integration cadence
+
+`master` is the **rolling integration baseline**, not a branch that waits for the emulator to be complete.
+
+- Do not keep correct, tested work on a long-lived feature branch merely because adjacent framework/runtime work is still unfinished.
+- Open a PR as soon as there is a coherent compatibility increment. Draft PRs are appropriate while that increment is still being validated.
+- Merge an increment back to `master` when it is independently correct, reviewable, preserves known-good behavior, and its applicable public tests are green.
+- Full iOS compatibility, full framework support, or success with every application is **not** a prerequisite for merging a completed subsystem increment.
+- Examples of mergeable increments include a loader semantic, an ABI correction, a Darwin API implementation plus smoke coverage, a descriptor-model improvement, a synthetic fixture, or a CI diagnostic improvement.
+- Keep branches short-lived by default. If work spans multiple independent boundaries, split it into sequential PRs instead of keeping one branch open indefinitely.
+- After a PR merges, start follow-on work from the updated `master` so later work continuously incorporates what has already landed.
+- Record unfinished adjacent work as follow-up issues/PRs rather than holding completed work hostage to future milestones.
+- Keep `master` green. If a merge causes a regression, fixing or reverting that regression takes priority over advancing to the next boundary.
+- Do not wait for a multi-month or multi-year “project complete” checkpoint before integrating useful work.
+
+The preferred rhythm is:
+
+```text
+small genuine boundary
+        |
+        v
+implementation + focused test
+        |
+        v
+public CI / PR diagnostic loop
+        |
+        v
+merge to master when green
+        |
+        v
+next branch starts from updated master
+```
+
 ## Public validation order
 
 Run these in order:
@@ -105,9 +138,12 @@ Do not copy assumptions blindly. touchHLE targets a different iOS era and archit
 - Keep PRs target-neutral and evidence-driven.
 - Explain the actual compatibility boundary being addressed.
 - Include the test that proves the change.
+- Scope PRs around independently mergeable engineering increments whenever practical.
 - Preserve useful subsystem history; meaningful engineering milestones are preferable to one opaque mega-commit.
 - Do not manufacture empty commits merely to inflate activity.
 - Do not merge private acceptance data into public history.
+- When one increment is ready, merge it; do not keep adding unrelated future work to the same PR.
+- Continue unfinished work in a follow-up PR based on the newly updated `master`.
 
 ## Privacy boundary
 
