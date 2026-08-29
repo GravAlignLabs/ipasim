@@ -8,21 +8,24 @@ task: >-
   semantic smoke coverage.
 
 scope:
+  - src/IpaSimulator/DarwinKernelBridge.cpp
   - src/IpaSimulator/DarwinTimeBridge.cpp
   - src/IpaSimulator/DarwinTimeSmoke.cpp
   - src/IpaSimulator/SysTranslator.cpp
 
 branch: feature/darwin-continuous-time
 started_utc: 2026-08-29T19:36:00Z
-updated_utc: 2026-08-29T19:36:00Z
+updated_utc: 2026-08-29T19:50:51Z
 base_sha: 22d7b343467f322e0dd6e1358717f75421504b42
-expected_pr: draft
+expected_pr: draft #4
 
 next_checkpoint: >-
-  Add sleep-inclusive monotonic continuous-time ticks and a matching timebase,
-  register the ARM64 host-call signatures, extend DarwinTimeSmoke, then open a
-  focused draft PR for public CI validation.
+  Preserve the existing DarwinKernelBridge mach_continuous_time owner, add the
+  coherent mach_timebase_info boundary beside it, remove the duplicate timing
+  definition from DarwinTimeBridge, and rerun public CI.
 
 notes: >-
-  Public target-neutral timing compatibility work only. No private application
-  names, paths, binaries, logs, or fingerprints are part of this claim.
+  Scope expanded after CI exposed an existing mach_continuous_time definition in
+  DarwinKernelBridge.cpp. The fix replaces the duplicate path rather than hiding
+  or suppressing the linker failure. Public target-neutral timing compatibility
+  work only; no private application data is included.
