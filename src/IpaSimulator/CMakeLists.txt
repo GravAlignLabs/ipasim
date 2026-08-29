@@ -210,7 +210,6 @@ add_custom_target (lief-x64
 add_library (LIEF STATIC IMPORTED)
 set_target_properties (LIEF PROPERTIES
     IMPORTED_LOCATION "${CURRENT_LIEF_RUNTIME_DIR}/libLIEF.a")
-add_dependencies (LIEF lief-x64)
 set (LIEF_INCLUDE_DIRS
     "${SOURCE_DIR}/deps/LIEF/include"
     "${SOURCE_DIR}/deps/LIEF/api/c/include"
