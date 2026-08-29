@@ -27,6 +27,18 @@
 
 namespace {
 
+constexpr std::size_t DarwinOsAllocOnceKeyMax = 100;
+
+// XNU/libplatform define each alloc-once slot as Darwin `long` plus a pointer.
+// Darwin LP64 long is 64-bit while Windows long remains 32-bit, so use
+// intptr_t explicitly to preserve the target ABI rather than the host C type.
+struct DarwinOsAllocOnceEntry {
+  std::intptr_t Once;
+  void *Ptr;
+};
+static_assert(sizeof(DarwinOsAllocOnceEntry) == 16,
+              "Darwin _os_alloc_once_s layout changed unexpectedly");
+
 void reportUnsupported(const char *Name) {
   std::fprintf(stderr,
                "[darwin-host-unsupported] %s has no faithful Windows semantic mapping\n",
@@ -52,6 +64,14 @@ std::uint32_t high32(std::uint64_t Value) {
 } // namespace
 
 extern "C" {
+
+// XNU keeps process-lifetime os_alloc_once state in a 100-entry writable table.
+// This is real guest-visible storage, not a success stub: the PE DATA export is
+// mapped into Unicorn with the host bridge and remains writable for the process
+// lifetime exactly like the Darwin global. Zero initialization is the required
+// pre-allocation state. The __os_alloc_once function itself is intentionally not
+// implemented until execution proves that separate compatibility boundary.
+DarwinOsAllocOnceEntry _os_alloc_once_table[DarwinOsAllocOnceKeyMax] = {};
 
 // csops/csops_audittoken expose XNU code-signing state. Windows Authenticode
 // and PE trust policy are not equivalent to Darwin csflags/entitlement blobs,

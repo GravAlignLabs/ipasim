@@ -68,6 +68,13 @@ struct DarwinProcFdInfo {
 };
 static_assert(sizeof(DarwinProcFdInfo) == 8);
 
+constexpr std::size_t DarwinOsAllocOnceKeyMax = 100;
+struct DarwinOsAllocOnceEntry {
+  std::intptr_t Once;
+  void *Ptr;
+};
+static_assert(sizeof(DarwinOsAllocOnceEntry) == 16);
+
 int fail(const char *Message) {
   std::fprintf(stderr, "[darwin-kernel-smoke] FAIL: %s\n", Message);
   return 1;
@@ -97,6 +104,7 @@ int main(int argc, char **argv) {
       "vm_allocate",
       "vm_deallocate",
       "vm_page_size",
+      "_os_alloc_once_table",
       "open",
       "close",
       "lseek",
@@ -143,6 +151,36 @@ int main(int argc, char **argv) {
     FreeLibrary(Host);
     return fail("mach_task_self_ is unavailable");
   }
+
+  auto *AllocOnceTable = reinterpret_cast<DarwinOsAllocOnceEntry *>(
+      GetProcAddress(Host, "_os_alloc_once_table"));
+  if (!AllocOnceTable ||
+      (reinterpret_cast<std::uintptr_t>(AllocOnceTable) %
+       alignof(DarwinOsAllocOnceEntry)) != 0) {
+    FreeLibrary(Host);
+    return fail("_os_alloc_once_table is unavailable or misaligned");
+  }
+  for (std::size_t Index = 0; Index < DarwinOsAllocOnceKeyMax; ++Index) {
+    if (AllocOnceTable[Index].Once != 0 || AllocOnceTable[Index].Ptr != nullptr) {
+      FreeLibrary(Host);
+      return fail("_os_alloc_once_table is not zero initialized");
+    }
+  }
+  constexpr std::intptr_t OnceMarker = 0x12345678;
+  constexpr std::uintptr_t PointerMarker = 0x12345000;
+  AllocOnceTable[DarwinOsAllocOnceKeyMax - 1].Once = OnceMarker;
+  AllocOnceTable[DarwinOsAllocOnceKeyMax - 1].Ptr =
+      reinterpret_cast<void *>(PointerMarker);
+  auto *AllocOnceTableAgain = reinterpret_cast<DarwinOsAllocOnceEntry *>(
+      GetProcAddress(Host, "_os_alloc_once_table"));
+  if (AllocOnceTableAgain != AllocOnceTable ||
+      AllocOnceTableAgain[DarwinOsAllocOnceKeyMax - 1].Once != OnceMarker ||
+      reinterpret_cast<std::uintptr_t>(
+          AllocOnceTableAgain[DarwinOsAllocOnceKeyMax - 1].Ptr) != PointerMarker) {
+    FreeLibrary(Host);
+    return fail("_os_alloc_once_table did not preserve writable process state");
+  }
+  AllocOnceTable[DarwinOsAllocOnceKeyMax - 1] = {};
 
   using VmAllocate = std::int32_t (*)(std::uint32_t, std::uint64_t *,
                                       std::uint64_t, std::int32_t);
