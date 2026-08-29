@@ -23,6 +23,70 @@ struct Trampoline {
   uint64_t Addr;
 };
 
+#if defined(IPASIM_MODERN_CORE)
+// The Darwin host bridge is not a generated WinObjC wrapper. Every entry below
+// is a target-proven C ABI boundary whose integer/pointer signature is explicit
+// so the ARM64 guest arguments can be marshalled into the native Windows x64
+// call without guessing from an Objective-C method encoding.
+struct DarwinHostCallSignature {
+  const char *Name;
+  size_t ArgCount;
+  bool Returns;
+};
+
+const DarwinHostCallSignature *findDarwinHostCallSignature(
+    LoadedLibrary *Library, const filesystem::path &Path, uint64_t Addr) {
+  if (Path.filename().string() != "IpaSimDarwinHost.dll")
+    return nullptr;
+
+  auto *Dll = dynamic_cast<LoadedDll *>(Library);
+  if (!Dll || !Dll->Ptr)
+    return nullptr;
+
+  static const DarwinHostCallSignature Signatures[] = {
+      {"__error", 0, true},
+      {"__gettimeofday", 2, true},
+      {"__sendto", 6, true},
+      {"_os_alloc_once", 3, true},
+      {"__pthread_fchdir", 1, true},
+      {"close", 1, true},
+      {"connect", 3, true},
+      {"fcntl", 3, true},
+      {"getpid", 0, true},
+      {"getuid", 0, true},
+      {"geteuid", 0, true},
+      {"getgid", 0, true},
+      {"getegid", 0, true},
+      {"pid_for_task", 2, true},
+      {"proc_pidpath", 3, true},
+      {"read", 3, true},
+      {"readlink", 3, true},
+      {"mkfifo", 2, true},
+      {"mknod", 3, true},
+      {"open", 3, true},
+      {"mach_msg_overwrite", 9, true},
+      {"lseek", 3, true},
+      {"_platform_memmove", 3, true},
+      {"_platform_strchr", 2, true},
+      {"_platform_strcmp", 2, true},
+      {"_platform_strlcpy", 3, true},
+      {"_platform_strlen", 1, true},
+      {"_platform_strncmp", 3, true},
+      {"os_unfair_lock_lock_with_options", 2, false},
+      {"os_unfair_lock_unlock", 1, false},
+      {"__interposition_sim_system_mach_task_is_self", 1, true},
+      {"__interposition_sim_system_pthread_cpu_number_np", 1, true},
+  };
+
+  for (const DarwinHostCallSignature &Signature : Signatures) {
+    FARPROC Proc = GetProcAddress(Dll->Ptr, Signature.Name);
+    if (Proc && reinterpret_cast<uint64_t>(Proc) == Addr)
+      return &Signature;
+  }
+  return nullptr;
+}
+#endif
+
 } // namespace
 
 void SysTranslator::execute(LoadedLibrary *Lib) {
@@ -37,9 +101,8 @@ void SysTranslator::execute(LoadedLibrary *Lib) {
   void *StackPtr = _aligned_malloc(StackSize, DynamicLoader::PageSize);
   uint64_t StackAddr = reinterpret_cast<uint64_t>(StackPtr);
   Emu.mapMemory(StackAddr, StackSize, UC_PROT_READ | UC_PROT_WRITE);
-  // Reserve 12 bytes on the stack, so that our instruction logger can read
-  // them.
-  Emu.writeReg(UC_ARM_REG_SP, StackAddr + StackSize - 12);
+  // AAPCS64 requires SP to remain 16-byte aligned at public call boundaries.
+  Emu.writeReg(UC_ARM64_REG_SP, (StackAddr + StackSize) & ~uint64_t(0xF));
 
   // Install hooks.
   // This hook handles calls across platform boundaries (iOS -> Windows). It
@@ -49,7 +112,7 @@ void SysTranslator::execute(LoadedLibrary *Lib) {
     // This hook logs execution for debugging purposes.
     Emu.hook(UC_HOOK_CODE, &SysTranslator::handleCode, this);
   if constexpr (PrintMemoryWrites)
-    // This hook logs all memory writes.
+    // This hook logs all execution for debugging purposes.
     Emu.hook(UC_HOOK_MEM_WRITE, &SysTranslator::handleMemWrite, this);
   // This hook allows through reading and writing to unmapped memory (probably
   // heap or other external objects).
@@ -74,11 +137,11 @@ void SysTranslator::execute(uint64_t Addr) {
     Log.info() << "starting emulation at " << Dyld.dumpAddr(Addr)
                << " in thread " << this_thread::get_id() << Log.end();
 
-  // Save LR.
-  LRs.push(Emu.readReg(UC_ARM_REG_LR));
+  // AArch64 uses X30 as the link register.
+  LRs.push(Emu.readReg(UC_ARM64_REG_X30));
 
-  // Point return address to kernel.
-  Emu.writeReg(UC_ARM_REG_LR, Dyld.getKernelAddr());
+  // Point return address to the protected kernel sentinel.
+  Emu.writeReg(UC_ARM64_REG_X30, Dyld.getKernelAddr());
 
   // Start execution.
   for (;;) {
@@ -98,7 +161,7 @@ void SysTranslator::execute(uint64_t Addr) {
         Addr = LRs.top();
         LRs.pop();
       } else
-        Addr = Emu.readReg(UC_ARM_REG_LR);
+        Addr = Emu.readReg(UC_ARM64_REG_X30);
     } else
       break;
   }
@@ -109,8 +172,8 @@ void SysTranslator::returnToKernel() {
     Log.info() << "executing kernel at 0x"
                << to_hex_string(Dyld.getKernelAddr()) << Log.end();
 
-  // Restore LR.
-  Emu.writeReg(UC_ARM_REG_LR, LRs.top());
+  // Restore X30.
+  Emu.writeReg(UC_ARM64_REG_X30, LRs.top());
   LRs.pop();
 
   // Stop execution.
@@ -119,8 +182,8 @@ void SysTranslator::returnToKernel() {
 
 void SysTranslator::returnToEmulation() {
   if constexpr (PrintEmuInfo)
-    Log.info() << "returning to " << Dyld.dumpAddr(Emu.readReg(UC_ARM_REG_LR))
-               << Log.end();
+    Log.info() << "returning to "
+               << Dyld.dumpAddr(Emu.readReg(UC_ARM64_REG_X30)) << Log.end();
 
   Restart = true;
 }
@@ -175,14 +238,14 @@ bool SysTranslator::handleFetchProtMem(uc_mem_type Type, uint64_t Addr,
   }
 
   if (Wrapper) {
-    // Read register R0 containing address of our structure with function
-    // arguments and return value.
-    uint32_t R0 = Emu.readReg(UC_ARM_REG_R0);
+    // X0 contains the pointer to the generated wrapper argument structure.
+    uint64_t X0 = Emu.readReg(UC_ARM64_REG_X0);
 
     continueOutsideEmulation([=]() {
-      // Call the target function.
-      auto *Func = reinterpret_cast<void (*)(uint32_t)>(Addr);
-      Func(R0);
+      // Call the target function. This is pointer-width by design; the Windows
+      // host must therefore be x64 before the modern framework bridge is used.
+      auto *Func = reinterpret_cast<void (*)(uint64_t)>(Addr);
+      Func(X0);
 
       returnToEmulation();
     });
@@ -191,9 +254,46 @@ bool SysTranslator::handleFetchProtMem(uc_mem_type Type, uint64_t Addr,
     return false;
   }
 
+  filesystem::path DLLPath(*LI.LibPath);
+
+#if defined(IPASIM_MODERN_CORE)
+  // IpaSimDarwinHost.dll is an explicit native semantic bridge, not a generated
+  // WinObjC wrapper. Marshal its target-proven integer/pointer signatures
+  // directly from AAPCS64. Arguments 0..7 come from X0..X7 and argument 8 (the
+  // ninth mach_msg_overwrite parameter) comes from the guest stack.
+  if (DLLPath.filename().string() == "IpaSimDarwinHost.dll") {
+    const DarwinHostCallSignature *Signature =
+        findDarwinHostCallSignature(LI.Lib, DLLPath, Addr);
+    if (!Signature) {
+      Log.error() << "Darwin host bridge export has no registered ARM64 "
+                     "signature at "
+                  << Dyld.dumpAddr(Addr, LI) << Log.end();
+      return false;
+    }
+
+    if constexpr (PrintEmuInfo)
+      Log.info() << "calling Darwin host bridge " << Signature->Name << " with "
+                 << Signature->ArgCount << " integer/pointer arguments"
+                 << Log.end();
+
+    auto DC = make_unique<DynamicCaller>(Emu);
+    for (size_t I = 0; I != Signature->ArgCount; ++I)
+      DC->loadArg(sizeof(uint64_t));
+
+    continueOutsideEmulation([=, DCP = DC.release()]() {
+      unique_ptr<DynamicCaller> DC(DCP);
+      if (!DC->call(Signature->Returns, Addr))
+        return;
+      returnToEmulation();
+    });
+
+    Emu.ignoreNextError();
+    return false;
+  }
+#endif
+
   // If the target is not a wrapper DLL, we must find and call the corresponding
   // wrapper instead.
-  filesystem::path DLLPath(*LI.LibPath);
   filesystem::path WrapperPath(
       filesystem::path("gen") /
       DLLPath.filename().replace_extension(".wrapper.dll"));
@@ -232,8 +332,8 @@ bool SysTranslator::handleFetchProtMem(uc_mem_type Type, uint64_t Addr,
     if constexpr (PrintEmuInfo)
       Log.info() << "found wrapper at " << Dyld.dumpAddr(Addr) << Log.end();
 
-    // Note that doing just `Emu.writeReg(UC_ARM_REG_PC, Addr);` instead of all
-    // this didn't work in Release mode for some reason.
+    // Resume through the normal execution loop instead of changing PC inside
+    // the Unicorn hook.
     Emu.stop();
     Restart = true;
     RestartFromLRs = true;
@@ -256,14 +356,19 @@ bool SysTranslator::handleFetchProtMem(uc_mem_type Type, uint64_t Addr,
     Log.info() << "dynamically handling method " << Dyld.dumpAddr(Addr, LI, M)
                << Log.end();
 
-  // Handle return value.
+  // Handle return value. Pointer-width integer returns are supported by this
+  // foundation; complete floating-point/aggregate ABI support is tracked
+  // separately and is never silently substituted.
   TypeDecoder TD(M.getType());
   bool Returns;
   switch (TD.getNextTypeSize()) {
   case 0:
     Returns = false;
     break;
+  case 1:
+  case 2:
   case 4:
+  case 8:
     Returns = true;
     break;
   default:
@@ -296,17 +401,16 @@ bool SysTranslator::handleFetchProtMem(uc_mem_type Type, uint64_t Addr,
 }
 
 void SysTranslator::handleCode(uint64_t Addr, uint32_t Size) {
-  auto *R13 = reinterpret_cast<uint32_t *>(Emu.readReg(UC_ARM_REG_R13));
-  Log.info() << "executing at " << Dyld.dumpAddr(Addr) << " [R0 = 0x"
-             << to_hex_string(Emu.readReg(UC_ARM_REG_R0)) << ", R1 = 0x"
-             << to_hex_string(Emu.readReg(UC_ARM_REG_R1)) << ", R7 = 0x"
-             << to_hex_string(Emu.readReg(UC_ARM_REG_R7)) << ", R12 = 0x"
-             << to_hex_string(Emu.readReg(UC_ARM_REG_R12)) << ", R13 = 0x"
-             << to_hex_string(Emu.readReg(UC_ARM_REG_R13)) << ", [R13] = 0x"
-             << to_hex_string(R13[0]) << ", [R13+4] = 0x"
-             << to_hex_string(R13[1]) << ", [R13+8] = 0x"
-             << to_hex_string(R13[2]) << ", R14 = 0x"
-             << to_hex_string(Emu.readReg(UC_ARM_REG_R14)) << "]" << Log.end();
+  auto *SP = reinterpret_cast<uint64_t *>(Emu.readReg(UC_ARM64_REG_SP));
+  Log.info() << "executing at " << Dyld.dumpAddr(Addr) << " [X0 = 0x"
+             << to_hex_string(Emu.readReg(UC_ARM64_REG_X0)) << ", X1 = 0x"
+             << to_hex_string(Emu.readReg(UC_ARM64_REG_X1)) << ", X7 = 0x"
+             << to_hex_string(Emu.readReg(UC_ARM64_REG_X7)) << ", SP = 0x"
+             << to_hex_string(Emu.readReg(UC_ARM64_REG_SP)) << ", [SP] = 0x"
+             << to_hex_string(SP[0]) << ", [SP+8] = 0x"
+             << to_hex_string(SP[1]) << ", X30 = 0x"
+             << to_hex_string(Emu.readReg(UC_ARM64_REG_X30)) << "]"
+             << Log.end();
 }
 
 bool SysTranslator::handleMemWrite(uc_mem_type Type, uint64_t Addr, int Size,
@@ -344,17 +448,17 @@ void SysTranslator::handleTrampoline(void *Ret, void **Args, void *Data) {
       Log.infs() << ", void)" << Log.end();
   }
 
-  // Pass arguments.
-  uc_arm_reg RegId = UC_ARM_REG_R0;
+  // AAPCS64 passes the first eight integer/pointer arguments in X0-X7.
+  int RegId = UC_ARM64_REG_X0;
   for (size_t I = 0, ArgC = Tr->ArgC; I != ArgC; ++I)
-    Emu.writeReg(RegId++, *reinterpret_cast<uint32_t *>(Args[I]));
+    Emu.writeReg(RegId++, *reinterpret_cast<uint64_t *>(Args[I]));
 
   // Call the function.
   execute(Tr->Addr);
 
-  // Extract return value.
+  // Extract pointer-width return value from X0.
   if (Tr->Returns)
-    *reinterpret_cast<ffi_arg *>(Ret) = Emu.readReg(UC_ARM_REG_R0);
+    *reinterpret_cast<uint64_t *>(Ret) = Emu.readReg(UC_ARM64_REG_X0);
 }
 
 void SysTranslator::handleTrampolineStatic(ffi_cif *, void *Ret, void **Args,
@@ -378,14 +482,9 @@ void *SysTranslator::translate(void *FP) {
     return nullptr;
   }
 
-  // We have found metadata of the callback method. Now, for simple methods,
-  // it's actually quite simple to translate i386 -> ARM calls dynamically,
-  // so that's what we do here.
-  // TODO: Generate wrappers for callbacks, too (see README of
-  // `HeadersAnalyzer` for more details).
   if constexpr (PrintEmuInfo)
-    Log.info() << "dynamically handling callback " << Dyld.dumpAddr(Addr, LI, M)
-               << Log.end();
+    Log.info() << "dynamically handling ARM64 callback "
+               << Dyld.dumpAddr(Addr, LI, M) << Log.end();
 
   // First, handle the return value.
   TypeDecoder TD(M.getType());
@@ -394,7 +493,10 @@ void *SysTranslator::translate(void *FP) {
   case 0:
     Returns = false;
     break;
+  case 1:
+  case 2:
   case 4:
+  case 8:
     Returns = true;
     break;
   default:
@@ -402,15 +504,19 @@ void *SysTranslator::translate(void *FP) {
     return nullptr;
   }
 
-  // Next, process function arguments.
+  // Next, process function arguments. The current ARM64 bridge intentionally
+  // supports the integer/pointer register class only.
   size_t ArgC = 0;
   while (TD.hasNext()) {
     switch (TD.getNextTypeSize()) {
     case TypeDecoder::InvalidSize:
       return nullptr;
-    case 4: {
-      if (ArgC > 3) {
-        Log.error("callback has too many arguments");
+    case 1:
+    case 2:
+    case 4:
+    case 8: {
+      if (ArgC >= 8) {
+        Log.error("callback has too many register arguments");
         return nullptr;
       }
       ++ArgC;
@@ -480,7 +586,7 @@ void *SysTranslator::translate(void *FP, size_t ArgC, bool Returns) {
 }
 
 void *SysTranslator::createTrampoline(void *FP, size_t ArgC, bool Returns) {
-  assert(ArgC <= 4);
+  assert(ArgC <= 8);
 
   // TODO: Don't create different trampolines for the same `FP`.
   auto *Tr = new Trampoline;
@@ -496,10 +602,11 @@ void *SysTranslator::createTrampoline(void *FP, size_t ArgC, bool Returns) {
     Log.error("couldn't allocate closure");
     return nullptr;
   }
-  static ffi_type *ArgTypes[4] = {&ffi_type_uint32, &ffi_type_uint32,
-                                  &ffi_type_uint32, &ffi_type_uint32};
-  if (ffi_prep_cif(&Tr->CIF, FFI_MS_CDECL, Tr->ArgC,
-                   Tr->Returns ? &ffi_type_uint32 : &ffi_type_void,
+  static ffi_type *ArgTypes[8] = {
+      &ffi_type_uint64, &ffi_type_uint64, &ffi_type_uint64, &ffi_type_uint64,
+      &ffi_type_uint64, &ffi_type_uint64, &ffi_type_uint64, &ffi_type_uint64};
+  if (ffi_prep_cif(&Tr->CIF, FFI_DEFAULT_ABI, Tr->ArgC,
+                   Tr->Returns ? &ffi_type_uint64 : &ffi_type_void,
                    ArgTypes) != FFI_OK) {
     Log.error("couldn't prepare CIF");
     return nullptr;
@@ -517,19 +624,18 @@ void *SysTranslator::createTrampoline(void *FP, size_t ArgC, bool Returns) {
 // =============================================================================
 
 void DynamicCaller::loadArg(size_t Size) {
-  for (size_t I = 0; I != Size; I += 4) {
-    if (RegId <= UC_ARM_REG_R3)
-      // We have some registers left, use them.
-      Args.push_back(Emu.readReg(RegId++));
-    else {
-      // Otherwise, use stack.
-      Args.push_back(*reinterpret_cast<uint32_t *>(SP));
-      SP += 4;
-    }
+  // Foundation support for the AAPCS64 integer/pointer argument class. Each
+  // argument consumes one 64-bit register slot. FP/SIMD and aggregate classes
+  // are implemented separately rather than being silently misclassified.
+  if (RegId <= UC_ARM64_REG_X7)
+    Args.push_back(Emu.readReg(RegId++));
+  else {
+    Args.push_back(*reinterpret_cast<uint64_t *>(SP));
+    SP += 8;
   }
 }
 
-bool DynamicCaller::call(bool Returns, uint32_t Addr) {
+bool DynamicCaller::call(bool Returns, uint64_t Addr) {
 #define CASE(N)                                                                \
   case N:                                                                      \
     call<N>(Returns, Addr);                                                    \
@@ -543,6 +649,9 @@ bool DynamicCaller::call(bool Returns, uint32_t Addr) {
     CASE(4);
     CASE(5);
     CASE(6);
+    CASE(7);
+    CASE(8);
+    CASE(9);
   default:
     Log.error("function has too many arguments");
     return false;
@@ -561,17 +670,29 @@ size_t TypeDecoder::getNextTypeSizeImpl() {
   case 'v': // void
     return 0;
   case 'c': // char
+  case 'C': // unsigned char
+  case 'B': // bool
+    return 1;
+  case 's': // short
+  case 'S': // unsigned short
+    return 2;
+  case 'i': // int
+  case 'I': // unsigned int
+  case 'l': // 32-bit long in Objective-C type encodings
+  case 'L': // unsigned 32-bit long
+  case 'f': // float (size only; FP register ABI is not claimed here)
+    return 4;
   case '@': // id
   case '#': // Class
   case ':': // SEL
-  case 'i': // int
-  case 'I': // unsigned int
-  case 'f': // float
-    return 4;
+  case 'q': // long long / NSInteger on modern Apple 64-bit targets
+  case 'Q': // unsigned long long / NSUInteger
+  case 'd': // double (size only; FP register ABI is not claimed here)
+    return 8;
   case '^': // pointer to type
     ++T;
     getNextTypeSizeImpl(); // Skip the underlying type, it's not important.
-    return 4;
+    return 8;
   case '{': { // struct
     // Skip name of the struct.
     for (++T; *T != '='; ++T)
