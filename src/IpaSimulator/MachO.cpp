@@ -14,18 +14,20 @@ uint64_t MachO::getSection(const char *SegName, const char *SectName,
                            uint64_t *Size) {
   using namespace llvm::MachO;
 
-  // Enumerate segments.
-  uint64_t Slide, Addr;
+  // Modern iOS device images use mach_header_64 and LC_SEGMENT_64. Reading
+  // those commands through their 32-bit counterparts truncates vmaddr and
+  // section addresses before Objective-C metadata is even inspected.
+  uint64_t Slide = 0, Addr = 0;
   bool HasSlide = false, HasAddr = false;
   auto HdrAddr = reinterpret_cast<uint64_t>(Hdr);
-  auto *Header = reinterpret_cast<const mach_header *>(Hdr);
+  auto *Header = reinterpret_cast<const mach_header_64 *>(Hdr);
   auto *Cmd = reinterpret_cast<const load_command *>(Header + 1);
   for (size_t I = 0, IEnd = Header->ncmds; I != IEnd; ++I) {
-    if (Cmd->cmd == LC_SEGMENT) {
-      auto *Seg = reinterpret_cast<const segment_command *>(Cmd);
+    if (Cmd->cmd == LC_SEGMENT_64) {
+      auto *Seg = reinterpret_cast<const segment_command_64 *>(Cmd);
 
       // Look for segment `__TEXT` to compute slide. Note that section and
-      // segment names are not necessarily null-terminated!
+      // segment names are not necessarily null-terminated.
       if (!HasSlide && !strncmp(Seg->segname, "__TEXT", sizeof(Seg->segname))) {
         Slide = HdrAddr - Seg->vmaddr;
         HasSlide = true;
@@ -33,14 +35,13 @@ uint64_t MachO::getSection(const char *SegName, const char *SectName,
           break;
       }
 
-      // Enumerate segment's sections.
+      // Enumerate segment's 64-bit sections.
       if (!HasAddr && !strncmp(Seg->segname, SegName, sizeof(Seg->segname))) {
-        for (auto *Sect = reinterpret_cast<const section *>(Seg + 1),
+        for (auto *Sect = reinterpret_cast<const section_64 *>(Seg + 1),
                   *EndSect = Sect + Seg->nsects;
              Sect != EndSect; ++Sect)
           if (!strncmp(Sect->sectname, SectName, sizeof(Sect->sectname)) &&
               !strncmp(Sect->segname, SegName, sizeof(Sect->segname))) {
-            // We have found it.
             if (Size)
               *Size = Sect->size;
             Addr = Sect->addr;
@@ -51,7 +52,7 @@ uint64_t MachO::getSection(const char *SegName, const char *SectName,
       }
     }
 
-    // Move to the next `load_command`.
+    // Move to the next load_command.
     Cmd = reinterpret_cast<const load_command *>(bytes(Cmd) + Cmd->cmdsize);
   }
 
@@ -74,8 +75,10 @@ struct method_list_t {
   method_t methods[0];
 };
 
-constexpr int FAST_DATA_MASK = 0xfffffffcUL;
-constexpr int RW_REALIZED = 1 << 31;
+// class_data_bits_t stores flags in the low bits of the class data pointer.
+// The old 0xfffffffc constant discarded the upper half of every ARM64 pointer.
+constexpr uintptr_t FAST_DATA_MASK = ~uintptr_t(0x7);
+constexpr uint32_t RW_REALIZED = uint32_t(1) << 31;
 
 struct class_ro_t {
   uint32_t flags;
@@ -106,7 +109,7 @@ private:
   };
 
   bool hasArray() const { return arrayAndFlag & 1; }
-  array_t *array() { return (array_t *)(arrayAndFlag & ~1); }
+  array_t *array() { return (array_t *)(arrayAndFlag & ~uintptr_t(1)); }
 
 public:
   List **beginLists() {
@@ -156,7 +159,8 @@ struct objc_class {
   class_ro_t *info;
 
   class_rw_t *data() {
-    return (class_rw_t *)((uintptr_t)info & FAST_DATA_MASK);
+    return reinterpret_cast<class_rw_t *>(
+        reinterpret_cast<uintptr_t>(info) & FAST_DATA_MASK);
   }
   bool isRealized() { return data()->flags & RW_REALIZED; }
   const class_ro_t *getInfo() { return isRealized() ? data()->ro : info; }
@@ -208,7 +212,10 @@ static method_t *findMethodImpl(method_list_t *Methods, uint64_t Addr) {
 }
 
 static method_t *findMethodImpl(objc_class *Class, uint64_t Addr) {
-  // TODO: Isn't this first part redundant for realized classes?
+  if (!Class)
+    return nullptr;
+  // TODO: Support modern relative/small method lists explicitly. Until then,
+  // this path only interprets the full pointer-width method_t representation.
   if (method_t *M = findMethodImpl(Class->getInfo()->baseMethodList, Addr))
     return M;
   if (Class->isRealized())
@@ -229,8 +236,9 @@ ObjCMethod MachO::findMethod(const char *Section, uint64_t Addr) {
       objc_class *Class = Classes[I];
       if (method_t *M = findMethodImpl(Class, Addr))
         return ObjCMethod(/* Category */ false, Class, M);
-      if (method_t *M = findMethodImpl(Class->isa, Addr))
-        return ObjCMethod(/* Category */ false, Class->isa, M);
+      if (Class && Class->isa)
+        if (method_t *M = findMethodImpl(Class->isa, Addr))
+          return ObjCMethod(/* Category */ false, Class->isa, M);
     }
   return ObjCMethod();
 }
