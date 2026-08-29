@@ -14,22 +14,24 @@ scope:
   - src/IpaSimulator/DarwinKernelSmoke.cpp
   - src/IpaSimulator/DarwinTimeBridge.cpp
   - src/IpaSimulator/DarwinTimeSmoke.cpp
+  - src/IpaSimulator/DynamicLoader.cpp
   - src/IpaSimulator/SysTranslator.cpp
 
 branch: feature/darwin-continuous-time
 started_utc: 2026-08-29T19:36:00Z
-updated_utc: 2026-08-29T20:58:00Z
+updated_utc: 2026-08-29T21:18:00Z
 base_sha: 22d7b343467f322e0dd6e1358717f75421504b42
 expected_pr: draft #4
 
 next_checkpoint: >-
-  Validate the continuous-time boundary through public CI and keep the kernel
-  semantic smoke honest by reading guest-visible errno through the Darwin
-  __error export instead of the smoke executable's separate CRT state.
+  Validate the continuous-time boundary and the direct Darwin host bridge
+  install-name resolution through both public Windows workflows.
 
 notes: >-
-  Scope includes the narrow CMake timing link, PR diagnostic workflow, and
-  DarwinKernelSmoke correction exposed by CI. The host csops boundary already
-  reports unsupported semantics and sets its own thread-local errno; the smoke
-  must inspect that state through the exported Darwin __error ABI. Public,
-  target-neutral compatibility work only; no private application data is included.
+  Scope includes the narrow CMake timing link, PR diagnostic workflow,
+  DarwinKernelSmoke correction exposed by CI, and DynamicLoader host-bridge
+  path resolution exposed by the synthetic bootstrap IPA. The direct
+  IpaSimDarwinHost.dll install name and the simulator libsystem host install
+  names designate the same native boundary and resolve beside the ipaSim
+  executable rather than through RuntimeRoot or the process working directory.
+  Public, target-neutral compatibility work only; no private application data is included.
