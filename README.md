@@ -91,6 +91,12 @@ The persistent PR-comment collector currently applies specifically to the **x64 
 
 Public diagnostic comments and public bug reports must remain target-neutral. Use the repository-generated synthetic IPAs and public smoke tests for reproduction; do not upload private IPAs, RuntimeRoot contents, private application names, paths, screenshots, or private application logs.
 
+### AI coding agents
+
+[`AGENTS.md`](AGENTS.md) is the canonical instruction set for autonomous and AI-assisted coding work in this repository. Changes under `src/IpaSimulator/` also follow the scoped [`src/IpaSimulator/AGENTS.md`](src/IpaSimulator/AGENTS.md).
+
+Tool-specific entry files exist only to route major coding assistants into those same rules: [`CLAUDE.md`](CLAUDE.md), [`GEMINI.md`](GEMINI.md), and [`.github/copilot-instructions.md`](.github/copilot-instructions.md). Keep policy in `AGENTS.md` rather than duplicating divergent versions for each tool.
+
 ### Contributing
 
 This repository is public and accepts pull requests from forks. You do not need collaborator access.
