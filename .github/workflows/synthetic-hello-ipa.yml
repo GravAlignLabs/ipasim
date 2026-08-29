@@ -15,6 +15,8 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   build-ios-fixtures:
@@ -239,12 +241,135 @@ jobs:
           path: synthetic
 
       - name: Configure and build ipaSim probe
+        id: synthetic_probe_build
+        continue-on-error: true
         shell: pwsh
         run: |
-          cmake -S . -B build -G Ninja
-          cmake --build build --target config-ipaSim-x64-Release -- -v
-          cmake --build build\ipaSim-x64-Release --target Arm64Smoke -- -v
-          cmake --build build\ipaSim-x64-Release --target IpaProbe -- -v
+          $log = Join-Path $env:RUNNER_TEMP 'synthetic-build-ipasim.log'
+          New-Item -ItemType File -Path $log -Force | Out-Null
+
+          function Invoke-CapturedCmake {
+            param([string[]]$CmakeArgs)
+
+            $commandLine = 'cmake ' + ($CmakeArgs -join ' ')
+            Write-Host "==> $commandLine"
+            "==> $commandLine" | Out-File -FilePath $log -Append -Encoding utf8
+
+            $lines = @(& cmake @CmakeArgs 2>&1)
+            $exitCode = $LASTEXITCODE
+            foreach ($line in $lines) {
+              $text = "$line"
+              Write-Host $text
+              $text | Out-File -FilePath $log -Append -Encoding utf8
+            }
+
+            if ($exitCode -ne 0) {
+              exit $exitCode
+            }
+          }
+
+          Invoke-CapturedCmake @('-S', '.', '-B', 'build', '-G', 'Ninja')
+          Invoke-CapturedCmake @('--build', 'build', '--target', 'config-ipaSim-x64-Release', '--', '-v')
+          Invoke-CapturedCmake @('--build', 'build\ipaSim-x64-Release', '--target', 'Arm64Smoke', '--', '-v')
+          Invoke-CapturedCmake @('--build', 'build\ipaSim-x64-Release', '--target', 'IpaProbe', '--', '-v')
+
+      - name: Publish synthetic build diagnostic
+        if: steps.synthetic_probe_build.outcome == 'failure' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          SYNTHETIC_BUILD_LOG: ${{ runner.temp }}/synthetic-build-ipasim.log
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ipasim-synthetic-build-diagnostic -->';
+            const logPath = process.env.SYNTHETIC_BUILD_LOG;
+
+            let lines = [];
+            if (logPath && fs.existsSync(logPath)) {
+              lines = fs.readFileSync(logPath, 'utf8').split(/\r?\n/);
+            }
+
+            const match = /(^FAILED:)|\bFAIL:|missing export:|error:|fatal error|LNK[0-9]+|undefined reference|unresolved external|duplicate symbol|linker command failed|ninja: build stopped|CMake Error/i;
+            const highSignal = lines.filter(line => match.test(line)).slice(0, 80);
+            const tail = lines.slice(-160);
+            if (highSignal.length === 0 && tail.length === 0) {
+              tail.push('Synthetic ipaSim build failed, but the captured log was empty.');
+            }
+
+            const headSha = context.payload.pull_request.head.sha;
+            const body = [
+              marker,
+              '## Synthetic iOS IPA build diagnostic',
+              '',
+              `Commit: \`${headSha}\``,
+              '',
+              ...(highSignal.length > 0 ? [
+                '### High-signal diagnostics',
+                '```text',
+                ...highSignal,
+                '```',
+                ''
+              ] : []),
+              '### Failure log tail',
+              '```text',
+              ...tail,
+              '```'
+            ].join('\n').slice(0, 60000);
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+            const existing = comments.find(comment => comment.body && comment.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+            console.log(body);
+
+      - name: Stop after failed synthetic probe build
+        if: steps.synthetic_probe_build.outcome == 'failure'
+        shell: pwsh
+        run: |
+          Write-Error 'Synthetic ipaSim probe build failed. See the PR diagnostic comment above.'
+          exit 1
+
+      - name: Resolve stale synthetic build diagnostic
+        if: steps.synthetic_probe_build.outcome == 'success' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- ipasim-synthetic-build-diagnostic -->';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+            const existing = comments.find(comment => comment.body && comment.body.includes(marker));
+            if (!existing) return;
+
+            const headSha = context.payload.pull_request.head.sha;
+            const body = [
+              marker,
+              '## Synthetic iOS IPA build diagnostic',
+              '',
+              `Resolved by commit \`${headSha}\`.`,
+              '',
+              'The configure/probe build now succeeds; there is no current synthetic build diagnostic.'
+            ].join('\n');
+            await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            console.log(body);
 
       - name: Verify raw AArch64 execution
         shell: pwsh
