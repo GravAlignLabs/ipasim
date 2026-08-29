@@ -4,12 +4,12 @@
 >
 > This repository is a fork of [`ipasimulator/ipasim`](https://github.com/ipasimulator/ipasim). The original project and research remain the foundation of this work. This fork is extending ipaSim toward modern 64-bit ARM64 iOS applications while preserving explicit diagnostics for behavior that is not yet implemented.
 
-[![Synthetic iOS IPA on Windows](https://github.com/GravAlignLabs/ipasim/actions/workflows/synthetic-hello-ipa.yml/badge.svg?branch=feature%2Farm64-ios-compatibility)](https://github.com/GravAlignLabs/ipasim/actions/workflows/synthetic-hello-ipa.yml)
-[![Windows ARM64 Core](https://github.com/GravAlignLabs/ipasim/actions/workflows/windows-arm64-core.yml/badge.svg?branch=feature%2Farm64-ios-compatibility)](https://github.com/GravAlignLabs/ipasim/actions/workflows/windows-arm64-core.yml)
+[![Synthetic iOS IPA on Windows](https://github.com/GravAlignLabs/ipasim/actions/workflows/synthetic-hello-ipa.yml/badge.svg?branch=master)](https://github.com/GravAlignLabs/ipasim/actions/workflows/synthetic-hello-ipa.yml)
+[![Windows ARM64 Core](https://github.com/GravAlignLabs/ipasim/actions/workflows/windows-arm64-core.yml/badge.svg?branch=master)](https://github.com/GravAlignLabs/ipasim/actions/workflows/windows-arm64-core.yml)
 
 ## Current ARM64 work
 
-The active development work is tracked in [ARM64 + modern dyld foundation for iOS compatibility](https://github.com/GravAlignLabs/ipasim/pull/3).
+The modern ARM64 foundation was merged through [PR #3: ARM64 + modern dyld foundation for iOS compatibility](https://github.com/GravAlignLabs/ipasim/pull/3), which preserves 16 substantive engineering milestones across the loader, runtime translation, Darwin compatibility services, testing, and CI. Current work continues from `master`.
 
 Current areas of work include:
 
@@ -39,6 +39,57 @@ Run public validation in this order:
 3. Optional local testing with another IPA only after the public synthetic/core tests are understood
 
 If you find a compatibility problem, prefer adding or extending a small synthetic reproduction that can live in this repository. That keeps debugging reproducible for everyone.
+
+### PR-based CI diagnostic loop
+
+The Windows ARM64 Core workflow is designed so a failed build leaves a useful diagnostic directly on the pull request instead of forcing contributors to hunt through a long Actions log.
+
+For the x64 ARM64 emulator-core build, CI currently uses this sequence:
+
+1. Run the verbose CMake/Ninja build with `continue-on-error` long enough to capture its complete output into a temporary log.
+2. Preserve the real process exit code; the failure is never converted into success.
+3. Extract the first useful compiler/linker/build diagnostics, including `FAILED:`, compiler errors, fatal errors, MSVC `LNK` failures, undefined or unresolved symbols, linker failures, Ninja stops, CMake errors, and named semantic-smoke diagnostics.
+4. Keep the first 80 matching diagnostic lines. If no known pattern matches, fall back to the last 120 log lines so an unexpected failure still has context.
+5. Write the same diagnostic into the GitHub Actions step summary.
+6. On a pull request, publish it to one persistent PR comment containing the hidden marker `<!-- ipasim-core-build-diagnostic -->` and the exact commit SHA that failed.
+7. On later pushes, find that marker and **update the existing comment** rather than creating another diagnostic comment. The PR therefore has one current failure report instead of a trail of stale duplicates.
+8. After the diagnostic has been published, a separate step exits with failure normally. The GitHub check stays red, so diagnostic reporting cannot hide or suppress a broken build.
+9. If a newer commit is pushed while an older run is still executing, Actions cancels the obsolete run through workflow concurrency so CI focuses on the newest checkpoint.
+
+Conceptually, the loop is:
+
+```text
+push to PR
+   |
+   v
+build/test
+   |
+   +---- success --------------------> green check
+   |
+   +---- failure
+           |
+           v
+      capture full log
+           |
+           v
+      isolate useful diagnostic
+           |
+           v
+      create/update ONE PR comment
+      with failing commit SHA
+           |
+           v
+      fail workflow normally
+           |
+           v
+        red check
+```
+
+This gives contributors two failure surfaces at the same time: the normal GitHub Actions log for complete detail and a compact, automatically refreshed PR diagnostic for the first actionable error.
+
+The persistent PR-comment collector currently applies specifically to the **x64 ARM64 emulator-core build** in `windows-arm64-core.yml`. Other smoke/test stages still expose failures through their normal Actions logs until the same collector pattern is extended to them. That distinction is intentional: the README should describe what CI actually guarantees today, not what it may support later.
+
+Public diagnostic comments and public bug reports must remain target-neutral. Use the repository-generated synthetic IPAs and public smoke tests for reproduction; do not upload private IPAs, RuntimeRoot contents, private application names, paths, screenshots, or private application logs.
 
 ### Contributing
 
