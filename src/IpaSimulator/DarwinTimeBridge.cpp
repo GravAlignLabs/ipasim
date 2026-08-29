@@ -1,17 +1,11 @@
-// DarwinTimeBridge.cpp: Darwin wall-clock, continuous monotonic time, and
-// process-lifetime alloc-once ABIs backed by explicit Windows semantics.
+// DarwinTimeBridge.cpp: Darwin wall-clock and process-lifetime alloc-once ABIs
+// backed by explicit Windows semantics.
 //
 // libsystem_kernel exports __gettimeofday as the traditional two-argument
 // entry point. On current Darwin the assembly wrapper deliberately clears the
 // newer third mach-absolute-time syscall argument, so the externally visible
 // ABI remains (timeval *, timezone *). Keep that ABI exact here instead of
 // forwarding to a Windows CRT structure whose field widths differ from Darwin.
-//
-// mach_continuous_time advances across system sleep. Windows biased interrupt
-// time has the same observable property and QueryInterruptTimePrecise exposes
-// it in stable 100-nanosecond units. mach_timebase_info therefore reports the
-// exact 100 ns -> 1 ns conversion as numer=100, denom=1 so guest conversion is
-// coherent with the ticks returned by mach_continuous_time.
 //
 // libsystem_platform exports _os_alloc_once. Apple implements it as a
 // process-lifetime allocator guarded by an os_once_t: the allocation is
@@ -56,47 +50,9 @@ struct DarwinTimezone {
 static_assert(sizeof(DarwinTimezone) == 8,
               "Darwin timezone ABI layout changed unexpectedly");
 
-struct DarwinMachTimebaseInfo {
-  std::uint32_t Numer;
-  std::uint32_t Denom;
-};
-static_assert(sizeof(DarwinMachTimebaseInfo) == 8,
-              "Darwin mach_timebase_info_data_t layout changed unexpectedly");
-
 constexpr std::uint64_t WindowsToUnixEpoch100ns = 116444736000000000ULL;
 constexpr std::uint64_t Ticks100nsPerSecond = 10000000ULL;
 constexpr std::uint64_t Ticks100nsPerMicrosecond = 10ULL;
-constexpr std::uint32_t ContinuousTimeNumer = 100;
-constexpr std::uint32_t ContinuousTimeDenom = 1;
-constexpr int DarwinKernSuccess = 0;
-constexpr int DarwinKernInvalidArgument = 4;
-
-[[noreturn]] void failFastContinuousTime(const char *Reason) {
-  std::fprintf(stderr, "[darwin-host-continuous-time] %s\n", Reason);
-  std::fflush(stderr);
-  RaiseFailFastException(nullptr, nullptr, 0);
-  TerminateProcess(GetCurrentProcess(), 0xC0000409u);
-  std::abort();
-}
-
-std::uint64_t currentContinuousTime100ns() {
-  using QueryInterruptTimePreciseFn = void(WINAPI *)(PULONGLONG);
-  static QueryInterruptTimePreciseFn QueryPrecise = []() {
-    HMODULE Kernel = GetModuleHandleW(L"kernel32.dll");
-    if (!Kernel)
-      return static_cast<QueryInterruptTimePreciseFn>(nullptr);
-    return reinterpret_cast<QueryInterruptTimePreciseFn>(
-        GetProcAddress(Kernel, "QueryInterruptTimePrecise"));
-  }();
-
-  if (!QueryPrecise)
-    failFastContinuousTime(
-        "QueryInterruptTimePrecise is unavailable on this Windows host");
-
-  ULONGLONG Value = 0;
-  QueryPrecise(&Value);
-  return static_cast<std::uint64_t>(Value);
-}
 
 bool currentUnixTime(DarwinTimeval &Value) {
   FILETIME FileTime{};
@@ -289,20 +245,6 @@ __gettimeofday(DarwinTimeval *TimeValue, DarwinTimezone *Timezone) {
   if (Timezone && !currentTimezone(*Timezone))
     return -1;
   return 0;
-}
-
-extern "C" __declspec(dllexport) std::uint64_t mach_continuous_time() {
-  return currentContinuousTime100ns();
-}
-
-extern "C" __declspec(dllexport) int
-mach_timebase_info(DarwinMachTimebaseInfo *Info) {
-  if (!Info)
-    return DarwinKernInvalidArgument;
-
-  Info->Numer = ContinuousTimeNumer;
-  Info->Denom = ContinuousTimeDenom;
-  return DarwinKernSuccess;
 }
 
 // Mach-O symbol __os_alloc_once is normalized by ipaSim to the PE export

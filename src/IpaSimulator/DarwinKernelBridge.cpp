@@ -47,6 +47,15 @@ constexpr std::size_t DarwinMaxComLen = 16;
 constexpr std::uint32_t DarwinFdTypeVnode = 1;
 constexpr std::uint32_t DarwinFdTypeSocket = 2;
 constexpr std::uint64_t WindowsToUnixEpoch100ns = 116444736000000000ULL;
+constexpr std::uint32_t ContinuousTimeNumer = 100;
+constexpr std::uint32_t ContinuousTimeDenom = 1;
+
+struct DarwinMachTimebaseInfo {
+  std::uint32_t Numer;
+  std::uint32_t Denom;
+};
+static_assert(sizeof(DarwinMachTimebaseInfo) == 8,
+              "Darwin mach_timebase_info_data_t layout changed unexpectedly");
 
 struct DarwinProcBsdInfo {
   std::uint32_t Flags;
@@ -512,11 +521,21 @@ extern "C" {
 
 // Darwin's mach_continuous_time is a monotonic boot-relative clock that keeps
 // advancing while the machine sleeps. QueryInterruptTimePrecise provides the
-// matching Windows property in 100ns ticks.
+// matching Windows property in 100ns ticks. Keep mach_timebase_info coherent
+// with those ticks: each returned tick represents exactly 100 nanoseconds.
 __declspec(dllexport) std::uint64_t mach_continuous_time(void) {
   ULONGLONG Ticks = 0;
   QueryInterruptTimePrecise(&Ticks);
   return static_cast<std::uint64_t>(Ticks);
+}
+
+__declspec(dllexport) std::int32_t
+mach_timebase_info(DarwinMachTimebaseInfo *Info) {
+  if (!Info)
+    return ipasim::mach::KernelInvalidArgument;
+  Info->Numer = ContinuousTimeNumer;
+  Info->Denom = ContinuousTimeDenom;
+  return ipasim::mach::KernelSuccess;
 }
 
 // vm_page_size is exported as data by libsystem_kernel. Keep it aligned with the
