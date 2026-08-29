@@ -1,0 +1,24 @@
+# Copy this file to .github/agent-work/<short-scope-slug>.yml.
+# Claims are public coordination metadata. Do not include private application data.
+
+status: active
+owner: github-login-or-maintainer
+agent: coding-agent-or-human
+
+task: >-
+  One narrow, independently mergeable compatibility boundary.
+
+scope:
+  - src/IpaSimulator/example.cpp
+
+branch: feature/short-scope-slug
+started_utc: YYYY-MM-DDTHH:MM:SSZ
+updated_utc: YYYY-MM-DDTHH:MM:SSZ
+base_sha: full-master-sha-used-to-start-work
+expected_pr: draft-or-tbd
+
+next_checkpoint: >-
+  The next concrete test, implementation boundary, or PR checkpoint expected.
+
+notes: >-
+  Public, target-neutral coordination notes only.

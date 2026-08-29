@@ -81,6 +81,33 @@ merge to master when green
 next branch starts from updated master
 ```
 
+## Work claims and agent coordination
+
+Before beginning a substantial compatibility increment, inspect `.github/agent-work/` and open/draft PRs for overlapping work.
+
+For agents or maintainers with trusted write access to this repository:
+
+1. Create one narrow claim file at `.github/agent-work/<short-scope-slug>.yml` using `.github/agent-work/CLAIM_TEMPLATE.yml`.
+2. Commit that claim directly to `master` as a **metadata-only** coordination commit such as `claim: mach_msg2 ABI`.
+3. Do not include source-code changes in a claim commit.
+4. Create the feature branch from the newly updated `master`, so the branch includes its own claim.
+5. Implement and test the real change on that branch.
+6. Open a focused PR as soon as the increment is coherent.
+7. Delete the claim file in the implementation PR so the claim disappears when the work merges.
+8. Start any follow-on boundary from the newly updated `master` with a new claim.
+
+This is the one intentional exception to the normal “implementation through PRs” rule: a tiny direct-to-`master` commit may be used to publish **coordination metadata only**. It must never be used to bypass review or CI for source changes.
+
+If work lasts more than 72 hours, update the claim's `updated_utc` and `next_checkpoint` with a small metadata-only `claim update: <slug>` commit. A claim is considered stale after **7 days without an update** and must not reserve a subsystem indefinitely. Before taking over stale work, check for recent branch or PR activity. Maintainers may remove abandoned stale claims.
+
+If work is abandoned intentionally, delete its claim with a small `release claim: <slug>` metadata commit.
+
+Contributors without direct `master` write access should not be granted write access just to create claims. They should check existing claims, open a draft PR immediately for the narrow boundary they intend to work on, and use that draft PR as the public claim until a maintainer decides whether a claim file should be landed.
+
+Claims are public. Never include private application names, bundle identifiers, paths, RuntimeRoot contents, logs, screenshots, or binary fingerprints. Describe the emulator boundary generically.
+
+See `.github/agent-work/README.md` for the full claim lifecycle.
+
 ## Public validation order
 
 Run these in order:
@@ -144,6 +171,7 @@ Do not copy assumptions blindly. touchHLE targets a different iOS era and archit
 - Do not merge private acceptance data into public history.
 - When one increment is ready, merge it; do not keep adding unrelated future work to the same PR.
 - Continue unfinished work in a follow-up PR based on the newly updated `master`.
+- For non-trivial agent work, identify the active claim in the PR and remove that claim as part of the merge.
 
 ## Privacy boundary
 

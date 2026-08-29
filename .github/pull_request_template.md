@@ -2,6 +2,13 @@
 
 Describe the specific loader, ABI, Darwin/Windows semantic, runtime, test, or CI boundary this PR advances.
 
+## Work claim / coordination
+
+- Claim file: `.github/agent-work/<scope>.yml` or `N/A` for trivial/non-overlapping work.
+- [ ] I checked active claim files and open/draft PRs before starting substantial work.
+- [ ] If this work has a claim file, this PR removes that claim when the increment lands.
+- [ ] If I do not have direct `master` write access, this draft/open PR itself clearly communicates the narrow work scope so other contributors can avoid duplicating it.
+
 ## What this increment delivers
 
 Explain the independently useful behavior that is ready to return to `master` now. Do not make completion of the entire emulator, framework stack, or application compatibility effort a prerequisite for merging this increment.
