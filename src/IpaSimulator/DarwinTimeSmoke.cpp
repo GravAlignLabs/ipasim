@@ -248,24 +248,11 @@ int main(int ArgC, char **ArgV) {
     return 26;
   }
 
-  using QueryInterruptTimePreciseFn = void(WINAPI *)(PULONGLONG);
-  HMODULE Kernel = GetModuleHandleW(L"kernel32.dll");
-  auto QueryPrecise = Kernel ? reinterpret_cast<QueryInterruptTimePreciseFn>(
-                                   GetProcAddress(Kernel,
-                                                  "QueryInterruptTimePrecise"))
-                             : nullptr;
-  if (!QueryPrecise) {
-    std::fprintf(stderr,
-                 "[darwin-time-smoke] Windows QueryInterruptTimePrecise was unavailable\n");
-    FreeLibrary(DarwinHost);
-    return 27;
-  }
-
   ULONGLONG ContinuousBefore = 0;
   ULONGLONG ContinuousAfter = 0;
-  QueryPrecise(&ContinuousBefore);
+  QueryInterruptTimePrecise(&ContinuousBefore);
   const std::uint64_t DarwinContinuous = ContinuousTime();
-  QueryPrecise(&ContinuousAfter);
+  QueryInterruptTimePrecise(&ContinuousAfter);
   if (DarwinContinuous < ContinuousBefore ||
       DarwinContinuous > ContinuousAfter) {
     std::fprintf(stderr,
