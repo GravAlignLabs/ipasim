@@ -746,7 +746,7 @@ LogStream::Handler DynamicLoader::dumpAddr(uint64_t Addr) {
 static LogStream::Handler dumpAddrImpl(uint64_t Addr, const LibraryInfo &LI) {
   return [Addr, &LI](LogStream &S) {
     uint64_t RVA = Addr - LI.Lib->StartAddress;
-    S << *LI.LibPath << "+0x" << to_hex_string(Addr);
+    S << *LI.LibPath << "+0x" << to_hex_string(RVA);
   };
 }
 
