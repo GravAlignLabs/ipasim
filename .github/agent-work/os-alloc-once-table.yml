@@ -1,0 +1,23 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Implement the Darwin _os_alloc_once_table data-symbol compatibility boundary.
+
+scope:
+  - src/IpaSimulator/DarwinHostCompatBridge.cpp
+  - src/IpaSimulator/DarwinHostBridge.def
+  - src/IpaSimulator/DarwinKernelSmoke.cpp
+
+branch: compat-os-alloc-once-table
+started_utc: 2026-08-29T21:49:14Z
+updated_utc: 2026-08-29T21:49:14Z
+base_sha: 2db27aa08e608edce5a607294eed58fc93bc590c
+expected_pr: tbd
+
+next_checkpoint: >-
+  Validate the data export and writable process-lifetime table semantics in public CI.
+
+notes: >-
+  Target-neutral Darwin host-bridge compatibility work based on public XNU semantics.
