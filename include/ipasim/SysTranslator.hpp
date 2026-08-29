@@ -13,30 +13,19 @@
 
 namespace ipasim {
 
-// Represents the layer in our emulator that translates function calls between
-// the host (native libraries) and the guest (emulated libraries). It also
-// controls the whole execution in order to be able to do its job.
 class SysTranslator {
 public:
   SysTranslator(DynamicLoader &Dyld, Emulator &Emu)
       : Dyld(Dyld), Emu(Emu), Restart(false), Continue(false),
         RestartFromLRs(false) {}
-  // Starts executing the given library loaded by our `DynamicLoader`. The
-  // library is initialized before `SysTranslator` starts executing its
-  // entrypoint.
   void execute(LoadedLibrary *Lib);
-  // Starts execution at the specified address.
   void execute(uint64_t Addr);
-  // Translates the given function pointer. It must point to an Objective-C
-  // method. Returns a pointer to native function (a trampoline in case `FP`
-  // pointed to an emulated function).
   void *translate(void *FP);
-  // Like `translate(void *)` but works for non-Objective-C methods, as well.
-  // The signature of the function must consist of only 32-bit-wide arguments,
-  // their number is specified by `ArgC`. Similarly, the function can only
-  // return a 32-bit-wide value or `void` (specified by `Returns`).
+  // This overload is intentionally limited to the AAPCS64 integer/pointer
+  // register class. FP/SIMD and aggregate calls require a separate real ABI
+  // implementation and are never coerced into integer registers.
   void *translate(void *FP, size_t ArgC, bool Returns = false);
-  // Dynamically calls a function from a library.
+
   template <typename... Args>
   void call(const std::string &Lib, const std::string &Func,
             Args &&... Params) {
@@ -54,80 +43,73 @@ public:
     auto *Ptr = reinterpret_cast<void (*)(Args...)>(Addr);
     Ptr(std::forward<Args>(Params)...);
   }
-  // Calls a function that can potentially be emulated. Argument types can only
-  // be simple ones, i.e. have size 32-bit.
+
   template <typename... ArgTys> void callBack(void *FP, ArgTys... Args);
-  // Like `callBack` but also returns a 32-bit-wide value.
   template <typename... ArgTys> void *callBackR(void *FP, ArgTys... Args);
 
 private:
-  // Emulator hooks
   bool handleFetchProtMem(uc_mem_type Type, uint64_t Addr, int Size,
                           int64_t Value);
   void handleCode(uint64_t Addr, uint32_t Size);
   bool handleMemWrite(uc_mem_type Type, uint64_t Addr, int Size, int64_t Value);
   bool handleMemUnmapped(uc_mem_type Type, uint64_t Addr, int Size,
                          int64_t Value);
-  // Trampoline helpers
   void *createTrampoline(void *Addr, size_t ArgC, bool Returns);
   void handleTrampoline(void *Ret, void **Args, void *Data);
   static void handleTrampolineStatic(ffi_cif *, void *Ret, void **Args,
                                      void *Data);
-  // Execution control
   void returnToKernel();
   void returnToEmulation();
   void continueOutsideEmulation(std::function<void()> &&Cont);
 
   static constexpr ConstexprString WrapsPrefix = "$__ipaSim_wraps_";
-  // TODO: Don't hardcode this.
-  static constexpr uint64_t DLLBase = 0x1000; // Standard DLL base address
+  static constexpr uint64_t DLLBase = 0x1000;
   DynamicLoader &Dyld;
   Emulator &Emu;
-  std::stack<uint32_t> LRs;               // Stack of return addresses
-  bool Restart, Continue, RestartFromLRs; // See `execute(uint64_t)`.
-  std::function<void()> Continuation;     // See `continueOutsideEmulation`.
+  std::stack<uint64_t> LRs;
+  bool Restart, Continue, RestartFromLRs;
+  std::function<void()> Continuation;
 };
 
-// Represents a dynamic call from the guest (emulated) into the host (native).
 class DynamicCaller {
 public:
   DynamicCaller(Emulator &Emu)
-      : Emu(Emu), RegId(UC_ARM_REG_R0), SP(Emu.readReg(UC_ARM_REG_SP)) {}
+      : Emu(Emu), RegId(UC_ARM64_REG_X0),
+        SP(Emu.readReg(UC_ARM64_REG_SP)) {}
   void loadArg(size_t Size);
-  bool call(bool Returns, uint32_t Addr);
+  bool call(bool Returns, uint64_t Addr);
 
 private:
-  template <size_t N> void call(bool Returns, uint32_t Addr) {
+  template <size_t N> void call(bool Returns, uint64_t Addr) {
     if (Returns)
       call<N, N, true>(Addr);
     else
       call<N, N, false>(Addr);
   }
   template <size_t N, size_t C, bool Returns, typename... ArgTys>
-  void call(uint32_t Addr, ArgTys... Params) {
+  void call(uint64_t Addr, ArgTys... Params) {
     if constexpr (N > 0)
-      call<N - 1, C, Returns, ArgTys..., uint32_t>(Addr, Params...,
+      call<N - 1, C, Returns, ArgTys..., uint64_t>(Addr, Params...,
                                                    Args[C - N]);
     else
       call<Returns, ArgTys...>(Addr, Params...);
   }
   template <bool Returns, typename... ArgTys>
-  void call(uint32_t Addr, ArgTys... Params) {
+  void call(uint64_t Addr, ArgTys... Params) {
     if constexpr (Returns) {
-      uint32_t RetVal =
-          reinterpret_cast<uint32_t (*)(ArgTys...)>(Addr)(Params...);
-      Emu.writeReg(UC_ARM_REG_R0, RetVal);
+      uint64_t RetVal =
+          reinterpret_cast<uint64_t (*)(ArgTys...)>(Addr)(Params...);
+      Emu.writeReg(UC_ARM64_REG_X0, RetVal);
     } else
       reinterpret_cast<void (*)(ArgTys...)>(Addr)(Params...);
   }
 
   Emulator &Emu;
-  uc_arm_reg RegId;
-  uint32_t SP;
-  std::vector<uint32_t> Args;
+  int RegId;
+  uint64_t SP;
+  std::vector<uint64_t> Args;
 };
 
-// Represents a dynamic call from the host (native) into the guest (emulated).
 class DynamicBackCaller {
 public:
   DynamicBackCaller(DynamicLoader &Dyld, Emulator &Emu, SysTranslator &Sys)
@@ -138,42 +120,47 @@ public:
     uint64_t Addr = reinterpret_cast<uint64_t>(FP);
     LibraryInfo LI(Dyld.lookup(Addr));
     if (!LI.Lib || LI.Lib->isDLL()) {
-      // Target load method is not inside any emulated Dylib, so it must be
-      // native executable code and we can simply call it.
       return reinterpret_cast<RetTy (*)(ArgTys...)>(FP)(Args...);
     } else {
-      // Target load method is inside some emulated library.
-      pushArgs<UC_ARM_REG_R0>(Args...);
+      pushArgs<UC_ARM64_REG_X0>(Args...);
       Sys.execute(Addr);
 
-      // Fetch return value.
       if constexpr (!std::is_same_v<RetTy, void>)
-        return reinterpret_cast<RetTy>(Emu.readReg(UC_ARM_REG_R0));
+        return reinterpret_cast<RetTy>(Emu.readReg(UC_ARM64_REG_X0));
     }
   }
 
 private:
-  template <uc_arm_reg RegId> void pushArgs() {}
-  template <uc_arm_reg RegId, typename... ArgTys>
+  template <int RegId> void pushArgs() {}
+  template <int RegId, typename... ArgTys>
   void pushArgs(void *Arg, ArgTys... Args) {
     using namespace ipasim;
 
-    static_assert(UC_ARM_REG_R0 <= RegId && RegId <= UC_ARM_REG_R3,
+    static_assert(UC_ARM64_REG_X0 <= RegId && RegId <= UC_ARM64_REG_X7,
                   "Callback has too many arguments.");
-    Emu.writeReg(RegId, reinterpret_cast<uint32_t>(Arg));
+    Emu.writeReg(RegId, reinterpret_cast<uint64_t>(Arg));
     pushArgs<RegId + 1>(Args...);
   }
 
   DynamicLoader &Dyld;
   Emulator &Emu;
   SysTranslator &Sys;
-  std::vector<uint32_t> Args;
 };
 
-// Helper class for decoding Objective-C's type encodings.
+// Helper for Objective-C type encodings used by the dynamic bridge. The old
+// implementation reduces types to byte sizes, which is only valid for the
+// AAPCS64 integer/pointer class. Validate the full signature here first so FP,
+// vector and by-value aggregate types cannot silently enter X registers.
 class TypeDecoder {
 public:
-  TypeDecoder(const char *T) : T(T) {}
+  TypeDecoder(const char *Encoding) : T(Encoding) {
+    if (Encoding && !isIntegerPointerSignature(Encoding)) {
+      Log.error("Objective-C signature requires unsupported AAPCS64 FP/SIMD/aggregate ABI handling");
+      // Feed the existing decoder an explicitly invalid encoding so every
+      // existing caller fails closed rather than calling with the wrong ABI.
+      T = InvalidEncoding;
+    }
+  }
   size_t getNextTypeSize();
   bool hasNext() { return *T; }
 
@@ -181,12 +168,125 @@ public:
 
 private:
   const char *T;
+  static constexpr const char *InvalidEncoding = "!";
+
+  static void skipQuoted(const char *&P) {
+    if (*P != '"')
+      return;
+    ++P;
+    while (*P && *P != '"')
+      ++P;
+    if (*P == '"')
+      ++P;
+  }
+
+  // Consume one encoded type. `TopLevel` describes the ABI class of the value
+  // itself. Pointees are parsed for syntax but do not affect pointer ABI class.
+  static bool consumeType(const char *&P, bool TopLevel) {
+    while (*P == 'r' || *P == 'n' || *P == 'N' || *P == 'o' ||
+           *P == 'O' || *P == 'R' || *P == 'V')
+      ++P;
+    if (!*P)
+      return false;
+
+    const char C = *P++;
+    switch (C) {
+    case 'v':
+    case 'c':
+    case 'C':
+    case 's':
+    case 'S':
+    case 'i':
+    case 'I':
+    case 'l':
+    case 'L':
+    case 'q':
+    case 'Q':
+    case 'B':
+    case '#':
+    case ':':
+    case '*':
+      return true;
+
+    case '@':
+      if (*P == '?')
+        ++P; // block pointer
+      else if (*P == '"')
+        skipQuoted(P); // typed Objective-C object, e.g. @"NSString"
+      return true;
+
+    case '^':
+      // A pointer itself is integer-class regardless of its pointee.
+      return consumeType(P, false);
+
+    case 'f':
+    case 'd':
+    case 'D':
+      return !TopLevel;
+
+    case 'b':
+      while (*P >= '0' && *P <= '9')
+        ++P;
+      return !TopLevel; // bitfields only occur safely here as pointee members
+
+    case '[': {
+      while (*P >= '0' && *P <= '9')
+        ++P;
+      bool SyntaxOK = consumeType(P, false);
+      if (*P != ']')
+        return false;
+      ++P;
+      return SyntaxOK && !TopLevel;
+    }
+
+    case '{':
+    case '(': {
+      const char Close = C == '{' ? '}' : ')';
+      while (*P && *P != '=' && *P != Close)
+        ++P;
+      if (!*P)
+        return false;
+      if (*P == '=') {
+        ++P;
+        while (*P && *P != Close) {
+          if (*P == '"') {
+            skipQuoted(P); // optional encoded field name
+            continue;
+          }
+          if (!consumeType(P, false))
+            return false;
+        }
+      }
+      if (*P != Close)
+        return false;
+      ++P;
+      return !TopLevel;
+    }
+
+    case '?':
+      return !TopLevel;
+    default:
+      return false;
+    }
+  }
+
+  static bool isIntegerPointerSignature(const char *P) {
+    if (!P)
+      return false;
+    while (*P) {
+      if (!consumeType(P, true))
+        return false;
+      // Objective-C method encodings append decimal stack offsets after each
+      // type, for example v24@0:8. They do not change ABI classification.
+      while (*P >= '0' && *P <= '9')
+        ++P;
+    }
+    return true;
+  }
 
   size_t getNextTypeSizeImpl();
 };
 
-// Implemented here because both definitions of `SysTranslator` and
-// `DynamicBackCaller` are needed.
 template <typename... ArgTys>
 inline void SysTranslator::callBack(void *FP, ArgTys... Args) {
   DynamicBackCaller(Dyld, Emu, *this).callBack<void, ArgTys...>(FP, Args...);
@@ -199,5 +299,4 @@ inline void *SysTranslator::callBackR(void *FP, ArgTys... Args) {
 
 } // namespace ipasim
 
-// !defined(IPASIM_SYS_TRANSLATOR_HPP)
 #endif
