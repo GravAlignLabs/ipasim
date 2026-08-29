@@ -1,0 +1,28 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT-GPT-5.6-Sol
+
+task: >-
+  Implement Darwin mach_continuous_time and mach_timebase_info semantics on the
+  Windows host bridge with coherent ARM64 guest ABI translation and focused
+  semantic smoke coverage.
+
+scope:
+  - src/IpaSimulator/DarwinTimeBridge.cpp
+  - src/IpaSimulator/DarwinTimeSmoke.cpp
+  - src/IpaSimulator/SysTranslator.cpp
+
+branch: feature/darwin-continuous-time
+started_utc: 2026-08-29T19:36:00Z
+updated_utc: 2026-08-29T19:36:00Z
+base_sha: 22d7b343467f322e0dd6e1358717f75421504b42
+expected_pr: draft
+
+next_checkpoint: >-
+  Add sleep-inclusive monotonic continuous-time ticks and a matching timebase,
+  register the ARM64 host-call signatures, extend DarwinTimeSmoke, then open a
+  focused draft PR for public CI validation.
+
+notes: >-
+  Public target-neutral timing compatibility work only. No private application
+  names, paths, binaries, logs, or fingerprints are part of this claim.
