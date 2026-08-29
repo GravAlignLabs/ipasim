@@ -539,6 +539,7 @@ void *SysTranslator::translate(void *FP, size_t ArgC, bool Returns) {
 
   uint64_t Addr = reinterpret_cast<uint64_t>(FP);
   LibraryInfo LI(IpaSim.Dyld.lookup(Addr));
+
   // If `FP` is not in any Dylib, let's assume it's a native function and hence
   // doesn't need translation.
   auto *Dylib = dynamic_cast<LoadedDylib *>(LI.Lib);
