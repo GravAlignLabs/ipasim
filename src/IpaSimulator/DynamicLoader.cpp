@@ -49,6 +49,14 @@ bool isDarwinHostInstallName(const string &Path) {
          Path == "/usr/lib/system/libsystem_pthread.dylib";
 }
 
+bool isDarwinHostDependency(const string &Path) {
+  // Synthetic/bootstrap images can name the Windows bridge directly, while
+  // real simulator libsystem images reach it through their macOS install
+  // names. Both forms designate the same native host boundary and must resolve
+  // independently of the process working directory or RuntimeRoot.
+  return Path == DarwinHostBridgeName || isDarwinHostInstallName(Path);
+}
+
 bool isOptionalDependency(const LIEF::MachO::DylibCommand &Lib) {
   const uint32_t Command = static_cast<uint32_t>(Lib.command());
   return Command == LoadWeakDylibCommand || Command == LazyLoadDylibCommand;
@@ -134,8 +142,8 @@ bool DynamicLoader::setRuntimeRoot(const string &Path) {
 LoadedLibrary *DynamicLoader::load(const string &Path) {
 #if defined(IPASIM_MODERN_CORE)
   const bool IsSystemInstallName = !Path.empty() && Path[0] == '/';
-  const bool IsDarwinHostInstallName = isDarwinHostInstallName(Path);
-  if (IsSystemInstallName && !IsDarwinHostInstallName && RuntimeRoot.empty()) {
+  const bool IsDarwinHostDependency = isDarwinHostDependency(Path);
+  if (IsSystemInstallName && !IsDarwinHostDependency && RuntimeRoot.empty()) {
     Log.error() << "iOS runtime root is not configured for dependency " << Path
                 << Log.end();
     return nullptr;
@@ -170,7 +178,7 @@ LoadedLibrary *DynamicLoader::load(const string &Path) {
   // Check that file exists.
   if (!BP.isFileValid()) {
 #if defined(IPASIM_MODERN_CORE)
-    if (IsDarwinHostInstallName) {
+    if (IsDarwinHostDependency) {
       Log.error() << "Darwin host bridge missing for " << Path << ": "
                   << BP.Path << Log.end();
       return RememberFailure();
@@ -337,20 +345,23 @@ bool DynamicLoader::canSegmentsSlide(LIEF::MachO::Binary &Bin) {
 }
 
 BinaryPath DynamicLoader::resolvePath(const string &Path) {
-  if (!Path.empty() && Path[0] == '/') {
-    // Mach-O system install names normally root at the iOS runtime. Simulator
-    // libsystem_sim_* also imports a small macOS-host libSystem surface; those
-    // explicit install names instead resolve to our native Windows host bridge.
 #if defined(IPASIM_MODERN_CORE)
-    if (isDarwinHostInstallName(Path)) {
-      filesystem::path Base = executableDirectory();
-      if (Base.empty())
-        return BinaryPath{"", /* Relative */ false};
-      filesystem::path Bridge = Base / DarwinHostBridgeName;
-      return BinaryPath{Bridge.lexically_normal().make_preferred().string(),
-                        /* Relative */ false};
-    }
+  // Both simulator host install names and the direct bridge install name map to
+  // the native DLL that ships beside the ipaSim executable. Never make this
+  // host boundary depend on the caller's current working directory.
+  if (isDarwinHostDependency(Path)) {
+    filesystem::path Base = executableDirectory();
+    if (Base.empty())
+      return BinaryPath{"", /* Relative */ false};
+    filesystem::path Bridge = Base / DarwinHostBridgeName;
+    return BinaryPath{Bridge.lexically_normal().make_preferred().string(),
+                      /* Relative */ false};
+  }
+#endif
 
+  if (!Path.empty() && Path[0] == '/') {
+    // Mach-O system install names normally root at the iOS runtime.
+#if defined(IPASIM_MODERN_CORE)
     filesystem::path Relative(Path.substr(1));
     filesystem::path Resolved =
         (filesystem::path(RuntimeRoot) / Relative).lexically_normal();

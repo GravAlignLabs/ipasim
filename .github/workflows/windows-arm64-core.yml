@@ -106,20 +106,24 @@ jobs:
           $lines | Tee-Object -FilePath $log
 
           if ($exitCode -ne 0) {
-            $diagnostic = @(
+            $highSignal = @(
               $lines |
                 ForEach-Object { "$_" } |
-                Where-Object { $_ -match '(^FAILED:)|error:|fatal error|LNK[0-9]+|undefined reference|unresolved external|linker command failed|ninja: build stopped|CMake Error|\[mach-ipc-smoke\]|\[darwin-host-unfair-lock\]' } |
+                Where-Object { $_ -match '(^FAILED:)|\bFAIL:|missing export:|error:|fatal error|LNK[0-9]+|undefined reference|unresolved external|linker command failed|ninja: build stopped|CMake Error' } |
                 Select-Object -First 80
             )
-
-            if ($diagnostic.Count -eq 0) {
-              $diagnostic = @($lines | Select-Object -Last 120)
-            }
+            $tail = @($lines | ForEach-Object { "$_" } | Select-Object -Last 160)
 
             "## ipaSim core build failure" | Add-Content $env:GITHUB_STEP_SUMMARY
+            if ($highSignal.Count -gt 0) {
+              "### High-signal diagnostics" | Add-Content $env:GITHUB_STEP_SUMMARY
+              '```text' | Add-Content $env:GITHUB_STEP_SUMMARY
+              $highSignal | Add-Content $env:GITHUB_STEP_SUMMARY
+              '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+            }
+            "### Failure log tail" | Add-Content $env:GITHUB_STEP_SUMMARY
             '```text' | Add-Content $env:GITHUB_STEP_SUMMARY
-            $diagnostic | Add-Content $env:GITHUB_STEP_SUMMARY
+            $tail | Add-Content $env:GITHUB_STEP_SUMMARY
             '```' | Add-Content $env:GITHUB_STEP_SUMMARY
             exit $exitCode
           }
@@ -146,19 +150,30 @@ jobs:
               lines = fs.readFileSync(logPath, 'utf8').split(/\r?\n/);
             }
 
-            const match = /(^FAILED:)|error:|fatal error|LNK[0-9]+|undefined reference|unresolved external|linker command failed|ninja: build stopped|CMake Error|\[mach-ipc-smoke\]|\[darwin-host-unfair-lock\]/i;
-            let diagnostic = lines.filter(line => match.test(line)).slice(0, 80);
-            if (diagnostic.length === 0) diagnostic = lines.slice(-120);
-            if (diagnostic.length === 0) diagnostic = ['Core build failed, but the captured log was empty.'];
+            const match = /(^FAILED:)|\bFAIL:|missing export:|error:|fatal error|LNK[0-9]+|undefined reference|unresolved external|linker command failed|ninja: build stopped|CMake Error/i;
+            const highSignal = lines.filter(line => match.test(line)).slice(0, 80);
+            const tail = lines.slice(-160);
+            if (highSignal.length === 0 && tail.length === 0) {
+              tail.push('Core build failed, but the captured log was empty.');
+            }
 
+            const headSha = context.payload.pull_request.head.sha;
             const body = [
               marker,
               '## Windows ARM64 core build diagnostic',
               '',
-              `Commit: \`${context.sha}\``,
+              `Commit: \`${headSha}\``,
               '',
+              ...(highSignal.length > 0 ? [
+                '### High-signal diagnostics',
+                '```text',
+                ...highSignal,
+                '```',
+                ''
+              ] : []),
+              '### Failure log tail',
               '```text',
-              ...diagnostic,
+              ...tail,
               '```'
             ].join('\n').slice(0, 60000);
 

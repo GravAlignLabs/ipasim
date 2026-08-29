@@ -1,7 +1,8 @@
 // DarwinTimeSmoke.cpp: semantic validation for the Darwin __gettimeofday,
-// _os_alloc_once, and _os_alloc_once_table host bridges. The smoke calls the
-// built DLL exports directly so symbol-only shims cannot satisfy CI without
-// real time, once-allocation, and writable global table behavior.
+// mach_continuous_time, mach_timebase_info, _os_alloc_once, and
+// _os_alloc_once_table host bridges. The smoke calls the built DLL exports
+// directly so symbol-only shims cannot satisfy CI without real timing, once
+// allocation, and writable global table behavior.
 
 #include <atomic>
 #include <cstddef>
@@ -26,6 +27,13 @@ struct DarwinTimezone {
   std::int32_t DstTime;
 };
 
+struct DarwinMachTimebaseInfo {
+  std::uint32_t Numer;
+  std::uint32_t Denom;
+};
+static_assert(sizeof(DarwinMachTimebaseInfo) == 8,
+              "Darwin mach_timebase_info_data_t layout changed unexpectedly");
+
 struct DarwinAllocOnceSlot {
   std::int64_t Once;
   void *Ptr;
@@ -44,6 +52,10 @@ constexpr std::uint64_t PrimarySentinel = 0x1122334455667788ULL;
 constexpr std::uint64_t ConcurrentSentinel = 0x8877665544332211ULL;
 constexpr std::uint64_t TableSentinel = 0xA55A5AA55AA55AA5ULL;
 constexpr std::size_t DarwinAllocOnceKeyMax = 100;
+constexpr int DarwinKernSuccess = 0;
+constexpr int DarwinKernInvalidArgument = 4;
+constexpr std::uint32_t ExpectedContinuousNumer = 100;
+constexpr std::uint32_t ExpectedContinuousDenom = 1;
 
 std::atomic<int> PrimaryInitCalls{0};
 std::atomic<int> SecondaryInitCalls{0};
@@ -204,6 +216,70 @@ int main(int ArgC, char **ArgV) {
     return 10;
   }
 
+  using MachContinuousTime = std::uint64_t (*)();
+  using MachTimebaseInfo = int (*)(DarwinMachTimebaseInfo *);
+  auto ContinuousTime = reinterpret_cast<MachContinuousTime>(
+      GetProcAddress(DarwinHost, "mach_continuous_time"));
+  auto TimebaseInfo = reinterpret_cast<MachTimebaseInfo>(
+      GetProcAddress(DarwinHost, "mach_timebase_info"));
+  if (!ContinuousTime || !TimebaseInfo) {
+    std::fprintf(stderr,
+                 "[darwin-time-smoke] continuous-time exports were missing\n");
+    FreeLibrary(DarwinHost);
+    return 24;
+  }
+
+  if (TimebaseInfo(nullptr) != DarwinKernInvalidArgument) {
+    std::fprintf(stderr,
+                 "[darwin-time-smoke] mach_timebase_info null argument did not return KERN_INVALID_ARGUMENT\n");
+    FreeLibrary(DarwinHost);
+    return 25;
+  }
+
+  DarwinMachTimebaseInfo Timebase{};
+  if (TimebaseInfo(&Timebase) != DarwinKernSuccess ||
+      Timebase.Numer != ExpectedContinuousNumer ||
+      Timebase.Denom != ExpectedContinuousDenom) {
+    std::fprintf(stderr,
+                 "[darwin-time-smoke] mach_timebase_info mismatch: got %u/%u, expected %u/%u\n",
+                 Timebase.Numer, Timebase.Denom, ExpectedContinuousNumer,
+                 ExpectedContinuousDenom);
+    FreeLibrary(DarwinHost);
+    return 26;
+  }
+
+  ULONGLONG ContinuousBefore = 0;
+  ULONGLONG ContinuousAfter = 0;
+  QueryInterruptTimePrecise(&ContinuousBefore);
+  const std::uint64_t DarwinContinuous = ContinuousTime();
+  QueryInterruptTimePrecise(&ContinuousAfter);
+  if (DarwinContinuous < ContinuousBefore ||
+      DarwinContinuous > ContinuousAfter) {
+    std::fprintf(stderr,
+                 "[darwin-time-smoke] mach_continuous_time does not track Windows biased interrupt time\n");
+    FreeLibrary(DarwinHost);
+    return 28;
+  }
+
+  Sleep(20);
+  const std::uint64_t DarwinContinuousLater = ContinuousTime();
+  if (DarwinContinuousLater <= DarwinContinuous) {
+    std::fprintf(stderr,
+                 "[darwin-time-smoke] mach_continuous_time was not monotonic\n");
+    FreeLibrary(DarwinHost);
+    return 29;
+  }
+
+  const std::uint64_t ContinuousElapsedNs =
+      (DarwinContinuousLater - DarwinContinuous) * Timebase.Numer /
+      Timebase.Denom;
+  if (ContinuousElapsedNs < 1000000ULL) {
+    std::fprintf(stderr,
+                 "[darwin-time-smoke] continuous-time/timebase conversion did not advance plausibly\n");
+    FreeLibrary(DarwinHost);
+    return 30;
+  }
+
   auto AllocOnce = reinterpret_cast<DarwinAllocOnce>(
       GetProcAddress(DarwinHost, "_os_alloc_once"));
   if (!AllocOnce) {
@@ -336,9 +412,11 @@ int main(int ArgC, char **ArgV) {
     return 23;
   }
 
-  std::printf("Darwin __gettimeofday + _os_alloc_once + _os_alloc_once_table smoke passed: %lld.%06d, west=%d dst=%d.\n",
+  std::printf("Darwin time + continuous time + alloc-once smoke passed: wall=%lld.%06d, continuous=%llu ticks, timebase=%u/%u, west=%d dst=%d.\n",
               static_cast<long long>(Time.Seconds), Time.Microseconds,
-              Timezone.MinutesWest, Timezone.DstTime);
+              static_cast<unsigned long long>(DarwinContinuousLater),
+              Timebase.Numer, Timebase.Denom, Timezone.MinutesWest,
+              Timezone.DstTime);
   FreeLibrary(DarwinHost);
   return 0;
 }

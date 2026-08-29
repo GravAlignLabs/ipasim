@@ -64,6 +64,8 @@ const DarwinHostCallSignature *findDarwinHostCallSignature(
       {"mkfifo", 2, true},
       {"mknod", 3, true},
       {"open", 3, true},
+      {"mach_continuous_time", 0, true},
+      {"mach_timebase_info", 1, true},
       {"mach_msg_overwrite", 9, true},
       {"lseek", 3, true},
       {"_platform_memmove", 3, true},
