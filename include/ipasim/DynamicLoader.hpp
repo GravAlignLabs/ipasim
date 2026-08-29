@@ -8,10 +8,11 @@
 #include "ipasim/Emulator.hpp"
 #include "ipasim/LoadedLibrary.hpp"
 #include "ipasim/Logger.hpp"
-#include "ipasim/TextBlockStream.hpp"
+#include "ipasim/RuntimeLog.hpp"
 
 #include <functional>
 #include <map>
+#include <set>
 #include <stack>
 #include <string>
 #include <unicorn/unicorn.h>
@@ -48,6 +49,20 @@ class DynamicLoader {
 public:
   DynamicLoader(Emulator &Emu);
   LoadedLibrary *load(const std::string &Path);
+
+  // Configure the root that mirrors iOS absolute install names, for example
+  // <root>/System/Library/Frameworks/Foundation.framework/Foundation and
+  // <root>/usr/lib/libSystem.B.dylib. The modern core never falls back to the
+  // legacy generated-wrapper `gen` tree for these system images.
+  bool setRuntimeRoot(const std::string &Path);
+
+  // Resolve Mach-O library ordinals used by export re-exports and chained
+  // imports. Positive ordinals index the image's dependent dylibs; 0 is self;
+  // -1 is the main executable; -2 and -3 use flat/weak lookup semantics.
+  LoadedLibrary *loadOrdinal(LoadedDylib &Image, int Ordinal);
+  uint64_t resolveSymbol(LoadedDylib &Image, int Ordinal,
+                         const std::string &Name, bool WeakImport = false);
+
   // Used for dyld-objc integration. Notifies registered listeners that a new
   // library was loaded into memory. Objective-C runtime uses this to initialize
   // the library's classes.
@@ -89,8 +104,21 @@ private:
   static constexpr int R_SCATTERED = 0x80000000; // From `<mach-o/reloc.h>`
   Emulator &Emu;
   uint64_t KernelAddr;
-  // Loaded libraries and their paths
+  LoadedDylib *MainExecutable = nullptr;
+  std::string RuntimeRoot;
+  // Loaded libraries and their paths. LoadOrder preserves dyld-style flat
+  // lookup order; LLs remains the path-indexed ownership map.
   std::map<std::string, std::unique_ptr<LoadedLibrary>> LLs;
+  std::vector<LoadedLibrary *> LoadOrder;
+  // Failed modern-core images are stable failures for the lifetime of a loader
+  // pass. Remember them so one missing dependency is not reparsed/remapped and
+  // re-reported dozens of times through downstream callers.
+  std::set<std::string> FailedLoads;
+  std::set<std::string> ReportedFailedLoadRetries;
+  // A root image failure already carries the actionable symbol/path diagnostic.
+  // Print one immediate parent propagation line, then suppress the recursive
+  // unwind so the same dependency chain does not dominate the target trace.
+  bool ReportedRequiredDependencyPropagation = false;
   // These are used for dyld-objc integration:
   std::vector<const void *> Hdrs; // Registered headers
   std::set<uintptr_t> HdrSet;     // Set of registered headers for faster lookup
