@@ -91,6 +91,7 @@ int main(int argc, char **argv) {
     return fail("could not load IpaSimDarwinHost.dll");
 
   const char *Required[] = {
+      "__error",
       "mach_continuous_time",
       "proc_pidinfo",
       "vm_allocate",
@@ -262,11 +263,19 @@ int main(int argc, char **argv) {
     return fail("memcmp_zero missed non-zero storage");
   }
 
+  using DarwinError = int *(*)();
+  auto ErrorPointer = reinterpret_cast<DarwinError>(GetProcAddress(Host, "__error"));
+  int *HostErrno = ErrorPointer();
+  if (!HostErrno) {
+    FreeLibrary(Host);
+    return fail("Darwin __error did not return thread-local errno storage");
+  }
+
   using Csops = int (*)(int, unsigned int, void *, std::size_t);
   auto CodeSign = reinterpret_cast<Csops>(
       GetProcAddress(Host, "__interposition_sim_system_csops"));
-  errno = 0;
-  if (CodeSign(_getpid(), 0, nullptr, 0) != -1 || errno != ENOTSUP) {
+  *HostErrno = 0;
+  if (CodeSign(_getpid(), 0, nullptr, 0) != -1 || *HostErrno != ENOTSUP) {
     FreeLibrary(Host);
     return fail("csops must fail explicitly until a code-sign semantic exists");
   }
