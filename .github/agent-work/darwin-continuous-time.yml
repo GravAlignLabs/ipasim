@@ -8,24 +8,28 @@ task: >-
   semantic smoke coverage.
 
 scope:
+  - .github/workflows/windows-arm64-core.yml
+  - src/IpaSimulator/CMakeLists.txt
   - src/IpaSimulator/DarwinKernelBridge.cpp
+  - src/IpaSimulator/DarwinKernelSmoke.cpp
   - src/IpaSimulator/DarwinTimeBridge.cpp
   - src/IpaSimulator/DarwinTimeSmoke.cpp
   - src/IpaSimulator/SysTranslator.cpp
 
 branch: feature/darwin-continuous-time
 started_utc: 2026-08-29T19:36:00Z
-updated_utc: 2026-08-29T19:50:51Z
+updated_utc: 2026-08-29T20:58:00Z
 base_sha: 22d7b343467f322e0dd6e1358717f75421504b42
 expected_pr: draft #4
 
 next_checkpoint: >-
-  Preserve the existing DarwinKernelBridge mach_continuous_time owner, add the
-  coherent mach_timebase_info boundary beside it, remove the duplicate timing
-  definition from DarwinTimeBridge, and rerun public CI.
+  Validate the continuous-time boundary through public CI and keep the kernel
+  semantic smoke honest by reading guest-visible errno through the Darwin
+  __error export instead of the smoke executable's separate CRT state.
 
 notes: >-
-  Scope expanded after CI exposed an existing mach_continuous_time definition in
-  DarwinKernelBridge.cpp. The fix replaces the duplicate path rather than hiding
-  or suppressing the linker failure. Public target-neutral timing compatibility
-  work only; no private application data is included.
+  Scope includes the narrow CMake timing link, PR diagnostic workflow, and
+  DarwinKernelSmoke correction exposed by CI. The host csops boundary already
+  reports unsupported semantics and sets its own thread-local errno; the smoke
+  must inspect that state through the exported Darwin __error ABI. Public,
+  target-neutral compatibility work only; no private application data is included.
