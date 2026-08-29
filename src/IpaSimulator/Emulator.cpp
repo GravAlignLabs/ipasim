@@ -5,6 +5,7 @@
 #include "ipasim/IpaSimulator.hpp"
 
 #include <unicorn/unicorn.h>
+#include <unicorn/arm64.h>
 
 using namespace ipasim;
 
@@ -13,12 +14,12 @@ Emulator::~Emulator() {
     callUCStatic(uc_close(UC));
 }
 
-uint32_t Emulator::readReg(uc_arm_reg RegId) {
-  uint32_t Result;
+uint64_t Emulator::readReg(int RegId) {
+  uint64_t Result = 0;
   callUC(uc_reg_read(UC, RegId, &Result));
   return Result;
 }
-void Emulator::writeReg(uc_arm_reg RegId, uint32_t Value) {
+void Emulator::writeReg(int RegId, uint64_t Value) {
   callUC(uc_reg_write(UC, RegId, &Value));
 }
 
@@ -45,7 +46,9 @@ void Emulator::ignoreNextError() {
 
 uc_engine *Emulator::initUC() {
   uc_engine *UC;
-  callUCStatic(uc_open(UC_ARCH_ARM, UC_MODE_ARM, &UC));
+  // Modern iOS device binaries are AArch64. The previous unconditional
+  // UC_ARCH_ARM engine made every 64-bit IPA impossible to execute.
+  callUCStatic(uc_open(UC_ARCH_ARM64, UC_MODE_ARM, &UC));
   return UC;
 }
 
@@ -60,7 +63,7 @@ void Emulator::callUC(uc_err Err) {
       IgnoreError = false;
     else
       Log.error() << "unicorn failed at "
-                  << Dyld.dumpAddr(readReg(UC_ARM_REG_PC)) << ": "
+                  << Dyld.dumpAddr(readReg(UC_ARM64_REG_PC)) << ": "
                   << uc_strerror(Err) << Log.end();
   }
 }

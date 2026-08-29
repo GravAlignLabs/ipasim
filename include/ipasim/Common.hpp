@@ -4,6 +4,8 @@
 #define IPASIM_COMMON_HPP
 
 #include <cstdint>
+#include <iomanip>
+#include <sstream>
 #include <string>
 
 #if defined(IpaSimLibrary_EXPORTS)
@@ -50,7 +52,7 @@ template <typename T> constexpr T &operator^=(T &a, T b) {
   return (T &)((int &)a ^= (int)b);
 }
 template <typename T> constexpr T &operator+=(T &a, int b) {
-  return (T &)((int &)a += b);
+  return (T &)((int &)a += (int)b);
 }
 
 // =============================================================================

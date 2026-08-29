@@ -3,7 +3,9 @@
 #ifndef IPASIM_EMULATOR_HPP
 #define IPASIM_EMULATOR_HPP
 
+#include <cstdint>
 #include <unicorn/unicorn.h>
+#include <unicorn/arm64.h>
 #include <utility>
 
 namespace ipasim {
@@ -44,8 +46,9 @@ public:
   }
   ~Emulator();
 
-  uint32_t readReg(uc_arm_reg RegId);
-  void writeReg(uc_arm_reg RegId, uint32_t Value);
+  // Guest registers are pointer-width for the modern iOS ARM64 target.
+  uint64_t readReg(int RegId);
+  void writeReg(int RegId, uint64_t Value);
   void mapMemory(uint64_t Addr, uint64_t Size, uc_prot Perms);
   void start(uint64_t Addr);
   void stop();
