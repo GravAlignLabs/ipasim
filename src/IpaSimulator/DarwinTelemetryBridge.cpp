@@ -2,10 +2,13 @@
 // Windows host bridge.
 //
 // XNU exposes __telemetry as a six-argument POSIX syscall wrapper. Commands 1
-// (timer-event sampling) and 3 (PMI sampling) exist only when kernel telemetry
-// is configured; XNU otherwise reports EINVAL. Windows has no equivalent XNU
-// microstackshot/PMI facility, so ipaSim preserves that valid Darwin failure
-// shape instead of claiming telemetry was armed.
+// (timer-event sampling) and 3 (PMI sampling) ultimately capture the state of
+// the interrupted Darwin thread. Windows ETW/PMC profiling is useful as an
+// architectural reference, but directly enabling it here would sample the x64
+// host thread and Unicorn internals rather than the emulated ARM64 guest PC and
+// stack. Until guest-aware sampling is wired into the emulator core, those
+// commands therefore preserve XNU's valid EINVAL failure shape instead of
+// claiming that microstackshot telemetry was armed.
 //
 // Command 2 sets the current thread's Mach voucher name. ipaSim can faithfully
 // represent the null voucher (clear) now. Non-null Mach voucher names require a
@@ -39,8 +42,8 @@ __telemetry(std::uint64_t Command, std::uint64_t Deadline,
             std::uint64_t Interval, std::uint64_t Leeway,
             std::uint64_t Argument4, std::uint64_t Argument5) {
   // Keep the complete syscall ABI even for commands whose trailing arguments
-  // are not interpreted. This matters because libsystem/libdispatch bind the
-  // six-register entry point directly on arm64.
+  // are not interpreted. libsystem/libdispatch bind this six-register entry
+  // point directly on arm64.
   (void)Interval;
   (void)Leeway;
   (void)Argument4;
@@ -49,8 +52,9 @@ __telemetry(std::uint64_t Command, std::uint64_t Deadline,
   switch (Command) {
   case TelemetryCmdTimerEvent:
   case TelemetryCmdPmiSetup:
-    // This is the same externally visible result XNU produces when
-    // CONFIG_TELEMETRY does not provide these command handlers.
+    // A host ETW sample would describe ipaSim/Unicorn rather than the guest.
+    // Explicit failure is therefore more correct than a successful no-op or a
+    // misleading host-only sample stream.
     return failInvalidArgument();
 
   case TelemetryCmdVoucherName: {
