@@ -1,0 +1,29 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Implement the generic Darwin __telemetry six-argument syscall ABI required by
+  libdispatch, with truthful unsupported behavior for kernel performance
+  telemetry and the defensible voucher-name subset.
+
+scope:
+  - src/IpaSimulator/DarwinTelemetryBridge.cpp
+  - src/IpaSimulator/DarwinTelemetrySmoke.cpp
+  - src/IpaSimulator/CMakeLists.txt
+  - src/IpaSimulator/SysTranslator.cpp
+
+branch: compat-darwin-telemetry
+started_utc: 2026-08-30T22:55:00Z
+updated_utc: 2026-08-30T22:55:00Z
+base_sha: ea3c869fa3f1fceb753cc361c6690ec56e0f5a44
+expected_pr: tbd
+
+next_checkpoint: >-
+  Validate __telemetry export, six-argument ARM64 host-call marshalling,
+  EINVAL behavior for unavailable timer/PMI commands, MACH_PORT_NULL voucher
+  clearing, and explicit rejection of unsupported voucher names.
+
+notes: >-
+  Generic Darwin ABI only. No private IPA names, paths, or target-specific
+  behavior. Do not report XNU telemetry collection as active on Windows.
