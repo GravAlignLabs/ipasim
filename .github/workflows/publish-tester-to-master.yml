@@ -27,7 +27,7 @@ jobs:
           ref: master
           fetch-depth: 2
 
-      - name: Find merged PR and its green Windows tester
+      - name: Select green Windows tester artifact
         id: source
         shell: bash
         env:
@@ -39,16 +39,22 @@ jobs:
           pr_number="$(jq -r '[.[] | select(.merged_at != null)] | first | .number // empty' <<<"$pr_json")"
           pr_head_sha="$(jq -r '[.[] | select(.merged_at != null)] | first | .head.sha // empty' <<<"$pr_json")"
 
-          if [[ -z "$pr_number" || -z "$pr_head_sha" ]]; then
-            echo 'No merged pull request is associated with this master commit; no tester snapshot will be published.'
-            echo 'publish=false' >> "$GITHUB_OUTPUT"
-            exit 0
+          run_id=''
+          if [[ -n "$pr_head_sha" ]]; then
+            runs_json="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/workflows/windows-arm64-core.yml/runs?event=pull_request&status=success&head_sha=$pr_head_sha&per_page=20")"
+            run_id="$(jq -r '.workflow_runs[0].id // empty' <<<"$runs_json")"
           fi
 
-          runs_json="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/workflows/windows-arm64-core.yml/runs?event=pull_request&status=success&head_sha=$pr_head_sha&per_page=20")"
-          run_id="$(jq -r '.workflow_runs[0].id // empty' <<<"$runs_json")"
+          # CI-only/documentation merges may not run Windows ARM64 Core. In that
+          # case retain the latest already-green tester instead of rebuilding or
+          # inventing a new package.
           if [[ -z "$run_id" ]]; then
-            echo "Merged PR #$pr_number has no successful Windows ARM64 Core run for head $pr_head_sha; refusing to publish an unvalidated tester." >&2
+            runs_json="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/workflows/windows-arm64-core.yml/runs?event=pull_request&status=success&per_page=20")"
+            run_id="$(jq -r '.workflow_runs[0].id // empty' <<<"$runs_json")"
+          fi
+
+          if [[ -z "$run_id" ]]; then
+            echo 'No successful Windows ARM64 Core run is available.' >&2
             exit 1
           fi
 
@@ -59,14 +65,13 @@ jobs:
             exit 1
           fi
 
-          echo 'publish=true' >> "$GITHUB_OUTPUT"
-          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
-          echo "pr_head_sha=$pr_head_sha" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${pr_number:-none}" >> "$GITHUB_OUTPUT"
+          echo "pr_head_sha=${pr_head_sha:-none}" >> "$GITHUB_OUTPUT"
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
 
-      - name: Copy existing artifact ZIP into repository
-        if: steps.source.outputs.publish == 'true'
+      - name: Download existing artifact ZIP as-is
+        id: zip
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -74,54 +79,65 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tester/windows/latest
+          temp_zip="$RUNNER_TEMP/ipasim-ipa-tester.zip"
 
-          # GitHub Actions artifacts are already ZIP archives. Download the exact
-          # existing archive bytes directly; do not extract and re-zip them.
-          gh api \
+          # The Actions artifact is already a ZIP. Copy those exact archive bytes;
+          # do not extract or re-zip the tester.
+          curl --fail --location --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" \
             -H 'Accept: application/vnd.github+json' \
-            "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
-            > tester/windows/latest/ipasim-ipa-tester.zip
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
+            --output "$temp_zip"
 
-          test -s tester/windows/latest/ipasim-ipa-tester.zip
-          unzip -t tester/windows/latest/ipasim-ipa-tester.zip >/dev/null
+          test -s "$temp_zip"
+          unzip -t "$temp_zip" >/dev/null
+
+          new_hash="$(sha256sum "$temp_zip" | awk '{print $1}')"
+          old_hash=''
+          if [[ -f tester/windows/latest/ipasim-ipa-tester.zip ]]; then
+            old_hash="$(sha256sum tester/windows/latest/ipasim-ipa-tester.zip | awk '{print $1}')"
+          fi
+
+          if [[ "$new_hash" == "$old_hash" ]]; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo "sha256=$new_hash" >> "$GITHUB_OUTPUT"
+            echo 'The committed tester ZIP already matches the latest green artifact.'
+            exit 0
+          fi
+
+          mv "$temp_zip" tester/windows/latest/ipasim-ipa-tester.zip
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+          echo "sha256=$new_hash" >> "$GITHUB_OUTPUT"
 
       - name: Record tester provenance
-        if: steps.source.outputs.publish == 'true'
+        if: steps.zip.outputs.changed == 'true'
         shell: bash
         env:
           PR_NUMBER: ${{ steps.source.outputs.pr_number }}
           PR_HEAD_SHA: ${{ steps.source.outputs.pr_head_sha }}
           RUN_ID: ${{ steps.source.outputs.run_id }}
           ARTIFACT_ID: ${{ steps.source.outputs.artifact_id }}
+          ZIP_SHA256: ${{ steps.zip.outputs.sha256 }}
         run: |
           set -euo pipefail
-          sha256="$(sha256sum tester/windows/latest/ipasim-ipa-tester.zip | awk '{print $1}')"
           cat > tester/windows/latest/BUILD.txt <<EOF
           source_repository=$GITHUB_REPOSITORY
           merged_pr=$PR_NUMBER
           pr_head_sha=$PR_HEAD_SHA
-          master_merge_sha=$GITHUB_SHA
+          master_sha_when_published=$GITHUB_SHA
           windows_core_run_id=$RUN_ID
           actions_artifact_id=$ARTIFACT_ID
-          zip_sha256=$sha256
+          zip_sha256=$ZIP_SHA256
           published_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           EOF
 
-      - name: Commit rebuilt tester to master
-        if: steps.source.outputs.publish == 'true'
+      - name: Commit tester ZIP to master
+        if: steps.zip.outputs.changed == 'true'
         shell: bash
-        env:
-          PR_NUMBER: ${{ steps.source.outputs.pr_number }}
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add tester/windows/latest/ipasim-ipa-tester.zip tester/windows/latest/BUILD.txt
-
-          if git diff --cached --quiet; then
-            echo 'Tester snapshot is already current.'
-            exit 0
-          fi
-
-          git commit -m "Update Windows tester from PR #$PR_NUMBER [tester-snapshot]"
+          git commit -m 'Update green Windows tester [tester-snapshot]'
           git push origin HEAD:master
