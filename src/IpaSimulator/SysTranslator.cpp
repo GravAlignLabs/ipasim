@@ -47,6 +47,7 @@ const DarwinHostCallSignature *findDarwinHostCallSignature(
       {"__error", 0, true},
       {"__gettimeofday", 2, true},
       {"__sendto", 6, true},
+      {"__telemetry", 6, true},
       {"_os_alloc_once", 3, true},
       {"__pthread_fchdir", 1, true},
       {"close", 1, true},

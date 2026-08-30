@@ -66,7 +66,8 @@ if (IPASIM_MODERN_CORE)
         DarwinSocketBridge.cpp
         DarwinKernelBridge.cpp
         DarwinHostCompatBridge.cpp
-        DarwinVoucherBridge.cpp)
+        DarwinVoucherBridge.cpp
+        DarwinTelemetryBridge.cpp)
     target_compile_options (IpaSimDarwinHost PRIVATE -std=c++17)
     target_link_libraries (IpaSimDarwinHost PRIVATE
         IpaSimMachIpc
@@ -103,6 +104,10 @@ if (IPASIM_MODERN_CORE)
         DarwinVoucherSmoke.cpp)
     target_compile_options (DarwinVoucherSmoke PRIVATE -std=c++17)
 
+    add_executable (DarwinTelemetrySmoke
+        DarwinTelemetrySmoke.cpp)
+    target_compile_options (DarwinTelemetrySmoke PRIVATE -std=c++17)
+
     # Run the semantic checks as part of the normal core dependency graph. A
     # compile/link/runtime failure therefore flows through the existing captured
     # core-build log and the single self-updating PR diagnostic comment before
@@ -131,6 +136,10 @@ if (IPASIM_MODERN_CORE)
     add_custom_target (DarwinVoucherCheck
         COMMAND "$<TARGET_FILE:DarwinVoucherSmoke>" "$<TARGET_FILE:IpaSimDarwinHost>"
         DEPENDS DarwinVoucherSmoke IpaSimDarwinHost
+        USES_TERMINAL)
+    add_custom_target (DarwinTelemetryCheck
+        COMMAND "$<TARGET_FILE:DarwinTelemetrySmoke>" "$<TARGET_FILE:IpaSimDarwinHost>"
+        DEPENDS DarwinTelemetrySmoke IpaSimDarwinHost
         USES_TERMINAL)
 
     # A module-definition file is linker input, not an object/source input.
@@ -161,7 +170,8 @@ else ()
         DarwinTimeCheck
         DarwinSocketCheck
         DarwinKernelCheck
-        DarwinVoucherCheck)
+        DarwinVoucherCheck
+        DarwinTelemetryCheck)
 endif ()
 
 # The legacy path used a patched Clang plus the Coroutines TS. Current Clang
