@@ -68,6 +68,18 @@ struct DarwinProcFdInfo {
 };
 static_assert(sizeof(DarwinProcFdInfo) == 8);
 
+struct DarwinNdrRecord {
+  std::uint8_t MigVersion;
+  std::uint8_t InterfaceVersion;
+  std::uint8_t Reserved1;
+  std::uint8_t MigEncoding;
+  std::uint8_t IntegerRepresentation;
+  std::uint8_t CharacterRepresentation;
+  std::uint8_t FloatRepresentation;
+  std::uint8_t Reserved2;
+};
+static_assert(sizeof(DarwinNdrRecord) == 8);
+
 int fail(const char *Message) {
   std::fprintf(stderr, "[darwin-kernel-smoke] FAIL: %s\n", Message);
   return 1;
@@ -97,6 +109,7 @@ int main(int argc, char **argv) {
       "vm_allocate",
       "vm_deallocate",
       "vm_page_size",
+      "NDR_record",
       "open",
       "close",
       "lseek",
@@ -142,6 +155,14 @@ int main(int argc, char **argv) {
   if (!TaskSelf || *TaskSelf == 0) {
     FreeLibrary(Host);
     return fail("mach_task_self_ is unavailable");
+  }
+
+  auto *Ndr = reinterpret_cast<DarwinNdrRecord *>(
+      GetProcAddress(Host, "NDR_record"));
+  const DarwinNdrRecord ExpectedNdr = {0, 0, 0, 0, 1, 0, 0, 0};
+  if (!Ndr || std::memcmp(Ndr, &ExpectedNdr, sizeof(ExpectedNdr)) != 0) {
+    FreeLibrary(Host);
+    return fail("NDR_record does not match ARM64 Darwin NDR 2.0 representation");
   }
 
   using VmAllocate = std::int32_t (*)(std::uint32_t, std::uint64_t *,
