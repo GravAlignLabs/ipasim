@@ -14,8 +14,8 @@ scope:
 
 branch: tester/runtime-root-autodetect
 started_utc: 2026-08-30T14:00:00Z
-updated_utc: 2026-08-30T14:00:00Z
-base_sha: 4e7f7f700287f1c674ac8e47f53df247c940eead
+updated_utc: 2026-08-30T14:01:00Z
+base_sha: fadb5a413e2faa7cd343482e6b8448258279b8f4
 expected_pr: tbd
 
 next_checkpoint: >-
