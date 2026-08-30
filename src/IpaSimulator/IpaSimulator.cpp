@@ -123,6 +123,9 @@ IPASIM_API void ipaSim_callBack2(void *FP, void *Arg0, void *Arg1) {
 IPASIM_API void *ipaSim_callBack1r(void *FP, void *Arg0) {
   return IpaSim.Sys.callBackR(FP, Arg0);
 }
+IPASIM_API void *ipaSim_callBack2r(void *FP, void *Arg0, void *Arg1) {
+  return IpaSim.Sys.callBackR(FP, Arg0, Arg1);
+}
 IPASIM_API void *ipaSim_callBack3r(void *FP, void *Arg0, void *Arg1,
                                    void *Arg2) {
   return IpaSim.Sys.callBackR(FP, Arg0, Arg1, Arg2);
