@@ -12,9 +12,11 @@
 #endif
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <windows.h>
 
 namespace {
