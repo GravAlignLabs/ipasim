@@ -52,20 +52,20 @@ int main(int argc, char **argv) {
     return fail("Darwin __error did not return errno storage");
   }
 
-  // XNU builds without CONFIG_TELEMETRY reject timer-event and PMI commands
-  // with EINVAL. ipaSim deliberately claims that valid Darwin capability level
-  // rather than pretending Windows provides microstackshot sampling.
+  // Timer and PMI sampling must not report success until the sampling source
+  // captures emulated ARM64 guest state. ETW/PMC host samples would capture the
+  // x64 Unicorn host stack instead, which is not a Darwin microstackshot.
   *HostErrno = 0;
   if (Call(1, 0x1122334455667788ULL, 17, 23, 29, 31) != -1 ||
       *HostErrno != EINVAL) {
     FreeLibrary(Host);
-    return fail("timer-event telemetry did not fail with EINVAL");
+    return fail("timer-event telemetry did not fail explicitly");
   }
 
   *HostErrno = 0;
   if (Call(3, 1, 1000000, 0, 0, 0) != -1 || *HostErrno != EINVAL) {
     FreeLibrary(Host);
-    return fail("PMI telemetry did not fail with EINVAL");
+    return fail("PMI telemetry did not fail explicitly");
   }
 
   // MACH_PORT_NULL is a real voucher-name operation: it clears the current
