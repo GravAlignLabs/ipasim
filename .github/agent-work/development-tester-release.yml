@@ -3,27 +3,27 @@ owner: DeerSpotter
 agent: ChatGPT GPT-5.6 Sol
 
 task: >-
-  Publish the latest green generic Windows ipaSim tester as a rolling GitHub
-  development release and add a one-click local updater so testers do not need
-  to be re-uploaded through chat for each compatibility checkpoint.
+  Publish the latest green generic Windows ipaSim tester directly into master
+  at tester/windows/latest so users can git pull and immediately use the rebuilt
+  tester without locating Actions artifacts or release assets.
 
 scope:
-  - .github/workflows/publish-development-tester.yml
-  - .github/workflows/windows-arm64-core.yml
-  - scripts/Update-Tester.cmd
-  - scripts/Update-Tester.ps1
+  - .github/workflows/publish-tester-to-master.yml
+  - tester/windows/latest/ipasim-ipa-tester.zip
+  - tester/windows/latest/BUILD.txt
 
 branch: ci/development-tester-release
 started_utc: 2026-08-30T13:34:00Z
-updated_utc: 2026-08-30T13:34:00Z
-base_sha: fa509ca4b3f9830aae9e42c3924205b43fe1c244
+updated_utc: 2026-08-30T13:42:00Z
+base_sha: 9d5b6588c0c521443e9c93bfc89510c0352003e3
 expected_pr: tbd
 
 next_checkpoint: >-
-  Validate the updater is packaged by Windows ARM64 Core and that the publisher
-  can consume a successful same-repository Core artifact without rebuilding it.
+  Validate that the publisher reuses a successful Windows ARM64 Core artifact,
+  packages it, and commits the rebuilt ZIP plus source metadata directly to
+  tester/windows/latest on master without triggering a rebuild loop.
 
 notes: >-
-  Generated EXE/DLL files remain CI artifacts rather than Git-tracked binaries.
-  The rolling development release is target-neutral and contains no private IPA
-  names, paths, binaries, RuntimeRoot contents, or application fingerprints.
+  The committed ZIP is intentionally a generated development checkpoint. Private
+  IPAs and RuntimeRoot contents are never included. The bot updates the fixed
+  master path only after a successful public Windows ARM64 Core run.
