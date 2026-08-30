@@ -1,0 +1,29 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Implement Darwin pthread priority/QoS encode-decode compatibility used by
+  libdispatch, preserving the LP64 pthread_priority_t layout and QoS bitfield
+  semantics without inventing host scheduler state.
+
+scope:
+  - src/IpaSimulator/DarwinPthreadQosBridge.cpp
+  - src/IpaSimulator/DarwinPthreadQosSmoke.cpp
+  - src/IpaSimulator/CMakeLists.txt
+  - src/IpaSimulator/SysTranslator.cpp
+
+branch: compat-pthread-qos-codec
+started_utc: 2026-08-30T23:42:00Z
+updated_utc: 2026-08-30T23:42:00Z
+base_sha: 272402b9681ac48bc34548a195ba9f2036f0064a
+expected_pr: tbd
+
+next_checkpoint: >-
+  Validate pthread_priority_t LP64 width, QoS class/relative-priority decoding,
+  flag preservation, round-trip encoding, optional output pointers, and ARM64
+  host-call signatures with a focused semantic smoke.
+
+notes: >-
+  Generic Darwin pthread QoS codec compatibility only. No private application
+  names, paths, logs, RuntimeRoot contents, or target-specific behavior.
