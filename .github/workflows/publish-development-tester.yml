@@ -1,0 +1,213 @@
+name: Publish Development Windows Tester
+
+on:
+  workflow_run:
+    workflows:
+      - Windows ARM64 Core
+    types:
+      - completed
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/publish-development-tester.yml'
+      - 'scripts/Test-Ipa.cmd'
+      - 'scripts/Test-Ipa.ps1'
+      - 'scripts/Update-Tester.cmd'
+      - 'scripts/Update-Tester.ps1'
+  workflow_dispatch:
+
+# This workflow never rebuilds ipaSim. It republishes the already validated
+# ipasim-ipa-tester artifact from Windows ARM64 Core, so maintaining the rolling
+# tester does not consume a second Windows runner build.
+concurrency:
+  group: development-windows-tester
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository) ||
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out release metadata source
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 1
+
+      - name: Select validated Windows Core run
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          EVENT_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EVENT_RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            run_id="$EVENT_RUN_ID"
+            source_sha="$EVENT_HEAD_SHA"
+            source_branch="$EVENT_HEAD_BRANCH"
+            run_url="$EVENT_RUN_URL"
+          else
+            run_json="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/windows-arm64-core.yml/runs?status=success&per_page=1")"
+            run_id="$(jq -r '.workflow_runs[0].id // empty' <<<"$run_json")"
+            source_sha="$(jq -r '.workflow_runs[0].head_sha // empty' <<<"$run_json")"
+            source_branch="$(jq -r '.workflow_runs[0].head_branch // empty' <<<"$run_json")"
+            run_url="$(jq -r '.workflow_runs[0].html_url // empty' <<<"$run_json")"
+          fi
+
+          if [[ -z "$run_id" || -z "$source_sha" || -z "$run_url" ]]; then
+            echo 'No successful Windows ARM64 Core run is available to publish.' >&2
+            exit 1
+          fi
+
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "source_branch=$source_branch" >> "$GITHUB_OUTPUT"
+          echo "run_url=$run_url" >> "$GITHUB_OUTPUT"
+
+          echo "Publishing tester from Windows ARM64 Core run $run_id"
+          echo "Source branch: $source_branch"
+          echo "Source SHA: $source_sha"
+
+      - name: Download validated tester artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.source.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          rm -rf tester-package
+          mkdir tester-package
+          gh run download "$RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name ipasim-ipa-tester \
+            --dir tester-package
+
+      - name: Validate and stamp tester package
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          SOURCE_BRANCH: ${{ steps.source.outputs.source_branch }}
+          SOURCE_RUN_URL: ${{ steps.source.outputs.run_url }}
+          SOURCE_RUN_ID: ${{ steps.source.outputs.run_id }}
+        run: |
+          set -euo pipefail
+
+          required=(
+            Arm64Smoke.exe
+            IpaProbe.exe
+            IpaSimDarwinHost.dll
+            Test-Ipa.cmd
+            Test-Ipa.ps1
+            Update-Tester.cmd
+            Update-Tester.ps1
+          )
+          for file in "${required[@]}"; do
+            if [[ ! -f "tester-package/$file" ]]; then
+              echo "Validated tester artifact is missing required file: $file" >&2
+              exit 1
+            fi
+          done
+          compgen -G 'tester-package/*IpaSimLibrary.dll' >/dev/null || {
+            echo 'Validated tester artifact is missing IpaSimLibrary DLL.' >&2
+            exit 1
+          }
+          compgen -G 'tester-package/*unicorn.dll' >/dev/null || {
+            echo 'Validated tester artifact is missing Unicorn DLL.' >&2
+            exit 1
+          }
+
+          cat > tester-package/BUILD.txt <<EOF
+          source_repository=$GITHUB_REPOSITORY
+          source_branch=$SOURCE_BRANCH
+          source_sha=$SOURCE_SHA
+          windows_core_run_id=$SOURCE_RUN_ID
+          windows_core_run_url=$SOURCE_RUN_URL
+          published_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+
+          (
+            cd tester-package
+            zip -9 -q -r "$GITHUB_WORKSPACE/ipasim-ipa-tester.zip" .
+          )
+          sha256sum ipasim-ipa-tester.zip > ipasim-ipa-tester.zip.sha256
+
+      - name: Publish rolling prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: development-tester
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          SOURCE_BRANCH: ${{ steps.source.outputs.source_branch }}
+          SOURCE_RUN_URL: ${{ steps.source.outputs.run_url }}
+        run: |
+          set -euo pipefail
+
+          cat > release-notes.md <<EOF
+          This is the rolling **development Windows tester** for ipaSim.
+
+          It is published only from a successful **Windows ARM64 Core** run and is intended for iterative compatibility testing, not as a stable product release.
+
+          Source branch: \`$SOURCE_BRANCH\`
+          Source commit: \`$SOURCE_SHA\`
+          Validated run: $SOURCE_RUN_URL
+
+          Download \`ipasim-ipa-tester.zip\` once. After that, double-click \`Update-Tester.cmd\` inside the tester folder whenever a newer green build is available.
+
+          The updater verifies the release SHA-256 checksum before replacing local tester files. Generated EXE/DLL files are CI build outputs and are not committed to the source tree.
+          EOF
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Keep the rolling tag aligned with the exact validated source commit.
+            gh api \
+              --method PATCH \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
+              -f sha="$SOURCE_SHA" \
+              -F force=true >/dev/null
+
+            gh release upload "$TAG" \
+              ipasim-ipa-tester.zip \
+              ipasim-ipa-tester.zip.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+            gh release edit "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title 'ipaSim Development Windows Tester' \
+              --prerelease \
+              --notes-file release-notes.md
+          else
+            gh release create "$TAG" \
+              ipasim-ipa-tester.zip \
+              ipasim-ipa-tester.zip.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$SOURCE_SHA" \
+              --title 'ipaSim Development Windows Tester' \
+              --prerelease \
+              --notes-file release-notes.md
+          fi
+
+          echo '## Development Windows tester published' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo "Source: \`$SOURCE_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Run: $SOURCE_RUN_URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
