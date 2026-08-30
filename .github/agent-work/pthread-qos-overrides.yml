@@ -1,0 +1,28 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Implement Darwin pthread direct QoS override lifecycle compatibility used by
+  libdispatch, preserving guest Mach thread/resource identity, pairing, counts,
+  priority validation, and underflow behavior without inventing host scheduler state.
+
+scope:
+  - src/IpaSimulator/DarwinPthreadQosBridge.cpp
+  - src/IpaSimulator/DarwinPthreadQosSmoke.cpp
+  - src/IpaSimulator/SysTranslator.cpp
+
+branch: compat-pthread-qos-overrides
+started_utc: 2026-08-31T00:02:00Z
+updated_utc: 2026-08-31T00:02:00Z
+base_sha: 67ea28d39cf2a5265915966804eb02332e6677f8
+expected_pr: tbd
+
+next_checkpoint: >-
+  Validate direct resource-scoped start/end pairing, repeated-start reference
+  counts, EFAULT underflow, invalid priority/thread rejection, legacy direct
+  wrappers, and ARM64 host-call signatures with the existing pthread QoS smoke.
+
+notes: >-
+  Generic Darwin pthread QoS override compatibility only. No private application
+  names, paths, logs, RuntimeRoot contents, or target-specific behavior.
