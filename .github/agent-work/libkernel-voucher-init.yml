@@ -1,0 +1,31 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Implement the generic Darwin __libkernel_voucher_init callback-table ABI so
+  libdispatch can register voucher Mach-message callbacks with the Windows host
+  bridge without fake-success behavior.
+
+scope:
+  - src/IpaSimulator/DarwinVoucherBridge.cpp
+  - src/IpaSimulator/DarwinVoucherSmoke.cpp
+  - src/IpaSimulator/CMakeLists.txt
+  - src/IpaSimulator/SysTranslator.cpp
+  - src/IpaSimulator/IpaSimulator.cpp
+
+branch: compat-libkernel-voucher-init
+started_utc: 2026-08-30T22:38:00Z
+updated_utc: 2026-08-30T22:38:00Z
+base_sha: 0f85c04d75808a155d66e2ceccdbd47eb82f40e5
+expected_pr: tbd
+
+next_checkpoint: >-
+  Validate callback registration, version-1 voucher forwarding, version-3
+  fill_aux forwarding, and the ARM64 host-call signature in Windows Core and
+  Synthetic IPA CI.
+
+notes: >-
+  Generic libkernel/libdispatch ABI only. No private IPA names, paths, or
+  application-specific behavior. Unsupported or invalid callback shapes fail
+  explicitly rather than silently succeeding.
