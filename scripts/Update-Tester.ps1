@@ -5,6 +5,10 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# GitHub requires TLS 1.2. This matters on Windows PowerShell 5.1 systems whose
+# process may otherwise inherit an older protocol selection.
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 $Repository = 'GravAlignLabs/ipasim'
 $AssetName = 'ipasim-ipa-tester.zip'
 $ChecksumAssetName = "$AssetName.sha256"
@@ -14,6 +18,7 @@ $TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ipasim-tester-update-"
 $ZipPath = Join-Path $TempRoot $AssetName
 $ChecksumPath = Join-Path $TempRoot $ChecksumAssetName
 $ExpandedPath = Join-Path $TempRoot 'expanded'
+$BackupPath = Join-Path $TempRoot 'backup'
 
 function Assert-RequiredTesterFiles {
     param([Parameter(Mandatory = $true)][string]$Root)
@@ -47,6 +52,7 @@ function Assert-RequiredTesterFiles {
 try {
     New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $ExpandedPath -Force | Out-Null
+    New-Item -ItemType Directory -Path $BackupPath -Force | Out-Null
 
     Write-Host "Checking ipaSim development tester release: $ReleaseTag"
     Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseBase/$AssetName" -OutFile $ZipPath
@@ -66,9 +72,42 @@ try {
     Expand-Archive -LiteralPath $ZipPath -DestinationPath $ExpandedPath -Force
     Assert-RequiredTesterFiles -Root $ExpandedPath
 
+    $packageFiles = @(Get-ChildItem -LiteralPath $ExpandedPath -File)
+    $createdFiles = New-Object System.Collections.Generic.List[string]
+    $backedUpFiles = New-Object System.Collections.Generic.List[string]
+
+    # Build a complete rollback set before replacing anything. Custom files in
+    # the tester directory are not touched or deleted.
+    foreach ($item in $packageFiles) {
+        $destination = Join-Path $Here $item.Name
+        if (Test-Path -LiteralPath $destination -PathType Leaf) {
+            Copy-Item -LiteralPath $destination -Destination (Join-Path $BackupPath $item.Name) -Force
+            $backedUpFiles.Add($item.Name)
+        }
+        else {
+            $createdFiles.Add($item.Name)
+        }
+    }
+
     Write-Host 'Download verified. Updating tester files...'
-    foreach ($item in Get-ChildItem -LiteralPath $ExpandedPath -File) {
-        Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $Here $item.Name) -Force
+    try {
+        foreach ($item in $packageFiles) {
+            Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $Here $item.Name) -Force
+        }
+    }
+    catch {
+        Write-Host 'Update copy failed. Restoring previous tester files...'
+
+        foreach ($name in $backedUpFiles) {
+            Copy-Item -LiteralPath (Join-Path $BackupPath $name) -Destination (Join-Path $Here $name) -Force
+        }
+        foreach ($name in $createdFiles) {
+            $createdPath = Join-Path $Here $name
+            if (Test-Path -LiteralPath $createdPath -PathType Leaf) {
+                Remove-Item -LiteralPath $createdPath -Force
+            }
+        }
+        throw
     }
 
     Write-Host ''
