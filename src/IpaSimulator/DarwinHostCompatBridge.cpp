@@ -27,6 +27,23 @@
 
 namespace {
 
+// Public Mach ndr.h defines NDR_record_t as exactly eight one-byte fields.
+// ARM64 Darwin uses NDR 2.0, little-endian integers, ASCII characters and IEEE
+// floating point. Keep the layout byte-exact because MIG clients copy this
+// record directly into Mach messages.
+struct DarwinNdrRecord {
+  std::uint8_t MigVersion;
+  std::uint8_t InterfaceVersion;
+  std::uint8_t Reserved1;
+  std::uint8_t MigEncoding;
+  std::uint8_t IntegerRepresentation;
+  std::uint8_t CharacterRepresentation;
+  std::uint8_t FloatRepresentation;
+  std::uint8_t Reserved2;
+};
+static_assert(sizeof(DarwinNdrRecord) == 8,
+              "Darwin NDR_record_t ABI layout changed unexpectedly");
+
 void reportUnsupported(const char *Name) {
   std::fprintf(stderr,
                "[darwin-host-unsupported] %s has no faithful Windows semantic mapping\n",
@@ -52,6 +69,12 @@ std::uint32_t high32(std::uint64_t Value) {
 } // namespace
 
 extern "C" {
+
+// libsystem_kernel exports this process-global Mach NDR descriptor as data.
+// These are the standard ARM64 Darwin values: NDR protocol 2.0 (0), default MIG
+// encoding (0), little-endian integers (1), ASCII (0), IEEE floating point (0).
+// This object is intentionally guest-visible storage rather than a function shim.
+__declspec(dllexport) DarwinNdrRecord NDR_record = {0, 0, 0, 0, 1, 0, 0, 0};
 
 // csops/csops_audittoken expose XNU code-signing state. Windows Authenticode
 // and PE trust policy are not equivalent to Darwin csflags/entitlement blobs,
