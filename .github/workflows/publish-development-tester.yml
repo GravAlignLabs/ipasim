@@ -102,6 +102,16 @@ jobs:
             --name ipasim-ipa-tester \
             --dir tester-package
 
+      - name: Add tracked self-updater
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The Windows artifact remains the authoritative validated binary
+          # package. The updater is ordinary tracked source, overlaid here so
+          # adding it does not require another Windows build or binary commit.
+          cp scripts/Update-Tester.cmd tester-package/Update-Tester.cmd
+          cp scripts/Update-Tester.ps1 tester-package/Update-Tester.ps1
+
       - name: Validate and stamp tester package
         shell: bash
         env:
