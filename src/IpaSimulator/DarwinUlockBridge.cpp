@@ -153,7 +153,16 @@ int ulockWaitNanoseconds(std::uint32_t Operation, void *Address,
   if (Info.Width == sizeof(std::uint32_t))
     Expected = static_cast<std::uint32_t>(Expected);
 
+  // XNU compares the userspace word before creating/incrementing its ulock
+  // waiter record. Keep that ordering under the same registry lock used by
+  // wake so a value mismatch is never transiently visible as a real waiter.
   std::unique_lock<std::mutex> Lock(UlockRegistryMutex);
+  std::uint64_t Current = 0;
+  if (!readAddressValue(Address, Info.Width, Current))
+    return returnError(EFAULT, NoErrno);
+  if (Current != Expected)
+    return 0;
+
   std::shared_ptr<UlockState> State;
   auto It = UlockRegistry.find(Address);
   if (It == UlockRegistry.end()) {
@@ -171,17 +180,6 @@ int ulockWaitNanoseconds(std::uint32_t Operation, void *Address,
 
   ++State->Waiters;
   const std::uint64_t WakeAllGeneration = State->WakeAllGeneration;
-
-  std::uint64_t Current = 0;
-  if (!readAddressValue(Address, Info.Width, Current)) {
-    removeWaiterLocked(Address, State);
-    return returnError(EFAULT, NoErrno);
-  }
-
-  if (Current != Expected) {
-    removeWaiterLocked(Address, State);
-    return static_cast<int>(State->Waiters);
-  }
 
   auto WasWoken = [&]() {
     return State->WakeCredits != 0 ||
@@ -263,7 +261,7 @@ __ulock_wake(std::uint32_t Operation, void *Address,
     return returnError(EINVAL, NoErrno);
 
   std::shared_ptr<UlockState> State;
-  bool WakeAll = (Flags & UlfWakeAll) != 0;
+  const bool WakeAll = (Flags & UlfWakeAll) != 0;
   {
     std::lock_guard<std::mutex> Guard(UlockRegistryMutex);
     auto It = UlockRegistry.find(Address);
