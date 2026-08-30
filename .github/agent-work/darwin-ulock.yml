@@ -1,0 +1,30 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Implement the generic Darwin __ulock_wait / __ulock_wake synchronization
+  boundary used by libdispatch with Windows-backed address-wait semantics and
+  truthful unsupported behavior where Darwin owner/QoS semantics cannot be
+  reproduced.
+
+scope:
+  - src/IpaSimulator/DarwinUlockBridge.cpp
+  - src/IpaSimulator/DarwinUlockSmoke.cpp
+  - src/IpaSimulator/CMakeLists.txt
+  - src/IpaSimulator/SysTranslator.cpp
+
+branch: compat-darwin-ulock
+started_utc: 2026-08-30T23:26:00Z
+updated_utc: 2026-08-30T23:26:00Z
+base_sha: 6be9bc4b3c7b5a44d8f3f152b5c1b99117c188d4
+expected_pr: tbd
+
+next_checkpoint: >-
+  Validate __ulock_wait and __ulock_wake exports, ULF_NO_ERRNO behavior,
+  compare-and-wait blocking, timeout handling, wake-one/wake-all behavior,
+  ARM64 host-call signatures, and explicit rejection of unsupported flags.
+
+notes: >-
+  Generic Darwin synchronization ABI only. No private IPA names, paths, logs,
+  or target-specific behavior. Tracking issue #13.
