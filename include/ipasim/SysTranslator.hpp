@@ -9,6 +9,7 @@
 #include "ipasim/LoadedLibrary.hpp"
 
 #include <ffi.h>
+#include <malloc.h>
 #include <stack>
 
 namespace ipasim {
@@ -22,14 +23,38 @@ public:
   void execute(uint64_t Addr);
 
   // Prepare an additional CPU context for code inside the already-loaded guest
-  // process. This installs its own stack/register state and translation hooks
-  // without repeating process-wide image/Objective-C initialization.
-  bool initializeExecutionContext();
+  // process. It receives its own stack/register state and the normal host-call
+  // and data-memory hooks, but does not repeat process-wide ObjC/image startup.
+  bool initializeExecutionContext() {
+    if (ExecutionContextInitialized)
+      return true;
 
-  // Host bridge callbacks use the translator belonging to the ARM64 context
-  // currently executing on this Windows thread. Nested guest->host->guest calls
-  // therefore return to the correct CPU context instead of always using main.
-  static SysTranslator *current();
+    constexpr size_t StackSize = 8 * 1024 * 1024;
+    void *StackPtr = _aligned_malloc(StackSize, DynamicLoader::PageSize);
+    if (!StackPtr) {
+      Log.error("could not allocate guest execution-context stack");
+      return false;
+    }
+
+    const uint64_t StackAddr = reinterpret_cast<uint64_t>(StackPtr);
+    if (!Emu.mapMemory(StackAddr, StackSize,
+                       UC_PROT_READ | UC_PROT_WRITE)) {
+      _aligned_free(StackPtr);
+      return false;
+    }
+    Emu.writeReg(UC_ARM64_REG_SP,
+                 (StackAddr + StackSize) & ~uint64_t(0xF));
+
+    Emu.hook(UC_HOOK_MEM_FETCH_PROT, &SysTranslator::handleFetchProtMem, this);
+    Emu.hook(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED,
+             &SysTranslator::handleMemUnmapped, this);
+
+    // Keep the backing page alive. Thread join/detach lifetime will own stack
+    // reclamation once pthread objects are layered over this execution context.
+    ExecutionStack = StackPtr;
+    ExecutionContextInitialized = true;
+    return true;
+  }
 
   void *translate(void *FP);
   void *translate(void *FP, size_t ArgC, bool Returns = false);
@@ -72,8 +97,6 @@ private:
 
   static constexpr ConstexprString WrapsPrefix = "$__ipaSim_wraps_";
   static constexpr uint64_t DLLBase = 0x1000;
-  static thread_local SysTranslator *Current;
-
   DynamicLoader &Dyld;
   Emulator &Emu;
   std::stack<uint64_t> LRs;
@@ -133,13 +156,11 @@ public:
     LibraryInfo LI(Dyld.lookup(Addr));
     if (!LI.Lib || LI.Lib->isDLL()) {
       return reinterpret_cast<RetTy (*)(ArgTys...)>(FP)(Args...);
-    } else {
-      pushArgs<UC_ARM64_REG_X0>(Args...);
-      Sys.execute(Addr);
-
-      if constexpr (!std::is_same_v<RetTy, void>)
-        return reinterpret_cast<RetTy>(Emu.readReg(UC_ARM64_REG_X0));
     }
+    pushArgs<UC_ARM64_REG_X0>(Args...);
+    Sys.execute(Addr);
+    if constexpr (!std::is_same_v<RetTy, void>)
+      return reinterpret_cast<RetTy>(Emu.readReg(UC_ARM64_REG_X0));
   }
 
 private:
@@ -167,7 +188,6 @@ public:
   }
   size_t getNextTypeSize();
   bool hasNext() { return *T; }
-
   static const size_t InvalidSize = static_cast<size_t>(-1);
 
 private:
@@ -190,70 +210,42 @@ private:
       ++P;
     if (!*P)
       return false;
-
     const char C = *P++;
     switch (C) {
-    case 'v':
-    case 'c':
-    case 'C':
-    case 's':
-    case 'S':
-    case 'i':
-    case 'I':
-    case 'l':
-    case 'L':
-    case 'q':
-    case 'Q':
-    case 'B':
-    case '#':
-    case ':':
+    case 'v': case 'c': case 'C': case 's': case 'S': case 'i': case 'I':
+    case 'l': case 'L': case 'q': case 'Q': case 'B': case '#': case ':':
     case '*':
       return true;
     case '@':
-      if (*P == '?')
-        ++P;
-      else if (*P == '"')
-        skipQuoted(P);
+      if (*P == '?') ++P;
+      else if (*P == '"') skipQuoted(P);
       return true;
     case '^':
       return consumeType(P, false);
-    case 'f':
-    case 'd':
-    case 'D':
+    case 'f': case 'd': case 'D':
       return !TopLevel;
     case 'b':
-      while (*P >= '0' && *P <= '9')
-        ++P;
+      while (*P >= '0' && *P <= '9') ++P;
       return !TopLevel;
     case '[': {
-      while (*P >= '0' && *P <= '9')
-        ++P;
+      while (*P >= '0' && *P <= '9') ++P;
       bool SyntaxOK = consumeType(P, false);
-      if (*P != ']')
-        return false;
+      if (*P != ']') return false;
       ++P;
       return SyntaxOK && !TopLevel;
     }
-    case '{':
-    case '(': {
+    case '{': case '(': {
       const char Close = C == '{' ? '}' : ')';
-      while (*P && *P != '=' && *P != Close)
-        ++P;
-      if (!*P)
-        return false;
+      while (*P && *P != '=' && *P != Close) ++P;
+      if (!*P) return false;
       if (*P == '=') {
         ++P;
         while (*P && *P != Close) {
-          if (*P == '"') {
-            skipQuoted(P);
-            continue;
-          }
-          if (!consumeType(P, false))
-            return false;
+          if (*P == '"') { skipQuoted(P); continue; }
+          if (!consumeType(P, false)) return false;
         }
       }
-      if (*P != Close)
-        return false;
+      if (*P != Close) return false;
       ++P;
       return !TopLevel;
     }
@@ -265,13 +257,10 @@ private:
   }
 
   static bool isIntegerPointerSignature(const char *P) {
-    if (!P)
-      return false;
+    if (!P) return false;
     while (*P) {
-      if (!consumeType(P, true))
-        return false;
-      while (*P >= '0' && *P <= '9')
-        ++P;
+      if (!consumeType(P, true)) return false;
+      while (*P >= '0' && *P <= '9') ++P;
     }
     return true;
   }
@@ -283,6 +272,7 @@ template <typename... ArgTys>
 inline void SysTranslator::callBack(void *FP, ArgTys... Args) {
   DynamicBackCaller(Dyld, Emu, *this).callBack<void, ArgTys...>(FP, Args...);
 }
+
 template <typename... ArgTys>
 inline void *SysTranslator::callBackR(void *FP, ArgTys... Args) {
   return DynamicBackCaller(Dyld, Emu, *this)
