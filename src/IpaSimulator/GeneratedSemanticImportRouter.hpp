@@ -22,10 +22,10 @@ GeneratedSemanticImportSelection selectGeneratedSemanticImport(
 
 bool isSelectedGeneratedSemanticImport(std::uint64_t address);
 
-// The first production live-guest profile is deliberately narrow: _getpid has
-// no arguments and commits one generated signed 32-bit result into ARM64 x0.
-// Future symbols must extend live guest capture/commit deliberately rather than
-// bypassing the generated adapter with another handwritten signature table.
+// Live execution is profile-driven by the approved route table. The current
+// production profile has no arguments and commits one signed 32-bit result into
+// ARM64 x0. Additional profiles must extend guest capture/commit deliberately;
+// they must not bypass generated ABI records with a handwritten signature table.
 bool executeSelectedGeneratedSemanticImport(
     std::uint64_t address,
     std::uint64_t& guestX0,

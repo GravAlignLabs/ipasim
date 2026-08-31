@@ -11,6 +11,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 PRODUCTION_ADAPTERS = (
     ROOT / "src" / "IpaSimulator" / "GeneratedSemanticProviderAdapters.inc"
 )
+APPROVED_ROUTES = (
+    ROOT / "src" / "IpaSimulator" / "ApprovedSemanticImportRoutes.inc"
+)
+ROUTER = ROOT / "src" / "IpaSimulator" / "GeneratedSemanticImportRouter.cpp"
 SYS_TRANSLATOR = ROOT / "src" / "IpaSimulator" / "SysTranslator.cpp"
 
 
@@ -26,6 +30,21 @@ class SemanticProviderFixtureTests(unittest.TestCase):
         self.assertEqual(table["adapters"][0]["symbol"], "_getpid")
         self.assertFalse(table["adapters"][0]["requires_pointer_validation"])
         return table
+
+    def _approved_routes(self):
+        source = APPROVED_ROUTES.read_text(encoding="utf-8")
+        pattern = re.compile(
+            r"\{\s*"
+            r'"(?P<guest>[^"]+)"\s*,\s*'
+            r'"(?P<host>[^"]+)"\s*,\s*'
+            r'L"(?P<module>[^"]+)"\s*,\s*'
+            r'"(?P<adapter>[^"]+)"\s*,\s*'
+            r'"(?P<owner>[^"]+)"\s*,\s*'
+            r"LiveGuestProfile::(?P<profile>[A-Za-z0-9_]+)\s*,\s*"
+            r"\}",
+            re.DOTALL,
+        )
+        return [match.groupdict() for match in pattern.finditer(source)]
 
     def test_generated_cpp_fixture_has_no_drift(self):
         table = self._generated_table()
@@ -52,6 +71,40 @@ class SemanticProviderFixtureTests(unittest.TestCase):
             rendered,
             "production semantic adapter drifted from runtime_adapter_table.py",
         )
+
+    def test_approved_route_table_is_explicit_and_backed_by_generated_abi(self):
+        table = self._generated_table()
+        generated_symbols = {adapter["symbol"] for adapter in table["adapters"]}
+        routes = self._approved_routes()
+
+        self.assertEqual(
+            routes,
+            [
+                {
+                    "guest": "_getpid",
+                    "host": "getpid",
+                    "module": "ipasimdarwinhost.dll",
+                    "adapter": "_getpid",
+                    "owner": "DarwinHostBridge.getpid",
+                    "profile": "NoArgumentsSInt32ToX0",
+                }
+            ],
+            "semantic approval changed without an explicit route-table update",
+        )
+        for route in routes:
+            self.assertIn(
+                route["adapter"],
+                generated_symbols,
+                "approved semantic route is missing generator-owned ABI metadata",
+            )
+
+    def test_router_selection_logic_is_table_driven(self):
+        router = ROUTER.read_text(encoding="utf-8")
+        self.assertIn("ApprovedSemanticImportRoutes", router)
+        self.assertIn("findApprovedRoute(hostLookupName, modulePath)", router)
+        self.assertNotIn("GuestGetpid", router)
+        self.assertNotIn("HostGetpid", router)
+        self.assertNotIn("hostLookupName != HostGetpid", router)
 
     def test_getpid_is_not_duplicated_in_handwritten_darwin_abi_table(self):
         table = self._generated_table()
