@@ -11,23 +11,25 @@ task: >-
 scope:
   - include/ipasim/Emulator.hpp
   - include/ipasim/SysTranslator.hpp
+  - include/ipasim/IpaSimulator.hpp
   - src/IpaSimulator/Emulator.cpp
   - src/IpaSimulator/SysTranslator.cpp
+  - src/IpaSimulator/IpaSimulator.cpp
   - src/IpaSimulator/DarwinPthreadWorkqueueBridge.cpp
   - src/IpaSimulator/CMakeLists.txt
   - .github/agent-work/runtime-guest-threads.yml
 
 branch: runtime-guest-thread-execution
 started_utc: 2026-08-31T04:24:00Z
-updated_utc: 2026-08-31T04:24:00Z
-base_sha: 6f803b6598f6ce283026c2eaa9f602492fa393ce
+updated_utc: 2026-08-31T04:31:00Z
+base_sha: d00815c4557a2c038974214615a0f4bbdcee5b4a
 expected_pr: tbd
 
 next_checkpoint: >-
   Extract repeatable shared-memory engine setup from the architectural smoke,
-  give guest callbacks independent ARM64 CPU/register/stack contexts, wire
-  pthread workqueue worker requests to that execution layer, and run the
-  authoritative Windows ARM64 and synthetic IPA CI workflows.
+  give guest callbacks independent ARM64 CPU/register/stack contexts, expose a
+  dedicated threaded callback entry point to the workqueue host bridge, and run
+  the authoritative Windows ARM64 and synthetic IPA CI workflows.
 
 notes: >-
   Optimize for a working emulator. Audit code and audit self-tests remain
