@@ -20,8 +20,25 @@ using namespace winrt;
 using namespace Windows::ApplicationModel::Activation;
 #endif
 
+namespace {
+thread_local SysTranslator *ActiveSysTranslator = nullptr;
+} // namespace
+
 // TODO: This Emu-Dyld circular reference is not very cool.
 IpaSimulator::IpaSimulator() : Emu(Dyld), Dyld(Emu), Sys(Dyld, Emu) {}
+
+ScopedSysTranslatorActivation::ScopedSysTranslatorActivation(SysTranslator &Sys)
+    : Previous(ActiveSysTranslator) {
+  ActiveSysTranslator = &Sys;
+}
+
+ScopedSysTranslatorActivation::~ScopedSysTranslatorActivation() {
+  ActiveSysTranslator = Previous;
+}
+
+SysTranslator &ipasim::currentSysTranslator() {
+  return ActiveSysTranslator ? *ActiveSysTranslator : IpaSim.Sys;
+}
 
 unique_ptr<GuestExecutionContext> IpaSimulator::createExecutionContext() {
   auto Context = make_unique<GuestExecutionContext>();
@@ -42,18 +59,12 @@ unique_ptr<GuestExecutionContext> IpaSimulator::createExecutionContext() {
 #if !defined(IPASIM_MODERN_CORE)
 void ipasim::start(const hstring &Path,
                    const LaunchActivatedEventArgs &LaunchArgs) {
-  // Load the binary.
   IpaSim.MainBinary = to_string(Path);
   LoadedLibrary *App = IpaSim.Dyld.load(IpaSim.MainBinary);
   if (!App)
     return;
 
-  // Execute it.
   IpaSim.Sys.execute(App);
-
-  // Call `UIApplicationLaunched`. `get_abi` converts C++/WinRT object to its
-  // C++/CX equivalent. The modern framework boundary will replace this legacy
-  // WinObjC launch hook; it is left explicit until that replacement lands.
   IpaSim.Sys.call("UIKit.dll", "UIApplicationLaunched", get_abi(LaunchArgs));
 }
 TextBlockProvider &ipasim::logText() { return IpaSim.LogText; }
@@ -88,10 +99,6 @@ IPASIM_API int ipaSim_probeImage(const char *Path) {
   if (!Path || !*Path)
     return 64;
 
-  // This is intentionally a loader-only checkpoint for tester builds. It uses
-  // the same DynamicLoader and modern Mach-O path as normal ipaSim startup but
-  // does not execute guest code or enter the incomplete UIKit/SwiftUI launch
-  // boundary.
   IpaSim.MainBinary = Path;
   LoadedLibrary *App = IpaSim.Dyld.load(IpaSim.MainBinary);
   return App ? 0 : 2;
@@ -101,10 +108,6 @@ IPASIM_API int ipaSim_executeImage(const char *Path, uint64_t *ReturnValue) {
   if (!Path || !*Path || !ReturnValue)
     return 64;
 
-  // This deliberately uses the same loader and SysTranslator execution path as
-  // normal ipaSim startup. The synthetic CI image is intentionally framework-
-  // free, so a successful X0 return proves a GitHub-built iOS ARM64 Mach-O was
-  // loaded and executed on the Windows host rather than merely parsed.
   IpaSim.MainBinary = Path;
   LoadedLibrary *App = IpaSim.Dyld.load(IpaSim.MainBinary);
   if (!App)
@@ -157,29 +160,26 @@ IPASIM_API int ipaSim_executeImageThreaded(const char *Path,
   return 0;
 }
 
-IPASIM_API void *ipaSim_translate(void *FP) { return IpaSim.Sys.translate(FP); }
+IPASIM_API void *ipaSim_translate(void *FP) {
+  return currentSysTranslator().translate(FP);
+}
 IPASIM_API void ipaSim_translate4(uint64_t *Addr) {
-  // Historical export name retained for generated-wrapper compatibility; the
-  // slot itself is now pointer-width for ARM64 guests.
-  Addr[1] = reinterpret_cast<uint64_t>(
-      IpaSim.Sys.translate(reinterpret_cast<void *>(Addr[1])));
+  Addr[1] = reinterpret_cast<uint64_t>(currentSysTranslator().translate(
+      reinterpret_cast<void *>(Addr[1])));
 }
 IPASIM_API void *ipaSim_translateC(void *FP, size_t ArgC) {
-  return IpaSim.Sys.translate(FP, ArgC);
+  return currentSysTranslator().translate(FP, ArgC);
 }
 IPASIM_API const char *ipaSim_processPath() {
   return IpaSim.MainBinary.c_str();
 }
 IPASIM_API void ipaSim_callBack1(void *FP, void *Arg0) {
-  IpaSim.Sys.callBack(FP, Arg0);
+  currentSysTranslator().callBack(FP, Arg0);
 }
 
-// Workqueue workers must be able to execute independently from the ARM64 CPU
-// that requested them. Each call creates another Unicorn context backed by the
-// same guest-process pages, then runs the callback on its own Windows thread.
-// The detached lifetime mirrors Darwin's asynchronous workqueue request model;
-// the GuestExecutionContext owns the worker stack/CPU state until the callback
-// returns.
+// Workqueue workers execute on independent ARM64 CPU/register/stack contexts.
+// The host worker is detached because Darwin workqueue requests are asynchronous;
+// GuestExecutionContext owns the Unicorn CPU and stack until the callback exits.
 IPASIM_API void ipaSim_callBack1Threaded(void *FP, void *Arg0) {
   try {
     thread([FP, Arg0]() {
@@ -195,17 +195,17 @@ IPASIM_API void ipaSim_callBack1Threaded(void *FP, void *Arg0) {
 }
 
 IPASIM_API void ipaSim_callBack2(void *FP, void *Arg0, void *Arg1) {
-  IpaSim.Sys.callBack(FP, Arg0, Arg1);
+  currentSysTranslator().callBack(FP, Arg0, Arg1);
 }
 IPASIM_API void *ipaSim_callBack1r(void *FP, void *Arg0) {
-  return IpaSim.Sys.callBackR(FP, Arg0);
+  return currentSysTranslator().callBackR(FP, Arg0);
 }
 IPASIM_API void *ipaSim_callBack2r(void *FP, void *Arg0, void *Arg1) {
-  return IpaSim.Sys.callBackR(FP, Arg0, Arg1);
+  return currentSysTranslator().callBackR(FP, Arg0, Arg1);
 }
 IPASIM_API void *ipaSim_callBack3r(void *FP, void *Arg0, void *Arg1,
                                    void *Arg2) {
-  return IpaSim.Sys.callBackR(FP, Arg0, Arg1, Arg2);
+  return currentSysTranslator().callBackR(FP, Arg0, Arg1, Arg2);
 }
 IPASIM_API void ipaSim_register(void *Hdr) { IpaSim.Dyld.registerMachO(Hdr); }
 IPASIM_API void
