@@ -66,6 +66,7 @@ class TbdInterface:
     sources: tuple[str, ...]
     source_format_versions: tuple[int, ...] = ()
     source_current_versions: tuple[str, ...] = ()
+    evidence_variations: tuple[tuple[str, str, tuple[int, ...]], ...] = ()
 
 
 def _require_yaml() -> None:
@@ -334,43 +335,35 @@ def _reexport_facts_for_target(
     }
 
 
-def _validate_mixed_format_evidence(group: Sequence[TbdInterface]) -> None:
-    """Reconcile format generations while rejecting contradictory shared facts.
+def _mixed_format_evidence_variations(
+    group: Sequence[TbdInterface],
+) -> tuple[tuple[str, str, tuple[int, ...]], ...]:
+    """Describe representation drift without treating omission as negative evidence.
 
-    Older standalone stubs can carry export categories that newer umbrella v4
-    documents omit (for example Objective-C class metadata).  Absence of a
-    category in one representation is therefore not negative evidence.  When
-    both representations do describe the same category for the same target,
-    however, their normalized facts must agree exactly.
+    Real SDK bundles can contain a legacy standalone stub and a v4 umbrella
+    document for the same install name.  Their export/re-export inventories can
+    be generated from different snapshots or carry different metadata classes.
+    Both observations are retained.  Variation is surfaced explicitly so later
+    planning can distinguish a clean duplicate from mixed-generation evidence.
     """
+    variations: set[tuple[str, str, tuple[int, ...]]] = set()
     for left_index, left in enumerate(group):
         for right in group[left_index + 1 :]:
             if left.format_version == right.format_version:
                 continue
+            format_versions = tuple(sorted({left.format_version, right.format_version}))
             overlap = sorted(set(left.targets).intersection(right.targets))
             for target in overlap:
                 left_exports = _export_facts_by_kind_for_target(left, target)
                 right_exports = _export_facts_by_kind_for_target(right, target)
-                for kind in sorted(set(left_exports).intersection(right_exports)):
-                    if left_exports[kind] != right_exports[kind]:
-                        versions = sorted({left.format_version, right.format_version})
-                        raise TbdParseError(
-                            f"{left.install_name}: conflicting export evidence on {target} "
-                            f"across TAPI format versions {versions} for kind {kind!r}"
-                        )
-
-                left_reexports = _reexport_facts_for_target(left, target)
-                right_reexports = _reexport_facts_for_target(right, target)
-                if (
-                    left_reexports
-                    and right_reexports
-                    and left_reexports != right_reexports
+                for kind in sorted(set(left_exports).union(right_exports)):
+                    if left_exports.get(kind, set()) != right_exports.get(kind, set()):
+                        variations.add((target, f"export:{kind}", format_versions))
+                if _reexport_facts_for_target(left, target) != _reexport_facts_for_target(
+                    right, target
                 ):
-                    versions = sorted({left.format_version, right.format_version})
-                    raise TbdParseError(
-                        f"{left.install_name}: conflicting re-export evidence on {target} "
-                        f"across TAPI format versions {versions}"
-                    )
+                    variations.add((target, "reexports", format_versions))
+    return tuple(sorted(variations))
 
 
 def _current_versions_by_format(
@@ -401,7 +394,7 @@ def _merge_interface_group(group: Sequence[TbdInterface]) -> TbdInterface:
     compatibility_versions = {
         item.compatibility_version for item in group if item.compatibility_version
     }
-    _validate_mixed_format_evidence(group)
+    evidence_variations = _mixed_format_evidence_variations(group)
 
     for format_version, values in sorted(_current_versions_by_format(group).items()):
         if len(values) > 1:
@@ -458,6 +451,7 @@ def _merge_interface_group(group: Sequence[TbdInterface]) -> TbdInterface:
         sources=tuple(sorted(sources)),
         source_format_versions=tuple(sorted(versions)),
         source_current_versions=tuple(sorted(current_versions)),
+        evidence_variations=evidence_variations,
     )
 
 
@@ -477,6 +471,8 @@ def build_sdk_manifest(interfaces: Iterable[TbdInterface]) -> dict:
     objc_count = 0
     export_count = 0
     reexport_count = 0
+    mixed_format_interface_count = 0
+    evidence_variation_count = 0
     symbol_providers: dict[tuple[str, str, bool], dict[str, set[str]]] = {}
 
     rendered = []
@@ -485,6 +481,10 @@ def build_sdk_manifest(interfaces: Iterable[TbdInterface]) -> dict:
         reexport_count += len(interface.reexports)
         weak_count += sum(1 for item in interface.exports if item.weak)
         objc_count += sum(1 for item in interface.exports if item.kind.startswith("objc-"))
+        source_versions = interface.source_format_versions or (interface.format_version,)
+        if len(source_versions) > 1:
+            mixed_format_interface_count += 1
+        evidence_variation_count += len(interface.evidence_variations)
 
         rendered_exports = []
         for item in interface.exports:
@@ -517,7 +517,6 @@ def build_sdk_manifest(interfaces: Iterable[TbdInterface]) -> dict:
                 for item in interface.reexports
             ],
         }
-        source_versions = interface.source_format_versions or (interface.format_version,)
         if len(source_versions) > 1:
             rendered_interface["source_format_versions"] = list(source_versions)
         current_versions = (
@@ -526,6 +525,15 @@ def build_sdk_manifest(interfaces: Iterable[TbdInterface]) -> dict:
         )
         if len(current_versions) > 1:
             rendered_interface["source_current_versions"] = list(current_versions)
+        if interface.evidence_variations:
+            rendered_interface["evidence_variations"] = [
+                {
+                    "target": target,
+                    "category": category,
+                    "format_versions": list(format_versions),
+                }
+                for target, category, format_versions in interface.evidence_variations
+            ]
         rendered.append(rendered_interface)
 
     symbol_index = []
@@ -557,6 +565,8 @@ def build_sdk_manifest(interfaces: Iterable[TbdInterface]) -> dict:
             "objc_export_count": objc_count,
             "reexport_count": reexport_count,
             "unique_symbol_count": len(symbol_index),
+            "mixed_format_interface_count": mixed_format_interface_count,
+            "evidence_variation_count": evidence_variation_count,
         },
         "interfaces": rendered,
         "symbol_index": symbol_index,
