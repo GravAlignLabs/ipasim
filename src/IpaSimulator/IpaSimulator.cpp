@@ -7,7 +7,10 @@
 #include "ipasim/DynamicLoader.hpp"
 #include "ipasim/LoadedLibrary.hpp"
 
+#include <memory>
 #include <string>
+#include <system_error>
+#include <thread>
 
 using namespace ipasim;
 using namespace std;
@@ -19,6 +22,22 @@ using namespace Windows::ApplicationModel::Activation;
 
 // TODO: This Emu-Dyld circular reference is not very cool.
 IpaSimulator::IpaSimulator() : Emu(Dyld), Dyld(Emu), Sys(Dyld, Emu) {}
+
+unique_ptr<GuestExecutionContext> IpaSimulator::createExecutionContext() {
+  auto Context = make_unique<GuestExecutionContext>();
+  Context->Emu = make_unique<Emulator>(Dyld);
+  if (!Dyld.registerEmulator(*Context->Emu)) {
+    Log.error("could not replay guest process mappings into worker CPU context");
+    return nullptr;
+  }
+
+  Context->Sys = make_unique<SysTranslator>(Dyld, *Context->Emu);
+  if (!Context->Sys->initializeExecutionContext()) {
+    Log.error("could not initialize worker ARM64 execution context");
+    return nullptr;
+  }
+  return Context;
+}
 
 #if !defined(IPASIM_MODERN_CORE)
 void ipasim::start(const hstring &Path,
@@ -117,6 +136,27 @@ IPASIM_API const char *ipaSim_processPath() {
 IPASIM_API void ipaSim_callBack1(void *FP, void *Arg0) {
   IpaSim.Sys.callBack(FP, Arg0);
 }
+
+// Workqueue workers must be able to execute independently from the ARM64 CPU
+// that requested them. Each call creates another Unicorn context backed by the
+// same guest-process pages, then runs the callback on its own Windows thread.
+// The detached lifetime mirrors Darwin's asynchronous workqueue request model;
+// the GuestExecutionContext owns the worker stack/CPU state until the callback
+// returns.
+IPASIM_API void ipaSim_callBack1Threaded(void *FP, void *Arg0) {
+  try {
+    thread([FP, Arg0]() {
+      auto Context = IpaSim.createExecutionContext();
+      if (!Context)
+        return;
+      Context->Sys->callBack(FP, Arg0);
+    }).detach();
+  } catch (const system_error &Error) {
+    Log.error() << "could not create Windows host thread for guest callback: "
+                << Error.what() << Log.end();
+  }
+}
+
 IPASIM_API void ipaSim_callBack2(void *FP, void *Arg0, void *Arg1) {
   IpaSim.Sys.callBack(FP, Arg0, Arg1);
 }
