@@ -1,0 +1,35 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Connect the machine-readable libffi bridge-plan surface to a production-independent
+  runtime adapter table that can validate, register, and execute only proven
+  mechanical ARM64-to-Win64 bridge records against controlled host functions.
+
+scope:
+  - tools/compat_surface/runtime_adapter_table.py
+  - tools/compat_surface/test_runtime_adapter_table.py
+  - tools/compat_surface/fixtures/runtime_adapter_bridge_plan.json
+  - src/IpaSimulator/GeneratedBridgeAdapter.hpp
+  - src/IpaSimulator/GeneratedBridgeAdapter.cpp
+  - src/IpaSimulator/GeneratedBridgeAdapterSmoke.cpp
+  - src/IpaSimulator/CMakeLists.txt
+  - .github/agent-work/generated-runtime-adapter.yml
+
+branch: compat-generated-runtime-adapter
+started_utc: 2026-08-31T15:09:00Z
+updated_utc: 2026-08-31T15:09:00Z
+base_sha: eaa7b2d6b04ce5ff9a22144742420183a0dcc14d
+expected_pr: draft-or-tbd
+
+next_checkpoint: >-
+  Generate deterministic C++ adapter records from libffi bridge-plan JSON, load
+  them into a duplicate-safe runtime registry, execute controlled scalar and
+  aggregate host functions through the shared libffi adapter, and keep pointer,
+  callback, variadic, guest-stack, and semantic boundaries explicit.
+
+notes: >-
+  No production symbol routing in this increment. Generated metadata is not
+  semantic compatibility. Unknown guest stack locations and opaque guest
+  pointers remain blocked unless a controlled test explicitly validates them.
