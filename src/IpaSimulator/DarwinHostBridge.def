@@ -7,9 +7,19 @@ EXPORTS
     getgid=darwin_getgid
     getegid=darwin_getegid
     open=darwin_open
+    open$NOCANCEL=darwin_open
+    close$NOCANCEL=close
+    fcntl$NOCANCEL=fcntl
     lseek=darwin_lseek
     read=darwin_read
+    read$NOCANCEL=darwin_read
     write=darwin_write
+    write$NOCANCEL=darwin_write
+    pread=darwin_pread
+    pread$NOCANCEL=darwin_pread
+    pwrite=darwin_pwrite
+    pwrite$NOCANCEL=darwin_pwrite
+    sigsuspend$NOCANCEL=darwin_sigsuspend_nocancel
     mach_task_self_ DATA
     vm_page_size DATA
     NDR_record DATA
