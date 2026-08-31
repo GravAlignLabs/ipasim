@@ -52,8 +52,7 @@ bool Emulator::mapMemory(uint64_t Addr, uint64_t Size, uc_prot Perms) {
   return true;
 }
 
-// Per-execution-context mappings (currently guest stacks) must never be
-// replayed into another Unicorn engine.
+// Replay an already-recorded process mapping without re-registering it.
 bool Emulator::mapPrivateMemory(uint64_t Addr, uint64_t Size, uc_prot Perms) {
   return mapMemoryImpl(Addr, Size, Perms);
 }
@@ -138,16 +137,19 @@ void DynamicLoader::recordSharedMemory(uint64_t Address, uint64_t Size,
       SharedMemoryMapping{Address, Size, Permissions});
 }
 
-void DynamicLoader::registerEmulator(Emulator &ExecutionEmulator) {
+bool DynamicLoader::registerEmulator(Emulator &ExecutionEmulator) {
   std::vector<SharedMemoryMapping> Snapshot;
   {
     std::lock_guard<std::mutex> Guard(SharedMemoryMutex);
     Snapshot = SharedMemoryMappings;
   }
 
-  for (const SharedMemoryMapping &Mapping : Snapshot)
-    ExecutionEmulator.mapPrivateMemory(Mapping.Address, Mapping.Size,
-                                       Mapping.Permissions);
+  for (const SharedMemoryMapping &Mapping : Snapshot) {
+    if (!ExecutionEmulator.mapPrivateMemory(
+            Mapping.Address, Mapping.Size, Mapping.Permissions))
+      return false;
+  }
+  return true;
 }
 
 bool DynamicLoader::mapKnownSharedMemory(Emulator &ExecutionEmulator,
@@ -175,7 +177,7 @@ bool DynamicLoader::mapKnownSharedMemory(Emulator &ExecutionEmulator,
 bool DynamicLoader::mapExternalSharedMemory(Emulator &ExecutionEmulator,
                                             uint64_t Address,
                                             uint64_t Size) {
-  if (Size == 0)
+  if (Size == 0 || Address > UINT64_MAX - Size)
     return false;
 
   uint64_t Start = alignToPageSize(Address);
