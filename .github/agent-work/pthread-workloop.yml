@@ -3,30 +3,35 @@ owner: DeerSpotter
 agent: ChatGPT GPT-5.6 Sol
 
 task: >-
-  Implement the next generic Darwin pthread workloop compatibility boundary used
-  by libdispatch, beginning with __pthread_workloop_create and the paired destroy
-  lifecycle, with executable semantic coverage and explicit ARM64 host-call ABI.
+  Correct the simulator libSystem pthread overlay provider namespace exposed to
+  libdispatch, then implement the paired pthread workloop compatibility boundary
+  only if corrected resolution still reaches the Windows host bridge.
 
 scope:
+  - include/ipasim/SimulatorLibSystem.hpp
+  - src/IpaSimulator/LoadedLibrary.cpp
+  - src/IpaSimulator/StaticSymbolAudit.hpp
+  - src/IpaSimulator/StaticSymbolAuditSelfTest.hpp
   - src/IpaSimulator/DarwinPthreadWorkloopBridge.cpp
   - src/IpaSimulator/DarwinPthreadWorkloopSmoke.cpp
   - src/IpaSimulator/CMakeLists.txt
   - src/IpaSimulator/SysTranslator.cpp
-  - src/IpaSimulator/StaticSymbolAudit.hpp
   - .github/agent-work/pthread-workloop.yml
 
 branch: compat-pthread-workloop
 started_utc: 2026-08-31T02:45:00Z
-updated_utc: 2026-08-31T02:45:00Z
+updated_utc: 2026-08-31T02:55:00Z
 base_sha: 2727295354ac84d54eaadea50e51ac87388f15c5
 expected_pr: tbd
 
 next_checkpoint: >-
-  Preserve the libsystem_sim_pthread provider namespace, implement the workloop
-  create/destroy lifecycle without placeholder success, add exact host ABI
-  signatures and semantic smoke coverage, then let CI expose the next genuine
-  libdispatch pthread dependency.
+  Restore the target-proven simulator libSystem overlay-to-host-companion
+  reexport namespace in both runtime resolution and static audit, prove it with
+  public self-test coverage, and let CI or the next local probe establish whether
+  pthread workloop itself is still the first genuine host semantic boundary.
 
 notes: >-
   No blanket provider remap, no monkey patching, and no no-op workloop success.
-  Keep the change generic and public; do not include private IPA or RuntimeRoot data.
+  If workloop reaches the Windows bridge, use the verified Darwin ABI and explicit
+  Darwin ENOTSUP semantics rather than inventing kernel workloop behavior. Keep the
+  change generic and public; do not include private IPA or RuntimeRoot data.
