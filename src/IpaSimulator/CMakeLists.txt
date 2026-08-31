@@ -364,6 +364,33 @@ if (IPASIM_MODERN_CORE)
         DEPENDS LibffiBridgeSmoke
         USES_TERMINAL)
     add_dependencies (IpaSimLibrary LibffiBridgeCheck)
+
+    # PR #48 compiles the machine-readable bridge plan into deterministic C++
+    # records. This target proves that those generated records can be loaded into
+    # a duplicate-safe runtime registry, bound only to explicitly approved host
+    # functions, and executed through the same Win64 libffi backend. It remains
+    # outside SysTranslator production symbol routing.
+    add_library (IpaSimGeneratedBridgeAdapter STATIC
+        GeneratedBridgeAdapter.cpp)
+    target_compile_options (IpaSimGeneratedBridgeAdapter PRIVATE -std=c++17)
+    target_link_libraries (IpaSimGeneratedBridgeAdapter PUBLIC ffi)
+
+    add_executable (GeneratedBridgeAdapterSmoke
+        GeneratedBridgeAdapterSmoke.cpp)
+    target_compile_options (GeneratedBridgeAdapterSmoke PRIVATE -std=c++20)
+    target_include_directories (GeneratedBridgeAdapterSmoke PRIVATE
+        "${SOURCE_DIR}/tools/compat_surface/fixtures")
+    target_sources (GeneratedBridgeAdapterSmoke PRIVATE
+        $<TARGET_OBJECTS:ffi-win64-machdep>)
+    target_link_libraries (GeneratedBridgeAdapterSmoke PRIVATE
+        IpaSimGeneratedBridgeAdapter
+        ffi)
+
+    add_custom_target (GeneratedBridgeAdapterCheck
+        COMMAND "$<TARGET_FILE:GeneratedBridgeAdapterSmoke>"
+        DEPENDS GeneratedBridgeAdapterSmoke
+        USES_TERMINAL)
+    add_dependencies (IpaSimLibrary GeneratedBridgeAdapterCheck)
 endif ()
 
 # This executable is deliberately independent of the ipaSim core. It proves
