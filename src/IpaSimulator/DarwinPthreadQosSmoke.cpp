@@ -1,5 +1,6 @@
 // DarwinPthreadQosSmoke.cpp: semantic/export checks for Darwin
-// pthread_priority_t QoS codecs and direct explicit override lifecycle.
+// pthread_priority_t QoS codecs, current-thread property updates, and direct
+// explicit override lifecycle.
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -15,6 +16,7 @@ namespace {
 
 using DarwinPriority = std::uint64_t;
 using DarwinFlags = std::uint64_t;
+using SetFlags = std::uint32_t;
 using QosClass = std::uint32_t;
 using MachPort = std::uint32_t;
 
@@ -29,7 +31,19 @@ constexpr QosClass QosUserInteractive = 0x21;
 constexpr DarwinFlags OvercommitFlag = 0x80000000ULL;
 constexpr DarwinFlags InheritFlag = 0x40000000ULL;
 constexpr DarwinFlags SchedPriFlag = 0x20000000ULL;
+constexpr DarwinFlags CooperativeFlag = 0x08000000ULL;
 constexpr DarwinFlags EventManagerFlag = 0x02000000ULL;
+constexpr DarwinFlags NeedsUnbindFlag = 0x01000000ULL;
+
+constexpr SetFlags SetSelfQosFlag = 0x01u;
+constexpr SetFlags SetSelfVoucherFlag = 0x02u;
+constexpr SetFlags SetSelfFixedPriorityFlag = 0x04u;
+constexpr SetFlags SetSelfTimeshareFlag = 0x08u;
+constexpr SetFlags SetSelfWorkqueueKeventUnbindFlag = 0x10u;
+constexpr SetFlags SetSelfAlternateClusterFlag = 0x20u;
+constexpr SetFlags SetSelfQosOverrideFlag = 0x40u;
+constexpr int DarwinErrnoBadMessage = 94;
+constexpr MachPort MachPortDead = 0xffffffffu;
 
 int fail(const char *Message) {
   std::fprintf(stderr, "[darwin-pthread-qos-smoke] FAIL: %s\n", Message);
@@ -61,6 +75,7 @@ int main(int argc, char **argv) {
                                       DarwinFlags *, QosClass *);
   using SchedEncode = DarwinPriority (*)(std::int32_t, DarwinFlags);
   using SchedDecode = std::int32_t (*)(DarwinPriority, DarwinFlags *);
+  using SetProperties = int (*)(SetFlags, DarwinPriority, MachPort);
   using DirectStart = int (*)(MachPort, DarwinPriority, void *);
   using DirectEnd = int (*)(MachPort, void *);
   using LegacyStart = int (*)(MachPort, DarwinPriority);
@@ -78,6 +93,8 @@ int main(int argc, char **argv) {
       requireExport(Host, "_pthread_sched_pri_encode"));
   auto PriorityDecode = reinterpret_cast<SchedDecode>(
       requireExport(Host, "_pthread_sched_pri_decode"));
+  auto SetSelfProperties = reinterpret_cast<SetProperties>(
+      requireExport(Host, "_pthread_set_properties_self"));
   auto StartOverride = reinterpret_cast<DirectStart>(
       requireExport(Host, "_pthread_qos_override_start_direct"));
   auto EndOverride = reinterpret_cast<DirectEnd>(
@@ -87,8 +104,9 @@ int main(int argc, char **argv) {
   auto EndLegacyOverride = reinterpret_cast<LegacyEnd>(
       requireExport(Host, "_pthread_override_qos_class_end_direct"));
   if (!QosEncode || !QosDecode || !QosOverrideEncode || !QosOverrideDecode ||
-      !PriorityEncode || !PriorityDecode || !StartOverride || !EndOverride ||
-      !StartLegacyOverride || !EndLegacyOverride) {
+      !PriorityEncode || !PriorityDecode || !SetSelfProperties ||
+      !StartOverride || !EndOverride || !StartLegacyOverride ||
+      !EndLegacyOverride) {
     FreeLibrary(Host);
     return 1;
   }
@@ -216,6 +234,82 @@ int main(int argc, char **argv) {
     return fail("non-scheduler priority was misdecoded as scheduler priority");
   }
 
+  // _pthread_set_properties_self returns pthread-style errno values directly.
+  // It must not store those values in the Windows CRT errno slot.
+  const DarwinPriority SelfUtility = QosEncode(QosUtility, -3, OvercommitFlag);
+  errno = EDOM;
+  if (SetSelfProperties(SetSelfQosFlag, SelfUtility, 0) != 0 || errno != EDOM) {
+    FreeLibrary(Host);
+    return fail("valid self QoS update failed or modified host errno");
+  }
+  if (SetSelfProperties(SetSelfQosFlag, 0, 0) != EINVAL || errno != EDOM) {
+    FreeLibrary(Host);
+    return fail("invalid self QoS did not return EINVAL directly");
+  }
+
+  const DarwinPriority CooperativeOverride = QosOverrideEncode(
+      QosUtility, -3, CooperativeFlag, QosUserInitiated);
+  if (SetSelfProperties(SetSelfQosOverrideFlag, CooperativeOverride, 0) !=
+      EINVAL) {
+    FreeLibrary(Host);
+    return fail("QoS override flag was accepted without QoS flag");
+  }
+  const DarwinPriority NonCooperativeOverride = QosOverrideEncode(
+      QosUtility, -3, 0, QosUserInitiated);
+  if (SetSelfProperties(SetSelfQosFlag | SetSelfQosOverrideFlag,
+                        NonCooperativeOverride, 0) != EINVAL) {
+    FreeLibrary(Host);
+    return fail("non-cooperative QoS override was accepted");
+  }
+  if (SetSelfProperties(SetSelfQosFlag | SetSelfQosOverrideFlag,
+                        CooperativeOverride, 0) != 0) {
+    FreeLibrary(Host);
+    return fail("cooperative QoS override transition failed");
+  }
+  if (SetSelfProperties(SetSelfQosFlag, CooperativeOverride, 0) != EINVAL) {
+    FreeLibrary(Host);
+    return fail("override-encoded priority was accepted without override flag");
+  }
+
+  if (SetSelfProperties(SetSelfVoucherFlag, 0, 0) != 0 ||
+      SetSelfProperties(SetSelfVoucherFlag, 0, 0x1234u) != 0) {
+    FreeLibrary(Host);
+    return fail("voucher clear/set transition failed");
+  }
+  if (SetSelfProperties(SetSelfVoucherFlag, 0, MachPortDead) != ENOENT) {
+    FreeLibrary(Host);
+    return fail("dead voucher name did not return ENOENT");
+  }
+  if (SetSelfProperties(SetSelfQosFlag | SetSelfVoucherFlag, SelfUtility,
+                        MachPortDead) != ENOENT) {
+    FreeLibrary(Host);
+    return fail("voucher-only failure did not preserve Darwin return shape");
+  }
+  if (SetSelfProperties(SetSelfQosFlag | SetSelfVoucherFlag, 0,
+                        MachPortDead) != DarwinErrnoBadMessage) {
+    FreeLibrary(Host);
+    return fail("combined QoS/voucher failure did not return Darwin EBADMSG");
+  }
+
+  const DarwinPriority NeedsUnbind =
+      QosEncode(QosUtility, -3, NeedsUnbindFlag | OvercommitFlag);
+  if (SetSelfProperties(SetSelfQosFlag | SetSelfWorkqueueKeventUnbindFlag,
+                        NeedsUnbind, 0) != 0) {
+    FreeLibrary(Host);
+    return fail("workqueue unbind QoS transition failed");
+  }
+  if (SetSelfProperties(SetSelfFixedPriorityFlag | SetSelfTimeshareFlag, 0, 0) !=
+          0 ||
+      SetSelfProperties(SetSelfTimeshareFlag, 0, 0) != 0 ||
+      SetSelfProperties(SetSelfAlternateClusterFlag, 0, 0) != 0) {
+    FreeLibrary(Host);
+    return fail("non-QoS current-thread property transition failed");
+  }
+  if (SetSelfProperties(0x80u, 0, 0) != EINVAL || errno != EDOM) {
+    FreeLibrary(Host);
+    return fail("unknown set-self flag was accepted or modified host errno");
+  }
+
   // XNU explicit QoS overrides are keyed by target Mach thread and resource.
   // Repeated starts for one resource are reference-counted; removal of a
   // missing/underflowed resource reports EFAULT.
@@ -262,7 +356,8 @@ int main(int argc, char **argv) {
     return fail("legacy direct override wrapper did not preserve pairing");
   }
 
-  std::printf("[darwin-pthread-qos-smoke] codec/override semantics passed\n");
+  std::printf(
+      "[darwin-pthread-qos-smoke] codec/set-self/override semantics passed\n");
   FreeLibrary(Host);
   return 0;
 }
