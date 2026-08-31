@@ -4,36 +4,27 @@ agent: ChatGPT GPT-5.6 Sol
 
 task: >-
   Correct the simulator libSystem pthread overlay provider namespace exposed to
-  libdispatch, then implement the paired pthread workloop compatibility boundary
-  only if corrected resolution still reaches the Windows host bridge.
+  libdispatch, then determine from CI or the next local probe whether pthread
+  workloop itself remains a genuine host semantic boundary.
 
 scope:
   - include/ipasim/SimulatorLibSystem.hpp
   - src/IpaSimulator/LoadedLibrary.cpp
-  - src/IpaSimulator/StaticSymbolAudit.hpp
-  - src/IpaSimulator/StaticSymbolAuditSelfTest.hpp
-  - src/IpaSimulator/StaticSymbolAuditSimulatorOverlay.hpp
-  - src/IpaSimulator/IpaProbe.cpp
-  - src/IpaSimulator/DarwinPthreadWorkloopBridge.cpp
-  - src/IpaSimulator/DarwinPthreadWorkloopSmoke.cpp
-  - src/IpaSimulator/CMakeLists.txt
-  - src/IpaSimulator/SysTranslator.cpp
   - .github/agent-work/pthread-workloop.yml
 
 branch: compat-pthread-workloop
 started_utc: 2026-08-31T02:45:00Z
-updated_utc: 2026-08-31T03:08:00Z
+updated_utc: 2026-08-31T03:12:00Z
 base_sha: 2727295354ac84d54eaadea50e51ac87388f15c5
 expected_pr: tbd
 
 next_checkpoint: >-
-  Restore the target-proven simulator libSystem overlay-to-host-companion
-  reexport namespace in both runtime resolution and static audit, prove it with
-  public self-test coverage, and let CI or the next local probe establish whether
-  pthread workloop itself is still the first genuine host semantic boundary.
+  Preserve the target-proven simulator libSystem overlay-to-host-companion
+  reexport namespace in runtime resolution only, validate the narrow change,
+  and let CI or the next local probe establish whether pthread workloop itself
+  is still the first genuine host semantic boundary.
 
 notes: >-
+  Do not modify StaticSymbolAudit or its self-tests as part of this task.
   No blanket provider remap, no monkey patching, and no no-op workloop success.
-  If workloop reaches the Windows bridge, use the verified Darwin ABI and explicit
-  Darwin ENOTSUP semantics rather than inventing kernel workloop behavior. Keep the
-  change generic and public; do not include private IPA or RuntimeRoot data.
+  Keep the change generic and public; do not include private IPA or RuntimeRoot data.
