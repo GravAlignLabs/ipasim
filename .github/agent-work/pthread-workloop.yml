@@ -12,6 +12,8 @@ scope:
   - src/IpaSimulator/LoadedLibrary.cpp
   - src/IpaSimulator/StaticSymbolAudit.hpp
   - src/IpaSimulator/StaticSymbolAuditSelfTest.hpp
+  - src/IpaSimulator/StaticSymbolAuditSimulatorOverlay.hpp
+  - src/IpaSimulator/IpaProbe.cpp
   - src/IpaSimulator/DarwinPthreadWorkloopBridge.cpp
   - src/IpaSimulator/DarwinPthreadWorkloopSmoke.cpp
   - src/IpaSimulator/CMakeLists.txt
@@ -20,7 +22,7 @@ scope:
 
 branch: compat-pthread-workloop
 started_utc: 2026-08-31T02:45:00Z
-updated_utc: 2026-08-31T02:55:00Z
+updated_utc: 2026-08-31T03:08:00Z
 base_sha: 2727295354ac84d54eaadea50e51ac87388f15c5
 expected_pr: tbd
 
