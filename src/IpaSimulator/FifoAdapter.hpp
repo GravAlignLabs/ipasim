@@ -2,6 +2,7 @@
 #define IPASIM_FIFO_ADAPTER_HPP
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
