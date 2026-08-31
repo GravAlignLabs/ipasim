@@ -1,0 +1,27 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT
+
+task: >-
+  Implement Darwin no-cancel syscall aliases reached by libdispatch, including real positional pread/pwrite file I/O and explicit unsupported signal suspension behavior.
+
+scope:
+  - src/IpaSimulator/DarwinHostBridge.cpp
+  - src/IpaSimulator/DarwinKernelBridge.cpp
+  - src/IpaSimulator/DarwinHostBridge.def
+  - src/IpaSimulator/DarwinNoCancelSmoke.cpp
+  - src/IpaSimulator/SysTranslator.cpp
+  - src/IpaSimulator/CMakeLists.txt
+  - .github/agent-work/darwin-nocancel-syscalls.yml
+
+branch: compat/darwin-nocancel-syscalls
+started_utc: 2026-08-31T12:19:00Z
+updated_utc: 2026-08-31T12:19:00Z
+base_sha: f21ac17a2aeba1a4ca1dbf8799ae65a74b12415c
+expected_pr: tbd
+
+next_checkpoint: >-
+  Expose the libdispatch no-cancel file syscall family through existing real bridges, implement position-preserving pread/pwrite, add semantic smoke coverage, and run public Windows validation.
+
+notes: >-
+  Public boundary only. The first genuine loader failure is a no-cancel close import from libdispatch. No static-audit changes and no application-specific behavior.
