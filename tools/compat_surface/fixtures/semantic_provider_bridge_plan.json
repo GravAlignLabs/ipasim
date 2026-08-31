@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "kind": "libffi-bridge-adapter-plan",
+  "guest_target": "arm64-apple-ios16.0",
+  "host_target": "x86_64-pc-windows-msvc",
+  "libffi": {
+    "repository_path": "deps/Libffi",
+    "observed_version": "3.2.1",
+    "observed_backend": "X86_WIN64",
+    "api": [
+      "ffi_prep_cif",
+      "ffi_call"
+    ],
+    "closures_available_in_vendored_port": true,
+    "note": "fixture records compiler-proven mechanical ABI only; semantic provider approval remains explicit"
+  },
+  "summary": {
+    "symbol_count": 1,
+    "libffi_descriptor_candidate_count": 1,
+    "needs_guest_layout_count": 0,
+    "needs_ffi_type_or_layout_count": 0,
+    "inherited_boundary_count": 0
+  },
+  "symbols": [
+    {
+      "symbol": "_getpid",
+      "source_cross_abi_status": "cross-abi-adapter-candidate",
+      "plan_status": "libffi-descriptor-candidate",
+      "reasons": [],
+      "libffi": {
+        "abi": "FFI_DEFAULT_ABI",
+        "prepare": "ffi_prep_cif",
+        "call": "ffi_call",
+        "argument_count": 0,
+        "argument_types": [],
+        "return_type": {
+          "kind": "builtin",
+          "ffi_type": "ffi_type_sint32",
+          "width_bits": 32,
+          "integer_semantics": "signed"
+        }
+      },
+      "arguments": [],
+      "result": {
+        "kind": "value-result",
+        "carrier_ir_type": "i32",
+        "ffi_type": {
+          "kind": "builtin",
+          "ffi_type": "ffi_type_sint32",
+          "width_bits": 32,
+          "integer_semantics": "signed"
+        },
+        "storage": {
+          "kind": "ffi-result-storage",
+          "size": "from-ffi_type-after-ffi_prep_cif"
+        },
+        "guest_commit": {
+          "operation": "commit-register-elements",
+          "guest_location": {
+            "kind": "registers",
+            "bank": "gpr",
+            "registers": [
+              "x0"
+            ]
+          },
+          "element_width_bytes": 4,
+          "element_count": 1,
+          "byte_order": "little-endian",
+          "register_lane": "low-bytes"
+        },
+        "host_abi_evidence": {
+          "result": {
+            "kind": "register",
+            "bank": "gpr",
+            "register": "rax"
+          },
+          "transfer_complexity": "scalar-register-transfer"
+        }
+      }
+    }
+  ]
+}
