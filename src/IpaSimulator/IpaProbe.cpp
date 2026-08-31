@@ -1,5 +1,6 @@
 #include "HostImportInventoryV2.hpp"
 #include "StaticSymbolAudit.hpp"
+#include "StaticSymbolAuditSelfTest.hpp"
 #include "ipasim/Probe.hpp"
 
 #include <cstdio>
@@ -17,6 +18,13 @@ int main(int argc, char **argv) {
                      "  IpaProbe.exe --execute <path-to-extracted-Mach-O> [path-to-iOS-runtime-root]\n");
         return 64;
     }
+
+    // Keep the audit's namespace rules executable, not merely documented. The
+    // synthetic IPA workflow runs IpaProbe on Windows, so a regression that
+    // accidentally turns two-level imports into a global symbol union fails the
+    // same public path contributors use.
+    if (!ipasim::probe::runStaticSymbolAuditSelfTest())
+        return 70;
 
     const char *imagePath = argv[execute ? 2 : 1];
     const char *runtimeRoot = argc == maxArgs ? argv[execute ? 3 : 2] : nullptr;
