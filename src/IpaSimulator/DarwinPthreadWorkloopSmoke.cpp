@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <limits>
 #include <thread>
 
