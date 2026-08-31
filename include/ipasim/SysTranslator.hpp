@@ -20,10 +20,18 @@ public:
         RestartFromLRs(false) {}
   void execute(LoadedLibrary *Lib);
   void execute(uint64_t Addr);
+
+  // Prepare an additional CPU context for code inside the already-loaded guest
+  // process. This installs its own stack/register state and translation hooks
+  // without repeating process-wide image/Objective-C initialization.
+  bool initializeExecutionContext();
+
+  // Host bridge callbacks use the translator belonging to the ARM64 context
+  // currently executing on this Windows thread. Nested guest->host->guest calls
+  // therefore return to the correct CPU context instead of always using main.
+  static SysTranslator *current();
+
   void *translate(void *FP);
-  // This overload is intentionally limited to the AAPCS64 integer/pointer
-  // register class. FP/SIMD and aggregate calls require a separate real ABI
-  // implementation and are never coerced into integer registers.
   void *translate(void *FP, size_t ArgC, bool Returns = false);
 
   template <typename... Args>
@@ -64,11 +72,15 @@ private:
 
   static constexpr ConstexprString WrapsPrefix = "$__ipaSim_wraps_";
   static constexpr uint64_t DLLBase = 0x1000;
+  static thread_local SysTranslator *Current;
+
   DynamicLoader &Dyld;
   Emulator &Emu;
   std::stack<uint64_t> LRs;
   bool Restart, Continue, RestartFromLRs;
   std::function<void()> Continuation;
+  bool ExecutionContextInitialized = false;
+  void *ExecutionStack = nullptr;
 };
 
 class DynamicCaller {
@@ -134,8 +146,6 @@ private:
   template <int RegId> void pushArgs() {}
   template <int RegId, typename... ArgTys>
   void pushArgs(void *Arg, ArgTys... Args) {
-    using namespace ipasim;
-
     static_assert(UC_ARM64_REG_X0 <= RegId && RegId <= UC_ARM64_REG_X7,
                   "Callback has too many arguments.");
     Emu.writeReg(RegId, reinterpret_cast<uint64_t>(Arg));
@@ -147,17 +157,11 @@ private:
   SysTranslator &Sys;
 };
 
-// Helper for Objective-C type encodings used by the dynamic bridge. The old
-// implementation reduces types to byte sizes, which is only valid for the
-// AAPCS64 integer/pointer class. Validate the full signature here first so FP,
-// vector and by-value aggregate types cannot silently enter X registers.
 class TypeDecoder {
 public:
   TypeDecoder(const char *Encoding) : T(Encoding) {
     if (Encoding && !isIntegerPointerSignature(Encoding)) {
       Log.error("Objective-C signature requires unsupported AAPCS64 FP/SIMD/aggregate ABI handling");
-      // Feed the existing decoder an explicitly invalid encoding so every
-      // existing caller fails closed rather than calling with the wrong ABI.
       T = InvalidEncoding;
     }
   }
@@ -180,8 +184,6 @@ private:
       ++P;
   }
 
-  // Consume one encoded type. `TopLevel` describes the ABI class of the value
-  // itself. Pointees are parsed for syntax but do not affect pointer ABI class.
   static bool consumeType(const char *&P, bool TopLevel) {
     while (*P == 'r' || *P == 'n' || *P == 'N' || *P == 'o' ||
            *P == 'O' || *P == 'R' || *P == 'V')
@@ -207,28 +209,22 @@ private:
     case ':':
     case '*':
       return true;
-
     case '@':
       if (*P == '?')
-        ++P; // block pointer
+        ++P;
       else if (*P == '"')
-        skipQuoted(P); // typed Objective-C object, e.g. @"NSString"
+        skipQuoted(P);
       return true;
-
     case '^':
-      // A pointer itself is integer-class regardless of its pointee.
       return consumeType(P, false);
-
     case 'f':
     case 'd':
     case 'D':
       return !TopLevel;
-
     case 'b':
       while (*P >= '0' && *P <= '9')
         ++P;
-      return !TopLevel; // bitfields only occur safely here as pointee members
-
+      return !TopLevel;
     case '[': {
       while (*P >= '0' && *P <= '9')
         ++P;
@@ -238,7 +234,6 @@ private:
       ++P;
       return SyntaxOK && !TopLevel;
     }
-
     case '{':
     case '(': {
       const char Close = C == '{' ? '}' : ')';
@@ -250,7 +245,7 @@ private:
         ++P;
         while (*P && *P != Close) {
           if (*P == '"') {
-            skipQuoted(P); // optional encoded field name
+            skipQuoted(P);
             continue;
           }
           if (!consumeType(P, false))
@@ -262,7 +257,6 @@ private:
       ++P;
       return !TopLevel;
     }
-
     case '?':
       return !TopLevel;
     default:
@@ -276,8 +270,6 @@ private:
     while (*P) {
       if (!consumeType(P, true))
         return false;
-      // Objective-C method encodings append decimal stack offsets after each
-      // type, for example v24@0:8. They do not change ABI classification.
       while (*P >= '0' && *P <= '9')
         ++P;
     }
