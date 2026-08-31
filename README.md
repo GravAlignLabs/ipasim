@@ -22,6 +22,63 @@ Current areas of work include:
 - explicit failure for unsupported behavior instead of fake-success stubs or hidden fallbacks
 - GitHub Actions diagnostics that expose the first useful failure
 
+### Apple SDK metadata for compatibility research
+
+When a modern Darwin/iOS runtime boundary is encountered, use the [Theos SDK archive](https://github.com/theos/sdks) as a symbol/provider reference before treating the failure as an isolated one-off symbol.
+
+Useful iPhoneOS SDK roots currently include:
+
+- [iPhoneOS 9.3](https://github.com/theos/sdks/tree/master/iPhoneOS9.3.sdk)
+- [iPhoneOS 10.3](https://github.com/theos/sdks/tree/master/iPhoneOS10.3.sdk)
+- [iPhoneOS 11.4](https://github.com/theos/sdks/tree/master/iPhoneOS11.4.sdk)
+- [iPhoneOS 12.4](https://github.com/theos/sdks/tree/master/iPhoneOS12.4.sdk)
+- [iPhoneOS 13.7](https://github.com/theos/sdks/tree/master/iPhoneOS13.7.sdk)
+- [iPhoneOS 14.5](https://github.com/theos/sdks/tree/master/iPhoneOS14.5.sdk)
+- [iPhoneOS 15.6](https://github.com/theos/sdks/tree/master/iPhoneOS15.6.sdk)
+- [iPhoneOS 16.5](https://github.com/theos/sdks/tree/master/iPhoneOS16.5.sdk)
+
+For libSystem-family research, these are especially useful starting points:
+
+- [iOS 15.6 `libSystem.B.tbd`](https://github.com/theos/sdks/blob/master/iPhoneOS15.6.sdk/usr/lib/libSystem.B.tbd)
+- [iOS 16.5 `libSystem.B.tbd`](https://github.com/theos/sdks/blob/master/iPhoneOS16.5.sdk/usr/lib/libSystem.B.tbd)
+- [iOS 15.6 `/usr/lib`](https://github.com/theos/sdks/tree/master/iPhoneOS15.6.sdk/usr/lib)
+- [iOS 16.5 `/usr/lib`](https://github.com/theos/sdks/tree/master/iPhoneOS16.5.sdk/usr/lib)
+
+`.tbd` files are TAPI text stubs. They are useful for determining:
+
+- exported symbol names
+- install names and likely provider libraries
+- re-export relationships such as `libSystem.B.dylib` re-exporting subsystem libraries
+- target architectures/platforms
+- whether a symbol or subsystem exists across SDK versions
+
+They are **not** implementation source. Do not infer complete behavior, side effects, callback semantics, thread scheduling, ABI details, or a safe no-op implementation from a `.tbd` export alone. Function prototypes may also require SDK headers or source-level confirmation.
+
+For AI-assisted compatibility work, use this sequence:
+
+1. Start with the first genuine loader/runtime failure from the current tester rather than the static audit ranking alone.
+2. Identify the importing image, dependency ordinal, expected install name, and exact symbol family.
+3. Cross-reference the corresponding Theos `.tbd` files across nearby SDK versions to identify the provider, re-exports, and adjacent subsystem symbols.
+4. Inspect the actual RuntimeRoot image imports so the implementation batch reflects what the target runtime really requests.
+5. Treat related symbols as a subsystem when evidence supports it instead of repeatedly implementing one symbol per test run.
+6. Use Apple open-source implementation repositories and SDK headers for behavior, constants, prototypes, and ABI semantics before writing the Windows bridge.
+7. Add semantic tests for the implemented subsystem and continue to fail explicitly for unsupported behavior.
+8. Keep the static symbol audit as an independent observer. Do not modify audit interpretation or suppress audit output merely to make a runtime compatibility change appear complete.
+
+A practical research flow is therefore:
+
+```text
+runtime failure
+    -> exact importer / ordinal / symbol
+    -> Theos SDK provider + version cross-reference
+    -> enumerate the coherent subsystem boundary
+    -> Apple source + headers for semantics
+    -> implement and semantically test the subsystem
+    -> run the real loader again
+```
+
+The historical [`mstg/iOS-full-sdk`](https://github.com/mstg/iOS-full-sdk) repository points users to Theos; prefer the maintained Theos SDK collection above for future research.
+
 ### Public test strategy
 
 Contributors do **not** need a private commercial application to reproduce compatibility work.
