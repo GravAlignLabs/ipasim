@@ -1,0 +1,33 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Add a Clang-backed AAPCS64 ABI lowering surface that consumes the merged typed
+  compatibility inventory, reopens the exact source headers, asks Clang how each
+  required C function is lowered for ARM64 iOS, and emits deterministic guest
+  register/indirect-result evidence for later bridge generation.
+
+scope:
+  - tools/compat_surface/abi_surface.py
+  - tools/compat_surface/test_abi_surface.py
+  - tools/compat_surface/README.md
+  - .github/workflows/compat-surface.yml
+  - .github/agent-work/aapcs64-abi-surface.yml
+
+branch: compat-aapcs64-abi-surface
+started_utc: 2026-08-31T14:02:00Z
+updated_utc: 2026-08-31T14:02:00Z
+base_sha: c73ce47477c890c51dec6253e737850c9ce46973
+expected_pr: draft
+
+next_checkpoint: >-
+  Generate one Objective-C probe translation unit from typed inventory evidence,
+  compile it to LLVM IR for the exact ARM64 iOS target, classify direct/indirect
+  results and GPR/SIMD argument banks without guessing source ABI details, preserve
+  variadic/callback/no-prototype boundaries, and validate with executable Clang tests.
+
+notes: >-
+  Mechanical ABI evidence only. Do not modify SysTranslator or runtime behavior,
+  generate callable host bridges, invent semantic compatibility, or overlap the
+  active Darwin pthread runtime claim. Stack offsets remain unknown unless proven.
