@@ -7,6 +7,9 @@
 #include "ipasim/IpaSimulator.hpp"
 #include "ipasim/IpaSimulator/Config.hpp"
 #include "ipasim/WrapperIndex.hpp"
+#if defined(IPASIM_MODERN_CORE)
+#include "GeneratedSemanticImportRouter.hpp"
+#endif
 
 #include <filesystem>
 #include <thread>
@@ -27,7 +30,8 @@ struct Trampoline {
 // The Darwin host bridge is not a generated WinObjC wrapper. Every entry below
 // is a target-proven C ABI boundary whose integer/pointer signature is explicit
 // so the ARM64 guest arguments can be marshalled into the native Windows x64
-// call without guessing from an Objective-C method encoding.
+// call without guessing from an Objective-C method encoding. Symbols migrated
+// to generated semantic routing are deliberately absent from this table.
 struct DarwinHostCallSignature {
   const char *Name;
   size_t ArgCount;
@@ -90,7 +94,6 @@ const DarwinHostCallSignature *findDarwinHostCallSignature(
       {"fstat", 2, true},
       {"stat", 2, true},
       {"lstat", 2, true},
-      {"getpid", 0, true},
       {"getuid", 0, true},
       {"geteuid", 0, true},
       {"getgid", 0, true},
@@ -315,10 +318,37 @@ bool SysTranslator::handleFetchProtMem(uc_mem_type Type, uint64_t Addr,
   filesystem::path DLLPath(*LI.LibPath);
 
 #if defined(IPASIM_MODERN_CORE)
+  // Loader-selected generated semantic imports execute through their generated
+  // ARM64 capture/result-commit record and explicitly approved real provider.
+  // _getpid is the first production route; its live profile needs only X0.
+  if (bridge::isSelectedGeneratedSemanticImport(Addr)) {
+    uint64_t X0 = Emu.readReg(UC_ARM64_REG_X0);
+
+    if constexpr (PrintEmuInfo)
+      Log.info() << "calling loader-selected generated semantic provider at "
+                 << Dyld.dumpAddr(Addr, LI) << Log.end();
+
+    continueOutsideEmulation([this, Addr, X0]() mutable {
+      string RouteError;
+      if (!bridge::executeSelectedGeneratedSemanticImport(
+              Addr, X0, &RouteError)) {
+        Log.error() << "generated semantic provider execution failed at "
+                    << Dyld.dumpAddr(Addr) << ": " << RouteError << Log.end();
+        return;
+      }
+      Emu.writeReg(UC_ARM64_REG_X0, X0);
+      returnToEmulation();
+    });
+
+    Emu.ignoreNextError();
+    return false;
+  }
+
   // IpaSimDarwinHost.dll is an explicit native semantic bridge, not a generated
-  // WinObjC wrapper. Marshal its target-proven integer/pointer signatures
-  // directly from AAPCS64. Arguments 0..7 come from X0..X7 and argument 8 (the
-  // ninth mach_msg_overwrite parameter) comes from the guest stack.
+  // WinObjC wrapper. Non-migrated target-proven integer/pointer signatures stay
+  // on the existing path while generated routing expands one symbol at a time.
+  // Arguments 0..7 come from X0..X7 and argument 8 (the ninth
+  // mach_msg_overwrite parameter) comes from the guest stack.
   if (DLLPath.filename().string() == "IpaSimDarwinHost.dll") {
     const DarwinHostCallSignature *Signature =
         findDarwinHostCallSignature(LI.Lib, DLLPath, Addr);

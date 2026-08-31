@@ -72,61 +72,223 @@ jobs:
             throw 'Expected x64 Visual Studio build environment.'
           }
 
-      - name: Configure superbuild
-        shell: pwsh
-        run: cmake -S . -B build -G Ninja
-
-      - name: Configure x64 modern core
-        shell: pwsh
-        run: cmake --build build --target config-ipaSim-x64-Release -- -v
-
-      - name: Build ARM64 execution smoke test
-        shell: pwsh
-        run: cmake --build build\ipaSim-x64-Release --target Arm64Smoke -- -v
-
-      - name: Execute real AArch64 instructions
-        shell: pwsh
-        run: |
-          $smoke = 'build\ipaSim-x64-Release\bin\Arm64Smoke.exe'
-          if (-not (Test-Path $smoke)) {
-            throw "ARM64 smoke executable not found: $smoke"
-          }
-          & $smoke
-          if ($LASTEXITCODE -ne 0) {
-            throw "ARM64 smoke test failed with exit code $LASTEXITCODE. Full ipaSim core and generic IPA tester will not be attempted."
-          }
-
-      - name: Build x64 ARM64 emulator core
-        id: arm64_core_build
+      - name: Configure and validate ARM64 execution
+        id: arm64_core_prepare
         continue-on-error: true
         shell: pwsh
         run: |
           $log = Join-Path $env:RUNNER_TEMP 'arm64-core-build.log'
-          $lines = @(& cmake --build build --target ipaSim-x64-Release -- -v 2>&1)
-          $exitCode = $LASTEXITCODE
-          $lines | Tee-Object -FilePath $log
+          New-Item -ItemType File -Path $log -Force | Out-Null
 
-          if ($exitCode -ne 0) {
-            $highSignal = @(
-              $lines |
-                ForEach-Object { "$_" } |
-                Where-Object { $_ -match '(^FAILED:)|\bFAIL:|missing export:|error:|fatal error|LNK[0-9]+|undefined reference|unresolved external|linker command failed|ninja: build stopped|CMake Error' } |
-                Select-Object -First 80
-            )
-            $tail = @($lines | ForEach-Object { "$_" } | Select-Object -Last 160)
+          function Invoke-CapturedCmake {
+            param([string[]]$CmakeArgs)
 
-            "## ipaSim core build failure" | Add-Content $env:GITHUB_STEP_SUMMARY
-            if ($highSignal.Count -gt 0) {
-              "### High-signal diagnostics" | Add-Content $env:GITHUB_STEP_SUMMARY
-              '```text' | Add-Content $env:GITHUB_STEP_SUMMARY
-              $highSignal | Add-Content $env:GITHUB_STEP_SUMMARY
-              '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+            $commandLine = 'cmake ' + ($CmakeArgs -join ' ')
+            Write-Host "==> $commandLine"
+            "==> $commandLine" | Out-File -FilePath $log -Append -Encoding utf8
+
+            $lines = @(& cmake @CmakeArgs 2>&1)
+            $exitCode = $LASTEXITCODE
+            foreach ($line in $lines) {
+              $text = "$line"
+              Write-Host $text
+              $text | Out-File -FilePath $log -Append -Encoding utf8
             }
-            "### Failure log tail" | Add-Content $env:GITHUB_STEP_SUMMARY
-            '```text' | Add-Content $env:GITHUB_STEP_SUMMARY
-            $tail | Add-Content $env:GITHUB_STEP_SUMMARY
-            '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+
+            if ($exitCode -ne 0) {
+              exit $exitCode
+            }
+          }
+
+          Invoke-CapturedCmake @('-S', '.', '-B', 'build', '-G', 'Ninja')
+          Invoke-CapturedCmake @('--build', 'build', '--target', 'config-ipaSim-x64-Release', '--', '-v')
+          Invoke-CapturedCmake @('--build', 'build\ipaSim-x64-Release', '--target', 'Arm64Smoke', '--', '-v')
+
+          $smoke = 'build\ipaSim-x64-Release\bin\Arm64Smoke.exe'
+          "==> $smoke" | Out-File -FilePath $log -Append -Encoding utf8
+          if (-not (Test-Path $smoke)) {
+            $message = "ARM64 smoke executable not found: $smoke"
+            Write-Error $message
+            $message | Out-File -FilePath $log -Append -Encoding utf8
+            exit 1
+          }
+
+          $lines = @(& $smoke 2>&1)
+          $exitCode = $LASTEXITCODE
+          foreach ($line in $lines) {
+            $text = "$line"
+            Write-Host $text
+            $text | Out-File -FilePath $log -Append -Encoding utf8
+          }
+          if ($exitCode -ne 0) {
+            $message = "ARM64 smoke test failed with exit code $exitCode. Full ipaSim core and generic IPA tester will not be attempted."
+            Write-Error $message
+            $message | Out-File -FilePath $log -Append -Encoding utf8
             exit $exitCode
+          }
+
+      - name: Build x64 ARM64 emulator core and loader probe
+        id: arm64_core_build
+        if: steps.arm64_core_prepare.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'arm64-core-build.log'
+
+          function Invoke-CapturedCmake {
+            param([string[]]$CmakeArgs)
+
+            $commandLine = 'cmake ' + ($CmakeArgs -join ' ')
+            Write-Host "==> $commandLine"
+            "==> $commandLine" | Out-File -FilePath $log -Append -Encoding utf8
+
+            $lines = @(& cmake @CmakeArgs 2>&1)
+            $exitCode = $LASTEXITCODE
+            foreach ($line in $lines) {
+              $text = "$line"
+              Write-Host $text
+              $text | Out-File -FilePath $log -Append -Encoding utf8
+            }
+
+            if ($exitCode -ne 0) {
+              $highSignal = @(
+                $lines |
+                  ForEach-Object { "$_" } |
+                  Where-Object { $_ -match '(^FAILED:)|\bFAIL:|missing export:|error:|fatal error|LNK[0-9]+|undefined reference|unresolved external|linker command failed|ninja: build stopped|CMake Error' } |
+                  Select-Object -First 80
+              )
+              $tail = @($lines | ForEach-Object { "$_" } | Select-Object -Last 160)
+
+              "## ipaSim core build failure" | Add-Content $env:GITHUB_STEP_SUMMARY
+              if ($highSignal.Count -gt 0) {
+                "### High-signal diagnostics" | Add-Content $env:GITHUB_STEP_SUMMARY
+                '```text' | Add-Content $env:GITHUB_STEP_SUMMARY
+                $highSignal | Add-Content $env:GITHUB_STEP_SUMMARY
+                '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+              }
+              "### Failure log tail" | Add-Content $env:GITHUB_STEP_SUMMARY
+              '```text' | Add-Content $env:GITHUB_STEP_SUMMARY
+              $tail | Add-Content $env:GITHUB_STEP_SUMMARY
+              '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+              exit $exitCode
+            }
+          }
+
+          Invoke-CapturedCmake @('--build', 'build', '--target', 'ipaSim-x64-Release', '--', '-v')
+          Invoke-CapturedCmake @('--build', 'build\ipaSim-x64-Release', '--target', 'IpaProbe', '--', '-v')
+
+      - name: Verify tester outputs exist
+        id: verify_tester_outputs
+        if: steps.arm64_core_prepare.outcome == 'success' && steps.arm64_core_build.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'arm64-core-build.log'
+          $ErrorActionPreference = 'Stop'
+          try {
+            $bin = 'build\ipaSim-x64-Release\bin'
+            $required = @(
+              (Join-Path $bin 'Arm64Smoke.exe'),
+              (Join-Path $bin 'IpaProbe.exe'),
+              (Join-Path $bin 'IpaSimDarwinHost.dll')
+            )
+            foreach ($path in $required) {
+              if (-not (Test-Path $path)) {
+                throw "Expected tester output not found: $path"
+              }
+              $item = Get-Item $path
+              $message = "verified output: $($item.FullName) ($($item.Length) bytes)"
+              Write-Host $message
+              $message | Out-File -FilePath $log -Append -Encoding utf8
+            }
+
+            $core = Get-ChildItem $bin -Filter '*IpaSimLibrary.dll' | Select-Object -First 1
+            $unicorn = Get-ChildItem $bin -Filter '*unicorn.dll' | Select-Object -First 1
+            if (-not $core) { throw 'IpaSimLibrary DLL was not produced.' }
+            if (-not $unicorn) { throw 'Unicorn DLL was not produced.' }
+            foreach ($item in @($core, $unicorn)) {
+              $message = "verified output: $($item.FullName) ($($item.Length) bytes)"
+              Write-Host $message
+              $message | Out-File -FilePath $log -Append -Encoding utf8
+            }
+          } catch {
+            $message = "tester output verification failed: $($_.Exception.Message)"
+            Write-Error $message
+            $message | Out-File -FilePath $log -Append -Encoding utf8
+            exit 1
+          }
+
+      - name: Stage generic IPA tester package
+        id: stage_tester_package
+        if: steps.arm64_core_prepare.outcome == 'success' && steps.arm64_core_build.outcome == 'success' && steps.verify_tester_outputs.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'arm64-core-build.log'
+          $ErrorActionPreference = 'Stop'
+          try {
+            $bin = 'build\ipaSim-x64-Release\bin'
+            $package = 'build\ipa-tester'
+            New-Item -ItemType Directory -Path $package -Force | Out-Null
+
+            Copy-Item (Join-Path $bin 'Arm64Smoke.exe') $package
+            Copy-Item (Join-Path $bin 'IpaProbe.exe') $package
+            Copy-Item (Join-Path $bin 'IpaSimDarwinHost.dll') $package
+            Copy-Item (Get-ChildItem $bin -Filter '*IpaSimLibrary.dll' | Select-Object -First 1).FullName $package
+            Copy-Item (Get-ChildItem $bin -Filter '*unicorn.dll' | Select-Object -First 1).FullName $package
+            Copy-Item 'scripts\Test-Ipa.ps1' $package
+            Copy-Item 'scripts\Test-Ipa.cmd' $package
+            Copy-Item 'scripts\Update-ipaSim-Tester.cmd' $package
+
+          @'
+          ipaSim generic IPA tester checkpoint
+
+          Public validation flow:
+          1. "Windows ARM64 Core" builds and semantically validates the modern
+             core once, then publishes this exact tester artifact.
+          2. "Synthetic iOS IPA on Windows" reuses this exact-head tester rather
+             than recompiling ipaSim, then requires HelloBootstrap to execute on
+             Windows and return guest X0=42.
+          3. Synthetic also inspects the untouched native IPA and UIKit Hello World
+             boundaries with the same binaries.
+          4. Only after the public synthetic/core checks pass, optionally run a
+             private application locally with this package. Do not upload private
+             IPAs, RuntimeRoot contents, or private application logs to public CI.
+
+          Generic local method:
+          1. Extract this tester ZIP.
+          2. Drag any .ipa onto Test-Ipa.cmd.
+          3. Optionally supply an extracted iOS runtime root whose top level
+             contains System and usr.
+
+          Loader-only command:
+             Test-Ipa.cmd "C:\path\to\App.ipa"
+
+          Loader plus RuntimeRoot:
+             Test-Ipa.cmd "C:\path\to\App.ipa" "C:\path\to\RuntimeRoot"
+
+          ipaSim does not package or download Apple runtime binaries. The iOS
+          Simulator runtime can import a macOS-host libSystem surface; the tester
+          carries IpaSimDarwinHost.dll only for host semantics with defensible
+          Windows equivalents. Unsupported behavior remains an explicit failure.
+
+          The generic local tester auto-detects the top-level .app and Mach-O
+          executable instead of encoding any application name or bundle path.
+          For public collaboration, reproduce failures with the synthetic fixtures
+          and share those logs instead of private application output.
+          '@ | Set-Content (Join-Path $package 'README.txt')
+
+            $items = @(Get-ChildItem $package)
+            foreach ($item in $items) {
+              $message = "packaged: $($item.Name) ($($item.Length) bytes)"
+              Write-Host $message
+              $message | Out-File -FilePath $log -Append -Encoding utf8
+            }
+          } catch {
+            $message = "tester packaging failed: $($_.Exception.Message)"
+            Write-Error $message
+            $message | Out-File -FilePath $log -Append -Encoding utf8
+            exit 1
           }
 
       - name: Report compiler cache stats
@@ -136,7 +298,7 @@ jobs:
         run: sccache --show-stats
 
       - name: Publish core build diagnostic
-        if: steps.arm64_core_build.outcome == 'failure' && github.event_name == 'pull_request'
+        if: (steps.arm64_core_prepare.outcome == 'failure' || steps.arm64_core_build.outcome == 'failure' || steps.verify_tester_outputs.outcome == 'failure' || steps.stage_tester_package.outcome == 'failure') && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         env:
           CORE_BUILD_LOG: ${{ runner.temp }}/arm64-core-build.log
@@ -151,11 +313,11 @@ jobs:
               lines = fs.readFileSync(logPath, 'utf8').split(/\r?\n/);
             }
 
-            const match = /(^FAILED:)|\bFAIL:|missing export:|error:|fatal error|LNK[0-9]+|undefined reference|unresolved external|linker command failed|ninja: build stopped|CMake Error/i;
+            const match = /(^FAILED:)|\bFAIL:|missing export:|error:|fatal error|LNK[0-9]+|undefined reference|unresolved external|linker command failed|ninja: build stopped|CMake Error|not found|verification failed|packaging failed/i;
             const highSignal = lines.filter(line => match.test(line)).slice(0, 80);
             const tail = lines.slice(-160);
             if (highSignal.length === 0 && tail.length === 0) {
-              tail.push('Core build failed, but the captured log was empty.');
+              tail.push('Windows ARM64 core validation failed, but the captured log was empty.');
             }
 
             const headSha = context.payload.pull_request.head.sha;
@@ -196,101 +358,45 @@ jobs:
             }
             console.log(body);
 
-      - name: Stop after failed emulator core
-        if: steps.arm64_core_build.outcome == 'failure'
+      - name: Stop after failed core validation
+        if: steps.arm64_core_prepare.outcome == 'failure' || steps.arm64_core_build.outcome == 'failure' || steps.verify_tester_outputs.outcome == 'failure' || steps.stage_tester_package.outcome == 'failure'
         shell: pwsh
         run: |
-          Write-Error 'ipaSim x64 ARM64 emulator core did not build. See the PR diagnostic comment above.'
+          Write-Error 'Windows ARM64 core validation failed. See the PR diagnostic comment above.'
           exit 1
 
-      - name: Build loader probe tester
-        if: steps.arm64_core_build.outcome == 'success'
-        shell: pwsh
-        run: cmake --build build\ipaSim-x64-Release --target IpaProbe -- -v
+      - name: Resolve stale core build diagnostic
+        if: steps.arm64_core_prepare.outcome == 'success' && steps.arm64_core_build.outcome == 'success' && steps.verify_tester_outputs.outcome == 'success' && steps.stage_tester_package.outcome == 'success' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- ipasim-core-build-diagnostic -->';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+            const existing = comments.find(comment => comment.body && comment.body.includes(marker));
+            if (!existing) return;
 
-      - name: Verify tester outputs exist
-        if: steps.arm64_core_build.outcome == 'success'
-        shell: pwsh
-        run: |
-          $bin = 'build\ipaSim-x64-Release\bin'
-          $required = @(
-            (Join-Path $bin 'Arm64Smoke.exe'),
-            (Join-Path $bin 'IpaProbe.exe'),
-            (Join-Path $bin 'IpaSimDarwinHost.dll')
-          )
-          foreach ($path in $required) {
-            if (-not (Test-Path $path)) {
-              throw "Expected tester output not found: $path"
-            }
-            Get-Item $path | Format-List FullName,Length,LastWriteTime
-          }
-
-          $core = Get-ChildItem $bin -Filter '*IpaSimLibrary.dll' | Select-Object -First 1
-          $unicorn = Get-ChildItem $bin -Filter '*unicorn.dll' | Select-Object -First 1
-          if (-not $core) { throw 'IpaSimLibrary DLL was not produced.' }
-          if (-not $unicorn) { throw 'Unicorn DLL was not produced.' }
-          $core | Format-List FullName,Length,LastWriteTime
-          $unicorn | Format-List FullName,Length,LastWriteTime
-
-      - name: Stage generic IPA tester package
-        if: steps.arm64_core_build.outcome == 'success'
-        shell: pwsh
-        run: |
-          $bin = 'build\ipaSim-x64-Release\bin'
-          $package = 'build\ipa-tester'
-          New-Item -ItemType Directory -Path $package -Force | Out-Null
-
-          Copy-Item (Join-Path $bin 'Arm64Smoke.exe') $package
-          Copy-Item (Join-Path $bin 'IpaProbe.exe') $package
-          Copy-Item (Join-Path $bin 'IpaSimDarwinHost.dll') $package
-          Copy-Item (Get-ChildItem $bin -Filter '*IpaSimLibrary.dll' | Select-Object -First 1).FullName $package
-          Copy-Item (Get-ChildItem $bin -Filter '*unicorn.dll' | Select-Object -First 1).FullName $package
-          Copy-Item 'scripts\Test-Ipa.ps1' $package
-          Copy-Item 'scripts\Test-Ipa.cmd' $package
-          Copy-Item 'scripts\Update-ipaSim-Tester.cmd' $package
-
-          @'
-          ipaSim generic IPA tester checkpoint
-
-          Public validation flow:
-          1. "Windows ARM64 Core" builds and semantically validates the modern
-             core once, then publishes this exact tester artifact.
-          2. "Synthetic iOS IPA on Windows" reuses this exact-head tester rather
-             than recompiling ipaSim, then requires HelloBootstrap to execute on
-             Windows and return guest X0=42.
-          3. Synthetic also inspects the untouched native IPA and UIKit Hello World
-             boundaries with the same binaries.
-          4. Only after the public synthetic/core checks pass, optionally run a
-             private application locally with this package. Do not upload private
-             IPAs, RuntimeRoot contents, or private application logs to public CI.
-
-          Generic local method:
-          1. Extract this tester ZIP.
-          2. Drag any .ipa onto Test-Ipa.cmd.
-          3. Optionally supply an extracted iOS runtime root whose top level
-             contains System and usr.
-
-          Loader-only command:
-             Test-Ipa.cmd "C:\path\to\App.ipa"
-
-          Loader plus RuntimeRoot:
-             Test-Ipa.cmd "C:\path\to\App.ipa" "C:\path\to\RuntimeRoot"
-
-          ipaSim does not package or download Apple runtime binaries. The iOS
-          Simulator runtime can import a macOS-host libSystem surface; the tester
-          carries IpaSimDarwinHost.dll only for host semantics with defensible
-          Windows equivalents. Unsupported behavior remains an explicit failure.
-
-          The generic local tester auto-detects the top-level .app and Mach-O
-          executable instead of encoding any application name or bundle path.
-          For public collaboration, reproduce failures with the synthetic fixtures
-          and share those logs instead of private application output.
-          '@ | Set-Content (Join-Path $package 'README.txt')
-
-          Get-ChildItem $package | Format-Table Name,Length
+            const headSha = context.payload.pull_request.head.sha;
+            const body = [
+              marker,
+              '## Windows ARM64 core build diagnostic',
+              '',
+              `Resolved by commit \`${headSha}\`.`,
+              '',
+              'The configure, ARM64 smoke, core/probe build, output verification, and tester packaging stages now succeed.'
+            ].join('\n');
+            await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            console.log(body);
 
       - name: Upload generic IPA tester
-        if: steps.arm64_core_build.outcome == 'success'
+        if: steps.arm64_core_prepare.outcome == 'success' && steps.arm64_core_build.outcome == 'success' && steps.verify_tester_outputs.outcome == 'success' && steps.stage_tester_package.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: ipasim-ipa-tester

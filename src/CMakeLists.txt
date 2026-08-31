@@ -9,6 +9,10 @@ if (IPASIM_MODERN_CORE)
     # this narrow generated-bridge increment out of the active pthread CMake
     # scope while still participating in IpaSimLibrary's normal build checks.
     include ("${CMAKE_CURRENT_SOURCE_DIR}/IpaSimulator/GeneratedSemanticProvider.cmake")
+
+    # Production routing consumes the same generated adapter/provider targets
+    # only after their definitions and focused proof have been established.
+    include ("${CMAKE_CURRENT_SOURCE_DIR}/IpaSimulator/GeneratedSemanticImportRouter.cmake")
 else ()
     add_subdirectory (crt)
     add_subdirectory (HeadersAnalyzer)
