@@ -26,9 +26,12 @@ target_include_directories (GeneratedSemanticProviderSmoke PRIVATE
     "${SOURCE_DIR}/tools/compat_surface/fixtures")
 target_sources (GeneratedSemanticProviderSmoke PRIVATE
     $<TARGET_OBJECTS:ffi-win64-machdep>)
+# IpaSimGeneratedBridgeAdapter publishes its child-scope imported libffi target
+# through its PUBLIC link interface. Do not add a bare `ffi` name from this
+# parent directory: imported targets are directory scoped and that would turn
+# into an unresolved ffi.lib linker input instead of the configured artifact.
 target_link_libraries (GeneratedSemanticProviderSmoke PRIVATE
-    IpaSimGeneratedBridgeAdapter
-    ffi)
+    IpaSimGeneratedBridgeAdapter)
 
 add_custom_target (GeneratedSemanticProviderCheck
     COMMAND "$<TARGET_FILE:GeneratedSemanticProviderSmoke>"
