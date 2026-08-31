@@ -130,9 +130,16 @@ bool isNativeExecutableCallback(void *Callback) {
 }
 
 HMODULE requireCore(void *Callback) {
+  // CMake's Windows output prefix depends on the active toolchain. Existing
+  // ipaSim tester artifacts have used libIpaSimLibrary.dll while some Windows
+  // generators produce IpaSimLibrary.dll. Resolve the already-loaded module by
+  // either legitimate build name instead of coupling the Darwin bridge to one
+  // generator's naming convention.
   HMODULE Core = GetModuleHandleW(L"IpaSimLibrary.dll");
   if (!Core)
-    failGuestCallback("guest worker requires loaded IpaSimLibrary.dll",
+    Core = GetModuleHandleW(L"libIpaSimLibrary.dll");
+  if (!Core)
+    failGuestCallback("guest worker requires the loaded ipaSim core DLL",
                       Callback);
   return Core;
 }
@@ -156,7 +163,7 @@ void invokeWorker(void *Callback, DarwinPriority Priority) {
       requireCore(Callback), "ipaSim_callBack1Threaded"));
   if (!Call)
     failGuestCallback(
-        "IpaSimLibrary.dll is missing ipaSim_callBack1Threaded", Callback);
+        "ipaSim core DLL is missing ipaSim_callBack1Threaded", Callback);
   Call(Callback, reinterpret_cast<void *>(
                      static_cast<std::uintptr_t>(Priority)));
 }
