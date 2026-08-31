@@ -186,22 +186,29 @@ GeneratedSemanticImportSelection selectGeneratedSemanticImport(
     clearError(error);
 
     // There is intentionally no spelling normalization or PE export sweep here.
-    // Only the explicitly migrated loader spelling is a production candidate.
+    // Only the explicitly migrated loader spelling can become a candidate.
     if (hostLookupName != HostGetpid) {
         return GeneratedSemanticImportSelection::NotCandidate;
     }
-    if (!resolvedModule || resolvedAddress == 0) {
-        setError(error, "loader resolved _getpid without a module/code address");
+    if (!resolvedModule) {
+        setError(error, "loader resolved _getpid without a module");
         return GeneratedSemanticImportSelection::Rejected;
     }
 
     auto module = static_cast<HMODULE>(resolvedModule);
     std::filesystem::path modulePath;
-    if (!modulePathFromHandle(module, modulePath, error) ||
-        !isDarwinHostBridgePath(modulePath)) {
-        if (error && error->empty()) {
-            setError(error, "_getpid candidate did not resolve from IpaSimDarwinHost.dll");
-        }
+    if (!modulePathFromHandle(module, modulePath, error)) {
+        return GeneratedSemanticImportSelection::Rejected;
+    }
+
+    // A same-spelled export in any other PE image is unrelated and stays on the
+    // existing path. This route claims only the explicit Darwin host boundary.
+    if (!isDarwinHostBridgePath(modulePath)) {
+        clearError(error);
+        return GeneratedSemanticImportSelection::NotCandidate;
+    }
+    if (resolvedAddress == 0) {
+        setError(error, "IpaSimDarwinHost.dll!getpid did not resolve to callable code");
         return GeneratedSemanticImportSelection::Rejected;
     }
 
