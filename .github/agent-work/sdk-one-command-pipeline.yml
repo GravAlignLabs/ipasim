@@ -1,0 +1,25 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Turn the SDK-wide compatibility engine into one fail-closed command that starts from an Apple SDK root and produces TAPI evidence, parallel Clang header signatures, batched cross-ABI records, compatibility planning, runtime adapters, and approved semantic route output.
+
+scope:
+  - tools/compat_surface/sdk_compatibility.py
+  - tools/compat_surface/test_sdk_compatibility.py
+  - tools/compat_surface/README.md
+  - README.md
+  - .github/agent-work/sdk-one-command-pipeline.yml
+
+branch: compat-sdk-one-command-pipeline
+started_utc: 2026-08-31T22:12:00Z
+updated_utc: 2026-08-31T22:12:00Z
+base_sha: 05dcccf01227bc3df6464fcb5a34e5484806ae61
+expected_pr: tbd
+
+next_checkpoint: >-
+  Add a single SDK-root orchestration command, prove it end-to-end on a synthetic public SDK directory with real TAPI parsing and real Clang AAPCS64/Win64 lowering, and materialize the complete deterministic evidence/adapter/plan bundle.
+
+notes: >-
+  This is orchestration, not a new source of truth. Reuse tbd_surface, sdk_header_surface, bulk_compatibility, and the explicit semantic-provider inventory. Any header/TAPI/compiler/semantic inconsistency must fail the command rather than being skipped. Do not touch pthread/runtime scope.
