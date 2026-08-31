@@ -2,6 +2,7 @@
 #define IPASIM_FIFO_ADAPTER_HPP
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -86,9 +87,13 @@ int openNode(const char *Path, int Flags, Mode CreateMode);
 // probing every possible UCRT fd: invalid _get_osfhandle inputs enter the UCRT
 // invalid-parameter path and can fast-fail the process. Keep explicit lifetime
 // state instead, which also moves this adapter toward one coherent guest FD
-// namespace for later file/socket unification.
+// namespace for later file/socket unification. The descriptor registry retains
+// the NodeInfo snapshot used at open time so fstat observes the same guest mode
+// and pathname identity as stat/lstat rather than reconstructing metadata from
+// unrelated Windows CRT mode bits.
 std::vector<int> listOpenNodeDescriptors();
 bool isOpenNodeDescriptor(int Descriptor);
+bool lookupOpenNodeDescriptor(int Descriptor, NodeInfo &Out);
 void forgetOpenNodeDescriptor(int Descriptor);
 
 // mkfifo(2) is the FIFO-specific frontend over the same node registry.
