@@ -161,6 +161,113 @@ void setErrnoFromProcessError(DWORD Error) {
   }
 }
 
+void setErrnoFromFileIoError(DWORD Error) {
+  switch (Error) {
+  case ERROR_INVALID_HANDLE:
+  case ERROR_ACCESS_DENIED:
+    errno = EBADF;
+    break;
+  case ERROR_NEGATIVE_SEEK:
+  case ERROR_INVALID_PARAMETER:
+    errno = EINVAL;
+    break;
+  case ERROR_INVALID_FUNCTION:
+  case ERROR_NOT_SUPPORTED:
+    errno = ESPIPE;
+    break;
+  case ERROR_SHARING_VIOLATION:
+  case ERROR_LOCK_VIOLATION:
+    errno = EBUSY;
+    break;
+  case ERROR_NOT_ENOUGH_MEMORY:
+  case ERROR_OUTOFMEMORY:
+    errno = ENOMEM;
+    break;
+  default:
+    errno = EIO;
+    break;
+  }
+}
+
+bool guestRegularFileHandle(int Fd, HANDLE &Handle) {
+  if (ipasim::darwinsock::isSocketDescriptor(Fd)) {
+    errno = ESPIPE;
+    return false;
+  }
+  if (!ipasim::darwinfs::isOpenNodeDescriptor(Fd)) {
+    errno = EBADF;
+    return false;
+  }
+
+  const std::intptr_t Native = _get_osfhandle(Fd);
+  if (Native == -1) {
+    errno = EBADF;
+    return false;
+  }
+  Handle = reinterpret_cast<HANDLE>(Native);
+  return true;
+}
+
+std::intptr_t positionalFileIo(int Fd, void *Buffer, std::size_t Count,
+                               std::int64_t Offset, bool Write) {
+  if (!Buffer && Count != 0) {
+    errno = EFAULT;
+    return -1;
+  }
+  if (Offset < 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (Count == 0)
+    return 0;
+
+  HANDLE Original = INVALID_HANDLE_VALUE;
+  if (!guestRegularFileHandle(Fd, Original))
+    return -1;
+
+  // ReOpenFile creates a new file handle/file object rather than duplicating
+  // the existing handle. Its file pointer is therefore independent of the CRT
+  // descriptor used by read/write/lseek, which gives pread/pwrite their defining
+  // property: positional I/O without changing the caller's current file offset.
+  const DWORD DesiredAccess = Write ? GENERIC_WRITE : GENERIC_READ;
+  HANDLE Positioned = ReOpenFile(
+      Original, DesiredAccess,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0);
+  if (Positioned == INVALID_HANDLE_VALUE) {
+    setErrnoFromFileIoError(GetLastError());
+    return -1;
+  }
+
+  LARGE_INTEGER Position{};
+  Position.QuadPart = Offset;
+  if (!SetFilePointerEx(Positioned, Position, nullptr, FILE_BEGIN)) {
+    const DWORD Error = GetLastError();
+    CloseHandle(Positioned);
+    setErrnoFromFileIoError(Error);
+    return -1;
+  }
+
+  const DWORD HostCount = static_cast<DWORD>((std::min)(
+      Count, static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
+  DWORD Completed = 0;
+  const BOOL Ok = Write ? WriteFile(Positioned, Buffer, HostCount, &Completed,
+                                    nullptr)
+                        : ReadFile(Positioned, Buffer, HostCount, &Completed,
+                                   nullptr);
+  if (!Ok) {
+    const DWORD Error = GetLastError();
+    CloseHandle(Positioned);
+    setErrnoFromFileIoError(Error);
+    return -1;
+  }
+
+  if (!CloseHandle(Positioned)) {
+    setErrnoFromFileIoError(GetLastError());
+    return -1;
+  }
+  return static_cast<std::intptr_t>(Completed);
+}
+
 bool openProcessForQuery(int Pid, HANDLE &Process, bool &MustClose) {
   MustClose = false;
   if (Pid <= 0) {
@@ -626,6 +733,29 @@ std::intptr_t darwin_write(int Fd, const void *Buffer, std::size_t Count) {
   const unsigned int HostCount = static_cast<unsigned int>((std::min)(
       Count, static_cast<std::size_t>((std::numeric_limits<int>::max)())));
   return static_cast<std::intptr_t>(_write(Fd, Buffer, HostCount));
+}
+
+// pread/pwrite use a separately reopened Windows file object, seek that private
+// object to the requested 64-bit offset, and perform one synchronous transfer.
+// The original guest descriptor's file pointer is never changed.
+std::intptr_t darwin_pread(int Fd, void *Buffer, std::size_t Count,
+                           std::int64_t Offset) {
+  return positionalFileIo(Fd, Buffer, Count, Offset, false);
+}
+
+std::intptr_t darwin_pwrite(int Fd, const void *Buffer, std::size_t Count,
+                            std::int64_t Offset) {
+  return positionalFileIo(Fd, const_cast<void *>(Buffer), Count, Offset, true);
+}
+
+// sigsuspend is a signal-mask-and-wait operation. Windows has no equivalent
+// process signal-mask subsystem in ipaSim yet. Bind the ABI so dyld can resolve
+// the no-cancel entry, but fail explicitly if execution reaches it rather than
+// pretending a wait occurred.
+int darwin_sigsuspend_nocancel(std::uint32_t Mask) {
+  (void)Mask;
+  errno = ENOTSUP;
+  return -1;
 }
 
 // proc_pidinfo returns the number of bytes written, or 0 with errno set. The
