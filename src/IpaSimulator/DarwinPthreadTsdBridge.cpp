@@ -35,7 +35,9 @@ struct KeyState {
   std::uintptr_t Destructor = 0;
 };
 
-struct ThreadState;
+struct ThreadState {
+  std::array<void *, TsdSlotCount> Values{};
+};
 
 struct Registry {
   std::mutex Mutex;
@@ -44,38 +46,29 @@ struct Registry {
 };
 
 Registry &registry() {
-  // Intentionally process-lifetime storage. Thread-local destructors may run
-  // after ordinary static destruction during DLL/process shutdown.
+  // Intentionally process-lifetime storage. The host bridge is unloadable, so
+  // ordinary C++ static/TLS destructors must not retain callbacks into code that
+  // Windows may already have unmapped during DLL teardown.
   static Registry *State = new Registry();
   return *State;
 }
 
-struct ThreadState {
-  std::array<void *, TsdSlotCount> Values{};
-
-  ThreadState() {
-    Registry &R = registry();
-    std::lock_guard<std::mutex> Guard(R.Mutex);
-    R.Threads.insert(this);
-  }
-
-  ~ThreadState() {
-    Registry &R = registry();
-    std::lock_guard<std::mutex> Guard(R.Mutex);
-    R.Threads.erase(this);
-  }
-};
-
 ThreadState &currentThreadState() {
-  thread_local ThreadState State;
-  return State;
+  // Guest pthread teardown is not implemented yet, so keep each native backing
+  // state alive for the process lifetime rather than installing a C++
+  // thread_local destructor in the unloadable DLL. This also prevents Windows
+  // thread-id reuse from exposing stale guest values to a later thread.
+  thread_local ThreadState *State = nullptr;
+  if (!State) {
+    State = new ThreadState();
+    Registry &R = registry();
+    std::lock_guard<std::mutex> Guard(R.Mutex);
+    R.Threads.insert(State);
+  }
+  return *State;
 }
 
 bool slotInRange(DarwinPthreadKey Key) { return Key < DynamicKeyEnd; }
-
-bool managedStaticKey(DarwinPthreadKey Key) {
-  return Key >= FirstManagedStaticKey && Key < DynamicKeyStart;
-}
 
 bool dynamicKey(DarwinPthreadKey Key) {
   return Key >= DynamicKeyStart && Key < DynamicKeyEnd;
