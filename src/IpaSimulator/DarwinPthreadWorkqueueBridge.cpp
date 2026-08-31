@@ -2,14 +2,11 @@
 // libdispatch on the Windows host.
 //
 // XNU normally owns Darwin's workqueue thread pool and invokes libdispatch's
-// registered worker callback on kernel-created pthreads. ipaSim has one shared
-// ARM64 Unicorn execution context, so concurrent host threads cannot safely run
-// guest callbacks. Model the same request/callback contract as a serialized
-// cooperative scheduler: requests are queued, the registered worker callback is
-// actually executed through ipaSim's existing guest backcaller, and recursive
-// worker requests are appended for the outer drain instead of nesting Unicorn.
-// This preserves functional dispatch progress without fabricating parallel guest
-// execution that the emulator cannot yet isolate.
+// registered worker callback on kernel-created pthreads. ipaSim now gives guest
+// workqueue callbacks independent ARM64 Unicorn CPU/register/stack contexts on
+// Windows threads while all contexts share the same host-backed guest process
+// pages. Native callbacks remain synchronous so the bridge semantic smoke can
+// exercise the control plane without requiring IpaSimLibrary.dll.
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -149,15 +146,17 @@ void invokeWorker(void *Callback, DarwinPriority Priority) {
     return;
   }
 
-  // The guest callback has one AAPCS64 integer-class argument. The existing
-  // backcaller writes it to X0 and starts guest execution only after the outer
-  // Unicorn run has stopped at the host boundary.
-  using BackCaller = void (*)(void *, void *);
-  auto Call = reinterpret_cast<BackCaller>(
-      GetProcAddress(requireCore(Callback), "ipaSim_callBack1"));
+  // Guest workqueue callbacks are asynchronous kernel-style worker requests.
+  // IpaSimLibrary creates a fresh Unicorn CPU/register/stack context on a new
+  // Windows thread, replays the shared guest process mappings, and executes the
+  // callback there. This avoids re-entering the requesting Unicorn engine and
+  // permits multiple libdispatch workers to make progress concurrently.
+  using ThreadedBackCaller = void (*)(void *, void *);
+  auto Call = reinterpret_cast<ThreadedBackCaller>(GetProcAddress(
+      requireCore(Callback), "ipaSim_callBack1Threaded"));
   if (!Call)
-    failGuestCallback("IpaSimLibrary.dll is missing ipaSim_callBack1",
-                      Callback);
+    failGuestCallback(
+        "IpaSimLibrary.dll is missing ipaSim_callBack1Threaded", Callback);
   Call(Callback, reinterpret_cast<void *>(
                      static_cast<std::uintptr_t>(Priority)));
 }
@@ -225,9 +224,8 @@ int queueWorkers(std::int32_t NumThreads, DarwinPriority Priority) {
     for (std::int32_t I = 0; I < NumThreads; ++I)
       State.PendingWorkers.push_back(Priority);
 
-    // Recursive requests from libdispatch while a worker callback is draining
-    // are real requests, but must not recursively enter Unicorn. The active
-    // outer drain will consume them before it returns.
+    // Serialize only the request queue bookkeeping. Guest callback execution
+    // itself is launched into independent ARM64 contexts by invokeWorker().
     if (State.Draining) {
       errno = SavedErrno;
       return 0;
@@ -249,9 +247,8 @@ int queueWorkers(std::int32_t NumThreads, DarwinPriority Priority) {
       Callback = State.WorkqueueCallback;
     }
 
-    // Never hold StateMutex across guest execution. libdispatch may request
-    // more workers, manipulate overrides, or update manager priority from the
-    // worker callback itself.
+    // Never hold StateMutex across native guest-dispatch launch. A guest worker
+    // may immediately request more workers or update workqueue policy state.
     invokeWorker(Callback, NextPriority);
   }
 }
@@ -345,8 +342,8 @@ _pthread_workqueue_addthreads(std::int32_t NumThreads, DarwinPriority Priority) 
 __declspec(dllexport) bool
 _pthread_workqueue_should_narrow(DarwinPriority Priority) {
   (void)Priority;
-  // The cooperative executor has one runnable guest lane. There is no smaller
-  // width to narrow to, so the truthful scheduler answer is always false.
+  // No host scheduler pressure signal is currently available to make a
+  // narrower-width recommendation, so preserve the non-narrowing result.
   return false;
 }
 
@@ -395,9 +392,8 @@ __declspec(dllexport) int _pthread_workqueue_override_reset(void) {
   const int SavedErrno = errno;
   {
     std::lock_guard<std::mutex> Guard(StateMutex);
-    // ipaSim currently has a single serialized guest execution lane. All
-    // dispatch workqueue overrides therefore belong to that runnable lane, so
-    // reset has the same visible effect as XNU's current-workqueue-thread reset.
+    // Current bridge override bookkeeping is process-visible policy metadata.
+    // Clear outstanding workqueue override records atomically.
     State.Overrides.clear();
   }
   errno = SavedErrno;
