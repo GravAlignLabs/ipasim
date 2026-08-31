@@ -61,7 +61,7 @@ def build_parallel_manifest(
 
     signatures_by_index: list[list | None] = [None] * len(ordered)
     stats_by_index: list[dict | None] = [None] * len(ordered)
-    errors: list[BaseException | None] = [None] * len(ordered)
+    errors: list[Exception | None] = [None] * len(ordered)
 
     def analyze(index: int) -> tuple[int, list, dict]:
         path, display = ordered[index]
@@ -94,7 +94,7 @@ def build_parallel_manifest(
                     )
                 signatures_by_index[index] = signatures
                 stats_by_index[index] = stats
-            except BaseException as exc:  # inspect deterministically after cleanup
+            except Exception as exc:  # inspect deterministically after cleanup
                 errors[index] = exc
 
     for index, error in enumerate(errors):
