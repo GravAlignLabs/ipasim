@@ -10,6 +10,7 @@
 #include "ipasim/Emulator.hpp"
 #include "ipasim/SysTranslator.hpp"
 
+#include <memory>
 #include <string>
 #include <unicorn/unicorn.h>
 
@@ -20,9 +21,36 @@
 
 namespace ipasim {
 
+struct GuestExecutionContext {
+  std::unique_ptr<Emulator> Emu;
+  std::unique_ptr<SysTranslator> Sys;
+};
+
+// Native bridge calls can synchronously invoke guest callbacks. Remember which
+// SysTranslator owns the currently executing ARM64 CPU on each Windows thread
+// so a worker callback never falls through to the process-global main engine.
+class ScopedSysTranslatorActivation {
+public:
+  explicit ScopedSysTranslatorActivation(SysTranslator &Sys);
+  ScopedSysTranslatorActivation(const ScopedSysTranslatorActivation &) = delete;
+  ScopedSysTranslatorActivation &
+  operator=(const ScopedSysTranslatorActivation &) = delete;
+  ~ScopedSysTranslatorActivation();
+
+private:
+  SysTranslator *Previous;
+};
+
+SysTranslator &currentSysTranslator();
+
 class IpaSimulator {
 public:
   IpaSimulator();
+
+  // Create another ARM64 CPU context inside the current guest process. Loaded
+  // images and process data remain shared through identical host-backed pages;
+  // registers, execution state and SP are independent.
+  std::unique_ptr<GuestExecutionContext> createExecutionContext();
 
   Emulator Emu;
   DynamicLoader Dyld;
@@ -34,8 +62,6 @@ public:
 };
 
 #if !defined(IPASIM_MODERN_CORE)
-// Starts the historical WinObjC application shell. The modern core deliberately
-// does not expose this UI boundary until its replacement is implemented.
 IPASIM_EXPORT void start(
     const winrt::hstring &Path,
     const winrt::Windows::ApplicationModel::Activation::LaunchActivatedEventArgs
@@ -43,13 +69,10 @@ IPASIM_EXPORT void start(
 IPASIM_EXPORT TextBlockProvider &logText();
 #endif
 
-// TODO: This is just a workaround, because MSVC cannot compile `Log.error`
-// calls.
 IPASIM_EXPORT void error(const char *Message);
 
 extern IpaSimulator IpaSim;
 
 } // namespace ipasim
 
-// !defined(IPASIM_IPA_SIMULATOR_HPP)
 #endif

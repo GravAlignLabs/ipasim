@@ -1,0 +1,134 @@
+name: Threaded ARM64 Guest Context
+
+on:
+  pull_request:
+    paths:
+      - 'CMakeLists.txt'
+      - 'include/**'
+      - 'src/**'
+      - '.github/workflows/threaded-guest-context.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: threaded-guest-context-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64-fixture:
+    name: Build ARM64 guest fixture
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Build minimal iOS ARM64 Mach-O
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/threaded-guest"
+          mkdir -p "$root"
+
+          cat > "$root/ThreadedGuest.s" <<'ASM'
+          .section __TEXT,__text,regular,pure_instructions
+          .globl _main
+          .p2align 2
+          _main:
+              mov w0, #42
+              ret
+          ASM
+
+          xcrun --sdk iphoneos clang \
+            -arch arm64 \
+            -target arm64-apple-ios15.0 \
+            -Wl,-e,_main \
+            "$root/ThreadedGuest.s" \
+            -o "$root/ThreadedGuest"
+
+          system_dep="$(xcrun otool -L "$root/ThreadedGuest" | awk 'NR==2 {print $1}')"
+          if [[ "$system_dep" != /usr/lib/libSystem* ]]; then
+            echo "Expected libSystem dependency, got: $system_dep" >&2
+            exit 1
+          fi
+
+          # This fixture exercises the emulator core without requiring Apple
+          # runtime files: its only system dependency enters ipaSim's explicit
+          # Windows Darwin-host bridge.
+          xcrun install_name_tool -change "$system_dep" IpaSimDarwinHost.dll "$root/ThreadedGuest"
+          xcrun otool -L "$root/ThreadedGuest"
+          file "$root/ThreadedGuest"
+          cp "$root/ThreadedGuest" "$GITHUB_WORKSPACE/ThreadedGuest"
+
+      - name: Upload ARM64 guest fixture
+        uses: actions/upload-artifact@v4
+        with:
+          name: threaded-arm64-guest
+          if-no-files-found: error
+          path: ThreadedGuest
+
+  execute-on-windows:
+    name: Execute on independent Windows guest CPU
+    needs: build-arm64-fixture
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      SCCACHE_GHA_ENABLED: 'true'
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+
+    steps:
+      - name: Check out ipaSim
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Fetch modern-core submodules
+        shell: pwsh
+        run: |
+          git submodule sync -- deps/llvm deps/LIEF deps/unicorn deps/Libffi
+          git submodule update --init --depth 1 --jobs 4 deps/llvm deps/LIEF deps/unicorn deps/Libffi
+
+      - name: Enter x64 MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Enable compiler result cache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Configure modern core
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G Ninja
+          cmake --build build --target config-ipaSim-x64-Release -- -v
+
+      - name: Build threaded probe path
+        shell: pwsh
+        run: cmake --build build\ipaSim-x64-Release --target IpaProbe -- -v
+
+      - name: Download ARM64 guest fixture
+        uses: actions/download-artifact@v4
+        with:
+          name: threaded-arm64-guest
+          path: fixture
+
+      - name: Execute guest on secondary Unicorn context
+        shell: pwsh
+        run: |
+          $probe = (Resolve-Path 'build\ipaSim-x64-Release\bin\IpaProbe.exe').Path
+          $image = (Resolve-Path 'fixture\ThreadedGuest').Path
+          $lines = @(& $probe --execute-threaded $image 2>&1)
+          $code = $LASTEXITCODE
+          $lines | ForEach-Object { Write-Host $_ }
+
+          if ($code -ne 0) {
+            throw "Threaded guest execution failed with code $code"
+          }
+          if (($lines -join "`n") -notmatch 'threaded guest entry point returned X0=42') {
+            throw 'Secondary ARM64 guest context did not return the expected X0=42 proof.'
+          }
+
+          '## Threaded ARM64 guest execution' | Add-Content $env:GITHUB_STEP_SUMMARY
+          'A GitHub-built iOS ARM64 Mach-O was loaded once, its guest address space was replayed into an independent Unicorn engine on another Windows thread, and that engine returned X0=42.' | Add-Content $env:GITHUB_STEP_SUMMARY

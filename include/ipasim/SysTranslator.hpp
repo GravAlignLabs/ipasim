@@ -9,6 +9,7 @@
 #include "ipasim/LoadedLibrary.hpp"
 
 #include <ffi.h>
+#include <malloc.h>
 #include <stack>
 
 namespace ipasim {
@@ -18,12 +19,50 @@ public:
   SysTranslator(DynamicLoader &Dyld, Emulator &Emu)
       : Dyld(Dyld), Emu(Emu), Restart(false), Continue(false),
         RestartFromLRs(false) {}
+  ~SysTranslator() {
+    if (ExecutionStack)
+      _aligned_free(ExecutionStack);
+  }
+
   void execute(LoadedLibrary *Lib);
   void execute(uint64_t Addr);
+
+  // Prepare an additional CPU context for code inside the already-loaded guest
+  // process. It receives its own stack/register state and the normal host-call
+  // and data-memory hooks, but does not repeat process-wide ObjC/image startup.
+  bool initializeExecutionContext() {
+    if (ExecutionContextInitialized)
+      return true;
+
+    constexpr size_t StackSize = 8 * 1024 * 1024;
+    void *StackPtr = _aligned_malloc(StackSize, DynamicLoader::PageSize);
+    if (!StackPtr) {
+      Log.error("could not allocate guest execution-context stack");
+      return false;
+    }
+
+    const uint64_t StackAddr = reinterpret_cast<uint64_t>(StackPtr);
+    // A worker stack belongs only to this CPU context. Do not register it as a
+    // process-shared dyld mapping, otherwise later worker contexts would replay
+    // a stack whose backing allocation is freed when this context exits.
+    if (!Emu.mapRecordedMemory(StackAddr, StackSize,
+                               UC_PROT_READ | UC_PROT_WRITE)) {
+      _aligned_free(StackPtr);
+      return false;
+    }
+    Emu.writeReg(UC_ARM64_REG_SP,
+                 (StackAddr + StackSize) & ~uint64_t(0xF));
+
+    Emu.hook(UC_HOOK_MEM_FETCH_PROT, &SysTranslator::handleFetchProtMem, this);
+    Emu.hook(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED,
+             &SysTranslator::handleMemUnmapped, this);
+
+    ExecutionStack = StackPtr;
+    ExecutionContextInitialized = true;
+    return true;
+  }
+
   void *translate(void *FP);
-  // This overload is intentionally limited to the AAPCS64 integer/pointer
-  // register class. FP/SIMD and aggregate calls require a separate real ABI
-  // implementation and are never coerced into integer registers.
   void *translate(void *FP, size_t ArgC, bool Returns = false);
 
   template <typename... Args>
@@ -69,6 +108,8 @@ private:
   std::stack<uint64_t> LRs;
   bool Restart, Continue, RestartFromLRs;
   std::function<void()> Continuation;
+  bool ExecutionContextInitialized = false;
+  void *ExecutionStack = nullptr;
 };
 
 class DynamicCaller {
@@ -121,21 +162,17 @@ public:
     LibraryInfo LI(Dyld.lookup(Addr));
     if (!LI.Lib || LI.Lib->isDLL()) {
       return reinterpret_cast<RetTy (*)(ArgTys...)>(FP)(Args...);
-    } else {
-      pushArgs<UC_ARM64_REG_X0>(Args...);
-      Sys.execute(Addr);
-
-      if constexpr (!std::is_same_v<RetTy, void>)
-        return reinterpret_cast<RetTy>(Emu.readReg(UC_ARM64_REG_X0));
     }
+    pushArgs<UC_ARM64_REG_X0>(Args...);
+    Sys.execute(Addr);
+    if constexpr (!std::is_same_v<RetTy, void>)
+      return reinterpret_cast<RetTy>(Emu.readReg(UC_ARM64_REG_X0));
   }
 
 private:
   template <int RegId> void pushArgs() {}
   template <int RegId, typename... ArgTys>
   void pushArgs(void *Arg, ArgTys... Args) {
-    using namespace ipasim;
-
     static_assert(UC_ARM64_REG_X0 <= RegId && RegId <= UC_ARM64_REG_X7,
                   "Callback has too many arguments.");
     Emu.writeReg(RegId, reinterpret_cast<uint64_t>(Arg));
@@ -147,23 +184,16 @@ private:
   SysTranslator &Sys;
 };
 
-// Helper for Objective-C type encodings used by the dynamic bridge. The old
-// implementation reduces types to byte sizes, which is only valid for the
-// AAPCS64 integer/pointer class. Validate the full signature here first so FP,
-// vector and by-value aggregate types cannot silently enter X registers.
 class TypeDecoder {
 public:
   TypeDecoder(const char *Encoding) : T(Encoding) {
     if (Encoding && !isIntegerPointerSignature(Encoding)) {
       Log.error("Objective-C signature requires unsupported AAPCS64 FP/SIMD/aggregate ABI handling");
-      // Feed the existing decoder an explicitly invalid encoding so every
-      // existing caller fails closed rather than calling with the wrong ABI.
       T = InvalidEncoding;
     }
   }
   size_t getNextTypeSize();
   bool hasNext() { return *T; }
-
   static const size_t InvalidSize = static_cast<size_t>(-1);
 
 private:
@@ -180,89 +210,51 @@ private:
       ++P;
   }
 
-  // Consume one encoded type. `TopLevel` describes the ABI class of the value
-  // itself. Pointees are parsed for syntax but do not affect pointer ABI class.
   static bool consumeType(const char *&P, bool TopLevel) {
     while (*P == 'r' || *P == 'n' || *P == 'N' || *P == 'o' ||
            *P == 'O' || *P == 'R' || *P == 'V')
       ++P;
     if (!*P)
       return false;
-
     const char C = *P++;
     switch (C) {
-    case 'v':
-    case 'c':
-    case 'C':
-    case 's':
-    case 'S':
-    case 'i':
-    case 'I':
-    case 'l':
-    case 'L':
-    case 'q':
-    case 'Q':
-    case 'B':
-    case '#':
-    case ':':
+    case 'v': case 'c': case 'C': case 's': case 'S': case 'i': case 'I':
+    case 'l': case 'L': case 'q': case 'Q': case 'B': case '#': case ':':
     case '*':
       return true;
-
     case '@':
-      if (*P == '?')
-        ++P; // block pointer
-      else if (*P == '"')
-        skipQuoted(P); // typed Objective-C object, e.g. @"NSString"
+      if (*P == '?') ++P;
+      else if (*P == '"') skipQuoted(P);
       return true;
-
     case '^':
-      // A pointer itself is integer-class regardless of its pointee.
       return consumeType(P, false);
-
-    case 'f':
-    case 'd':
-    case 'D':
+    case 'f': case 'd': case 'D':
       return !TopLevel;
-
     case 'b':
-      while (*P >= '0' && *P <= '9')
-        ++P;
-      return !TopLevel; // bitfields only occur safely here as pointee members
-
+      while (*P >= '0' && *P <= '9') ++P;
+      return !TopLevel;
     case '[': {
-      while (*P >= '0' && *P <= '9')
-        ++P;
+      while (*P >= '0' && *P <= '9') ++P;
       bool SyntaxOK = consumeType(P, false);
-      if (*P != ']')
-        return false;
+      if (*P != ']') return false;
       ++P;
       return SyntaxOK && !TopLevel;
     }
-
-    case '{':
-    case '(': {
+    case '{': case '(': {
       const char Close = C == '{' ? '}' : ')';
-      while (*P && *P != '=' && *P != Close)
-        ++P;
-      if (!*P)
-        return false;
+      while (*P && *P != '=' && *P != Close) ++P;
+      if (!*P) return false;
       if (*P == '=') {
         ++P;
         while (*P && *P != Close) {
-          if (*P == '"') {
-            skipQuoted(P); // optional encoded field name
-            continue;
-          }
-          if (!consumeType(P, false))
-            return false;
+          if (*P == '"') { skipQuoted(P); continue; }
+          if (!consumeType(P, false)) return false;
         }
       }
-      if (*P != Close)
-        return false;
+      if (*P != Close) return false;
       ++P;
       return !TopLevel;
     }
-
     case '?':
       return !TopLevel;
     default:
@@ -271,15 +263,10 @@ private:
   }
 
   static bool isIntegerPointerSignature(const char *P) {
-    if (!P)
-      return false;
+    if (!P) return false;
     while (*P) {
-      if (!consumeType(P, true))
-        return false;
-      // Objective-C method encodings append decimal stack offsets after each
-      // type, for example v24@0:8. They do not change ABI classification.
-      while (*P >= '0' && *P <= '9')
-        ++P;
+      if (!consumeType(P, true)) return false;
+      while (*P >= '0' && *P <= '9') ++P;
     }
     return true;
   }
@@ -291,6 +278,7 @@ template <typename... ArgTys>
 inline void SysTranslator::callBack(void *FP, ArgTys... Args) {
   DynamicBackCaller(Dyld, Emu, *this).callBack<void, ArgTys...>(FP, Args...);
 }
+
 template <typename... ArgTys>
 inline void *SysTranslator::callBackR(void *FP, ArgTys... Args) {
   return DynamicBackCaller(Dyld, Emu, *this)
