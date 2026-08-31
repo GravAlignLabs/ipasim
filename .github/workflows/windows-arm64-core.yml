@@ -388,7 +388,7 @@ jobs:
               marker,
               '## Windows ARM64 core build diagnostic',
               '',
-              `Resolved by commit \`${headSha}\`.",
+              `Resolved by commit \`${headSha}\`.`,
               '',
               'The configure, ARM64 smoke, core/probe build, output verification, and tester packaging stages now succeed.'
             ].join('\n');
