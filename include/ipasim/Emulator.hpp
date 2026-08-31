@@ -49,7 +49,14 @@ public:
   // Guest registers are pointer-width for the modern iOS ARM64 target.
   uint64_t readReg(int RegId);
   void writeReg(int RegId, uint64_t Value);
-  void mapMemory(uint64_t Addr, uint64_t Size, uc_prot Perms);
+
+  // Normal guest mappings describe the shared process address space. Successful
+  // mappings are registered with DynamicLoader so another Unicorn CPU context
+  // can replay the same host-backed pages. Per-thread stacks intentionally use
+  // mapPrivateMemory() instead.
+  bool mapMemory(uint64_t Addr, uint64_t Size, uc_prot Perms);
+  bool mapPrivateMemory(uint64_t Addr, uint64_t Size, uc_prot Perms);
+
   void start(uint64_t Addr);
   void stop();
   template <typename F>
@@ -66,6 +73,8 @@ public:
   void ignoreNextError();
 
 private:
+  bool mapMemoryImpl(uint64_t Addr, uint64_t Size, uc_prot Perms);
+
   uc_engine *UC;
   DynamicLoader &Dyld;
   bool IgnoreError;
