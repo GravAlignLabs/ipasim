@@ -45,14 +45,14 @@ constexpr std::uint32_t WorkqueueConfigMinimumVersion = 1;
 constexpr std::uint32_t WorkqueueConfigSupportedFlags = 0;
 
 // Darwin errno ABI values used explicitly where the Windows CRT can differ.
-constexpr int DarwinErrnoPermission = 1;   // EPERM
-constexpr int DarwinErrnoNoSuchProcess = 3; // ESRCH
-constexpr int DarwinErrnoBusy = 16;        // EBUSY
-constexpr int DarwinErrnoInvalid = 22;     // EINVAL
-constexpr int DarwinErrnoTryAgain = 35;    // EAGAIN
-constexpr int DarwinErrnoNotSupported = 45; // ENOTSUP
-constexpr int DarwinErrnoStale = 70;       // ESTALE
-constexpr int DarwinErrnoFault = 14;       // EFAULT
+constexpr int DarwinErrnoPermission = 1;     // EPERM
+constexpr int DarwinErrnoNoSuchProcess = 3;  // ESRCH
+constexpr int DarwinErrnoFault = 14;         // EFAULT
+constexpr int DarwinErrnoBusy = 16;          // EBUSY
+constexpr int DarwinErrnoInvalid = 22;       // EINVAL
+constexpr int DarwinErrnoTryAgain = 35;      // EAGAIN
+constexpr int DarwinErrnoNotSupported = 45;  // ENOTSUP
+constexpr int DarwinErrnoStale = 70;         // ESTALE
 
 constexpr std::size_t MaximumPendingWorkerRequests = 65536;
 
@@ -169,6 +169,44 @@ bool validCompactPriority(DarwinPriority Priority) {
   return (Priority >> 32) == 0;
 }
 
+int setupWorkqueue(const DarwinWorkqueueConfig *Config, std::size_t ConfigSize) {
+  const int SavedErrno = errno;
+
+  if (!Config || ConfigSize < sizeof(std::uint32_t))
+    return DarwinErrnoInvalid;
+
+  std::size_t MinimumSize = 0;
+  switch (Config->Version) {
+  case 1:
+    MinimumSize = offsetof(DarwinWorkqueueConfig, QueueLabelOffset);
+    break;
+  case WorkqueueConfigVersion:
+    MinimumSize = sizeof(DarwinWorkqueueConfig);
+    break;
+  default:
+    return DarwinErrnoInvalid;
+  }
+
+  if (ConfigSize < MinimumSize)
+    return DarwinErrnoInvalid;
+  if ((Config->Flags & ~WorkqueueConfigSupportedFlags) != 0 ||
+      Config->Version < WorkqueueConfigMinimumVersion)
+    return DarwinErrnoNotSupported;
+
+  std::lock_guard<std::mutex> Guard(StateMutex);
+  if (State.Configured)
+    return DarwinErrnoBusy;
+
+  State.Configured = true;
+  State.WorkqueueCallback = Config->WorkqueueCallback;
+  State.KeventCallback = Config->KeventCallback;
+  State.WorkloopCallback = Config->WorkloopCallback;
+  State.QueueSerialNumberOffset = Config->QueueSerialNumberOffset;
+  State.QueueLabelOffset = Config->Version >= 2 ? Config->QueueLabelOffset : 0;
+  errno = SavedErrno;
+  return 0;
+}
+
 int queueWorkers(std::int32_t NumThreads, DarwinPriority Priority) {
   const int SavedErrno = errno;
 
@@ -261,41 +299,38 @@ extern "C" {
 __declspec(dllexport) int
 pthread_workqueue_setup(const DarwinWorkqueueConfig *Config,
                         std::size_t ConfigSize) {
-  const int SavedErrno = errno;
+  return setupWorkqueue(Config, ConfigSize);
+}
 
-  if (!Config || ConfigSize < sizeof(std::uint32_t))
+__declspec(dllexport) int _pthread_workqueue_init_with_workloop(
+    void *WorkqueueCallback, void *KeventCallback, void *WorkloopCallback,
+    std::int32_t QueueSerialNumberOffset, std::int32_t Flags) {
+  if (Flags != 0 || QueueSerialNumberOffset < 0)
     return DarwinErrnoInvalid;
 
-  std::size_t MinimumSize = 0;
-  switch (Config->Version) {
-  case 1:
-    MinimumSize = offsetof(DarwinWorkqueueConfig, QueueLabelOffset);
-    break;
-  case WorkqueueConfigVersion:
-    MinimumSize = sizeof(DarwinWorkqueueConfig);
-    break;
-  default:
-    return DarwinErrnoInvalid;
-  }
+  DarwinWorkqueueConfig Config{};
+  Config.Version = WorkqueueConfigVersion;
+  Config.WorkqueueCallback = WorkqueueCallback;
+  Config.KeventCallback = KeventCallback;
+  Config.WorkloopCallback = WorkloopCallback;
+  Config.QueueSerialNumberOffset =
+      static_cast<std::uint32_t>(QueueSerialNumberOffset);
+  return setupWorkqueue(&Config, sizeof(Config));
+}
 
-  if (ConfigSize < MinimumSize)
-    return DarwinErrnoInvalid;
-  if ((Config->Flags & ~WorkqueueConfigSupportedFlags) != 0 ||
-      Config->Version < WorkqueueConfigMinimumVersion)
-    return DarwinErrnoNotSupported;
+__declspec(dllexport) int _pthread_workqueue_init_with_kevent(
+    void *WorkqueueCallback, void *KeventCallback,
+    std::int32_t QueueSerialNumberOffset, std::int32_t Flags) {
+  return _pthread_workqueue_init_with_workloop(
+      WorkqueueCallback, KeventCallback, nullptr, QueueSerialNumberOffset,
+      Flags);
+}
 
-  std::lock_guard<std::mutex> Guard(StateMutex);
-  if (State.Configured)
-    return DarwinErrnoBusy;
-
-  State.Configured = true;
-  State.WorkqueueCallback = Config->WorkqueueCallback;
-  State.KeventCallback = Config->KeventCallback;
-  State.WorkloopCallback = Config->WorkloopCallback;
-  State.QueueSerialNumberOffset = Config->QueueSerialNumberOffset;
-  State.QueueLabelOffset = Config->Version >= 2 ? Config->QueueLabelOffset : 0;
-  errno = SavedErrno;
-  return 0;
+__declspec(dllexport) int _pthread_workqueue_init(
+    void *WorkqueueCallback, std::int32_t QueueSerialNumberOffset,
+    std::int32_t Flags) {
+  return _pthread_workqueue_init_with_workloop(
+      WorkqueueCallback, nullptr, nullptr, QueueSerialNumberOffset, Flags);
 }
 
 __declspec(dllexport) int _pthread_workqueue_supported(void) {
