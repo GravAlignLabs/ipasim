@@ -1,13 +1,16 @@
 #include "FifoAdapter.hpp"
 
+#include "DarwinCredentialAdapter.hpp"
+
+#include <cstddef>
 #include <errno.h>
 #include <fcntl.h>
 #include <io.h>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <windows.h>
@@ -16,6 +19,49 @@ namespace ipasim::darwinfs {
 namespace {
 
 constexpr DWORD PipeBufferSize = 64 * 1024;
+constexpr std::int64_t WindowsToUnixEpoch100ns = 116444736000000000LL;
+constexpr std::int64_t DarwinStatBlockBytes = 512;
+
+// Darwin arm64 uses the LP64 __DARWIN_STRUCT_STAT64 layout from <sys/stat.h>.
+// Keep every ABI width explicit; Windows' struct stat is neither layout- nor
+// width-compatible with this guest structure.
+struct DarwinTimespec64 {
+  std::int64_t Seconds;
+  std::int64_t Nanoseconds;
+};
+static_assert(sizeof(DarwinTimespec64) == 16);
+
+struct DarwinStat64 {
+  std::int32_t DeviceId;
+  std::uint16_t ModeBits;
+  std::uint16_t LinkCount;
+  std::uint64_t Inode;
+  std::uint32_t UserId;
+  std::uint32_t GroupId;
+  std::int32_t SpecialDeviceId;
+  DarwinTimespec64 AccessTime;
+  DarwinTimespec64 ModificationTime;
+  DarwinTimespec64 StatusChangeTime;
+  DarwinTimespec64 BirthTime;
+  std::int64_t Size;
+  std::int64_t Blocks;
+  std::int32_t BlockSize;
+  std::uint32_t Flags;
+  std::uint32_t Generation;
+  std::int32_t Spare;
+  std::int64_t QuadSpare[2];
+};
+static_assert(offsetof(DarwinStat64, DeviceId) == 0);
+static_assert(offsetof(DarwinStat64, ModeBits) == 4);
+static_assert(offsetof(DarwinStat64, Inode) == 8);
+static_assert(offsetof(DarwinStat64, UserId) == 16);
+static_assert(offsetof(DarwinStat64, SpecialDeviceId) == 24);
+static_assert(offsetof(DarwinStat64, AccessTime) == 32);
+static_assert(offsetof(DarwinStat64, Size) == 96);
+static_assert(offsetof(DarwinStat64, Blocks) == 104);
+static_assert(offsetof(DarwinStat64, BlockSize) == 112);
+static_assert(offsetof(DarwinStat64, QuadSpare) == 128);
+static_assert(sizeof(DarwinStat64) == 144);
 
 struct NodeEntry {
   NodeInfo Info;
@@ -32,7 +78,7 @@ struct NodeEntry {
 struct NodeNamespace {
   std::mutex Mutex;
   std::unordered_map<std::string, std::unique_ptr<NodeEntry>> Entries;
-  std::unordered_set<int> OpenDescriptors;
+  std::unordered_map<int, NodeInfo> OpenDescriptors;
   std::uint64_t NextObjectId = 1;
 };
 
@@ -119,9 +165,16 @@ void setErrnoFromWinError(DWORD Error) {
   case ERROR_PATH_NOT_FOUND:
     errno = ENOENT;
     break;
+  case ERROR_INVALID_HANDLE:
+    errno = EBADF;
+    break;
   case ERROR_INVALID_NAME:
   case ERROR_INVALID_PARAMETER:
     errno = EINVAL;
+    break;
+  case ERROR_NOT_SUPPORTED:
+  case ERROR_INVALID_FUNCTION:
+    errno = ENOTSUP;
     break;
   case ERROR_NOT_ENOUGH_MEMORY:
   case ERROR_OUTOFMEMORY:
@@ -195,6 +248,116 @@ bool decodeNodeType(Mode ModeBits, NodeType &Type) {
   }
 }
 
+Mode nodeTypeMode(NodeType Type) {
+  switch (Type) {
+  case NodeType::Fifo:
+    return DarwinFifo;
+  case NodeType::CharacterDevice:
+    return DarwinCharacter;
+  case NodeType::BlockDevice:
+    return DarwinBlock;
+  case NodeType::Regular:
+    return DarwinRegular;
+  case NodeType::Socket:
+    return DarwinSocket;
+  }
+  return 0;
+}
+
+bool convertWindowsTime(std::int64_t Ticks, DarwinTimespec64 &Out) {
+  if (Ticks < WindowsToUnixEpoch100ns) {
+    errno = EOVERFLOW;
+    return false;
+  }
+  const std::int64_t UnixTicks = Ticks - WindowsToUnixEpoch100ns;
+  Out.Seconds = UnixTicks / 10000000LL;
+  Out.Nanoseconds = (UnixTicks % 10000000LL) * 100LL;
+  return true;
+}
+
+bool fillRegularStat(HANDLE Handle, const NodeInfo &Node, void *Buffer) {
+  if (!Buffer) {
+    errno = EFAULT;
+    return false;
+  }
+  if (Node.Type != NodeType::Regular) {
+    errno = ENOTSUP;
+    return false;
+  }
+
+  FILE_BASIC_INFO Basic{};
+  FILE_STANDARD_INFO Standard{};
+  FILE_STORAGE_INFO Storage{};
+  BY_HANDLE_FILE_INFORMATION Identity{};
+  if (!GetFileInformationByHandleEx(Handle, FileBasicInfo, &Basic,
+                                    sizeof(Basic)) ||
+      !GetFileInformationByHandleEx(Handle, FileStandardInfo, &Standard,
+                                    sizeof(Standard)) ||
+      !GetFileInformationByHandleEx(Handle, FileStorageInfo, &Storage,
+                                    sizeof(Storage)) ||
+      !GetFileInformationByHandle(Handle, &Identity)) {
+    setErrnoFromWinError(GetLastError());
+    return false;
+  }
+
+  if (Standard.EndOfFile.QuadPart < 0 || Standard.AllocationSize.QuadPart < 0 ||
+      Standard.NumberOfLinks >
+          static_cast<DWORD>((std::numeric_limits<std::uint16_t>::max)())) {
+    errno = EOVERFLOW;
+    return false;
+  }
+
+  const DWORD HostBlockSize =
+      Storage.PhysicalBytesPerSectorForPerformance != 0
+          ? Storage.PhysicalBytesPerSectorForPerformance
+          : Storage.LogicalBytesPerSector;
+  if (HostBlockSize == 0 ||
+      HostBlockSize >
+          static_cast<DWORD>((std::numeric_limits<std::int32_t>::max)())) {
+    errno = EOVERFLOW;
+    return false;
+  }
+
+  std::uint32_t Uid = 0;
+  std::uint32_t Gid = 0;
+  if (!darwincred::queryUserRid(false, Uid) ||
+      !darwincred::queryPrimaryGroupRid(false, Gid)) {
+    errno = EIO;
+    return false;
+  }
+
+  DarwinStat64 Result{};
+  Result.DeviceId = static_cast<std::int32_t>(Identity.dwVolumeSerialNumber);
+  Result.ModeBits = static_cast<std::uint16_t>(
+      nodeTypeMode(Node.Type) | (Node.Permissions & DarwinPermissionMask));
+  Result.LinkCount = static_cast<std::uint16_t>(Standard.NumberOfLinks);
+  Result.Inode = (static_cast<std::uint64_t>(Identity.nFileIndexHigh) << 32) |
+                 static_cast<std::uint64_t>(Identity.nFileIndexLow);
+  Result.UserId = Uid;
+  Result.GroupId = Gid;
+  Result.SpecialDeviceId = 0;
+  if (!convertWindowsTime(Basic.LastAccessTime.QuadPart, Result.AccessTime) ||
+      !convertWindowsTime(Basic.LastWriteTime.QuadPart,
+                          Result.ModificationTime) ||
+      !convertWindowsTime(Basic.ChangeTime.QuadPart, Result.StatusChangeTime) ||
+      !convertWindowsTime(Basic.CreationTime.QuadPart, Result.BirthTime))
+    return false;
+
+  Result.Size = Standard.EndOfFile.QuadPart;
+  const std::int64_t Allocation = Standard.AllocationSize.QuadPart;
+  Result.Blocks = Allocation / DarwinStatBlockBytes +
+                  (Allocation % DarwinStatBlockBytes != 0 ? 1 : 0);
+  Result.BlockSize = static_cast<std::int32_t>(HostBlockSize);
+  // The virtual namespace does not implement BSD file flags or generation
+  // numbers. Zero therefore means no flags/generation are present, not an
+  // invented Windows attribute translation.
+  Result.Flags = 0;
+  Result.Generation = 0;
+
+  std::memcpy(Buffer, &Result, sizeof(Result));
+  return true;
+}
+
 int openRegularBacking(const NodeInfo &Node, int Flags) {
   int NativeFlags = _O_BINARY;
   switch (Flags & DarwinOpenAccessMask) {
@@ -225,12 +388,12 @@ int openRegularBacking(const NodeInfo &Node, int Flags) {
   return _wopen(Node.BackingPath.c_str(), NativeFlags);
 }
 
-void rememberOpenDescriptor(int Descriptor) {
+void rememberOpenDescriptor(int Descriptor, const NodeInfo &Node) {
   if (Descriptor < 0)
     return;
   NodeNamespace &Namespace = nodeNamespace();
   std::lock_guard<std::mutex> Guard(Namespace.Mutex);
-  Namespace.OpenDescriptors.insert(Descriptor);
+  Namespace.OpenDescriptors[Descriptor] = Node;
 }
 
 } // namespace
@@ -299,8 +462,10 @@ bool lookupNode(const char *Path, NodeInfo &Out) {
   NodeNamespace &Namespace = nodeNamespace();
   std::lock_guard<std::mutex> Guard(Namespace.Mutex);
   const auto It = Namespace.Entries.find(GuestPath);
-  if (It == Namespace.Entries.end())
+  if (It == Namespace.Entries.end()) {
+    errno = ENOENT;
     return false;
+  }
   Out = It->second->Info;
   return true;
 }
@@ -370,7 +535,7 @@ int openNode(const char *Path, int Flags, Mode CreateMode) {
   switch (Node.Type) {
   case NodeType::Regular: {
     const int Descriptor = openRegularBacking(Node, Flags);
-    rememberOpenDescriptor(Descriptor);
+    rememberOpenDescriptor(Descriptor, Node);
     return Descriptor;
   }
   case NodeType::Fifo:
@@ -396,14 +561,29 @@ int openNode(const char *Path, int Flags, Mode CreateMode) {
 std::vector<int> listOpenNodeDescriptors() {
   NodeNamespace &Namespace = nodeNamespace();
   std::lock_guard<std::mutex> Guard(Namespace.Mutex);
-  return std::vector<int>(Namespace.OpenDescriptors.begin(),
-                          Namespace.OpenDescriptors.end());
+  std::vector<int> Result;
+  Result.reserve(Namespace.OpenDescriptors.size());
+  for (const auto &Entry : Namespace.OpenDescriptors)
+    Result.push_back(Entry.first);
+  return Result;
 }
 
 bool isOpenNodeDescriptor(int Descriptor) {
   NodeNamespace &Namespace = nodeNamespace();
   std::lock_guard<std::mutex> Guard(Namespace.Mutex);
   return Namespace.OpenDescriptors.count(Descriptor) != 0;
+}
+
+bool lookupOpenNodeDescriptor(int Descriptor, NodeInfo &Out) {
+  NodeNamespace &Namespace = nodeNamespace();
+  std::lock_guard<std::mutex> Guard(Namespace.Mutex);
+  const auto It = Namespace.OpenDescriptors.find(Descriptor);
+  if (It == Namespace.OpenDescriptors.end()) {
+    errno = EBADF;
+    return false;
+  }
+  Out = It->second;
+  return true;
 }
 
 void forgetOpenNodeDescriptor(int Descriptor) {
@@ -436,4 +616,73 @@ bool removeFifo(const char *Path) {
   return removeNode(Path);
 }
 
+int statDescriptor(int Descriptor, void *Buffer) {
+  NodeInfo Node;
+  if (!lookupOpenNodeDescriptor(Descriptor, Node))
+    return -1;
+
+  const std::intptr_t Native = _get_osfhandle(Descriptor);
+  if (Native == -1) {
+    errno = EBADF;
+    return -1;
+  }
+  return fillRegularStat(reinterpret_cast<HANDLE>(Native), Node, Buffer) ? 0
+                                                                         : -1;
+}
+
+int statPath(const char *Path, void *Buffer) {
+  if (!Buffer) {
+    errno = EFAULT;
+    return -1;
+  }
+
+  NodeInfo Node;
+  if (!lookupNode(Path, Node))
+    return -1;
+  if (Node.Type != NodeType::Regular || Node.BackingPath.empty()) {
+    errno = ENOTSUP;
+    return -1;
+  }
+
+  HANDLE Handle = CreateFileW(
+      Node.BackingPath.c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (Handle == INVALID_HANDLE_VALUE) {
+    setErrnoFromWinError(GetLastError());
+    return -1;
+  }
+
+  const bool Ok = fillRegularStat(Handle, Node, Buffer);
+  const DWORD CloseError = CloseHandle(Handle) ? ERROR_SUCCESS : GetLastError();
+  if (!Ok)
+    return -1;
+  if (CloseError != ERROR_SUCCESS) {
+    setErrnoFromWinError(CloseError);
+    return -1;
+  }
+  return 0;
+}
+
 } // namespace ipasim::darwinfs
+
+extern "C" {
+
+// Darwin fstat/stat/lstat use the 144-byte LP64 stat ABI. The current guest
+// namespace has no symlink node type, so stat and lstat are intentionally
+// identical for the regular nodes it can represent. When symlink creation is
+// implemented, lstat must stop following that new node type while stat follows
+// it; until then there is no symlink behavior to fabricate.
+int darwin_fstat(int Descriptor, void *Buffer) {
+  return ipasim::darwinfs::statDescriptor(Descriptor, Buffer);
+}
+
+int darwin_stat(const char *Path, void *Buffer) {
+  return ipasim::darwinfs::statPath(Path, Buffer);
+}
+
+int darwin_lstat(const char *Path, void *Buffer) {
+  return ipasim::darwinfs::statPath(Path, Buffer);
+}
+
+} // extern "C"
