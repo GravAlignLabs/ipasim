@@ -26,6 +26,23 @@ struct GuestExecutionContext {
   std::unique_ptr<SysTranslator> Sys;
 };
 
+// Native bridge calls can synchronously invoke guest callbacks. Remember which
+// SysTranslator owns the currently executing ARM64 CPU on each Windows thread
+// so a worker callback never falls through to the process-global main engine.
+class ScopedSysTranslatorActivation {
+public:
+  explicit ScopedSysTranslatorActivation(SysTranslator &Sys);
+  ScopedSysTranslatorActivation(const ScopedSysTranslatorActivation &) = delete;
+  ScopedSysTranslatorActivation &
+  operator=(const ScopedSysTranslatorActivation &) = delete;
+  ~ScopedSysTranslatorActivation();
+
+private:
+  SysTranslator *Previous;
+};
+
+SysTranslator &currentSysTranslator();
+
 class IpaSimulator {
 public:
   IpaSimulator();
