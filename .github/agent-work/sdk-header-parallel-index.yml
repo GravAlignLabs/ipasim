@@ -1,0 +1,25 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Make full-SDK Clang header signature indexing practical by analyzing independent SDK headers concurrently while preserving the exact deterministic header-signature manifest and fail-closed parse semantics.
+
+scope:
+  - tools/compat_surface/sdk_header_surface.py
+  - tools/compat_surface/test_sdk_header_surface.py
+  - tools/compat_surface/README.md
+  - README.md
+  - .github/agent-work/sdk-header-parallel-index.yml
+
+branch: compat-sdk-header-parallel-index
+started_utc: 2026-08-31T22:07:00Z
+updated_utc: 2026-08-31T22:07:00Z
+base_sha: e7a2aace3c784c7b47c5eb8171335ce424f7dfdd
+expected_pr: tbd
+
+next_checkpoint: >-
+  Add an SDK-scale header-indexing command that reuses header_surface.analyze_header as the authoritative per-header primitive, runs a bounded number of headers concurrently, preserves input-order deterministic aggregation, and proves jobs=1/2/4 produce byte-identical manifests.
+
+notes: >-
+  Parallelism may change wall-clock time only. It must not weaken Clang parse failures, skip failed headers, or infer signatures. Diagnostics must identify the exact failing SDK-relative header and remain path-sanitized by the existing analyzer. Do not touch pthread/runtime scope.
