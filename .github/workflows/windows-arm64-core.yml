@@ -8,6 +8,7 @@ on:
       - 'src/**'
       - 'scripts/**'
       - '.github/workflows/windows-arm64-core.yml'
+      - '.github/workflows/synthetic-hello-ipa.yml'
   workflow_dispatch:
 
 # A new push makes an older build irrelevant. Do not spend a Windows runner
@@ -250,15 +251,17 @@ jobs:
           @'
           ipaSim generic IPA tester checkpoint
 
-          Public validation order:
-          1. Run the repository workflow "Synthetic iOS IPA on Windows".
-          2. Require the bootstrap IPA checkpoint to execute through ipaSim on
+          Public validation flow:
+          1. "Windows ARM64 Core" builds and semantically validates the modern
+             core once, then publishes this exact tester artifact.
+          2. "Synthetic iOS IPA on Windows" reuses this exact-head tester rather
+             than recompiling ipaSim, then requires HelloBootstrap to execute on
              Windows and return guest X0=42.
-          3. Inspect the untouched native IPA and UIKit Hello World boundaries.
-          4. Run "Windows ARM64 Core" and require its semantic/core tests to pass.
-          5. Only after public synthetic/core checks pass, optionally run a private
-             application locally with this package. Do not upload the private IPA,
-             RuntimeRoot, or private application logs to public CI/issues.
+          3. Synthetic also inspects the untouched native IPA and UIKit Hello World
+             boundaries with the same binaries.
+          4. Only after the public synthetic/core checks pass, optionally run a
+             private application locally with this package. Do not upload private
+             IPAs, RuntimeRoot contents, or private application logs to public CI.
 
           Generic local method:
           1. Extract this tester ZIP.
