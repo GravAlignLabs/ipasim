@@ -6,6 +6,9 @@
 #include "ipasim/DynamicLoader.hpp"
 #include "ipasim/IpaSimulator.hpp"
 #include "ipasim/SimulatorLibSystem.hpp"
+#if defined(IPASIM_MODERN_CORE)
+#include "GeneratedSemanticImportRouter.hpp"
+#endif
 
 using namespace ipasim;
 using namespace std;
@@ -97,7 +100,23 @@ uint64_t LoadedDylib::findSymbol(DynamicLoader &DL, const string &Name) {
 }
 
 uint64_t LoadedDll::findSymbol(DynamicLoader &DL, const string &Name) {
-  return (uint64_t)GetProcAddress(Ptr, Name.c_str());
+  (void)DL;
+  FARPROC Proc = GetProcAddress(Ptr, Name.c_str());
+  const uint64_t Address =
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(Proc));
+
+#if defined(IPASIM_MODERN_CORE)
+  string RouteError;
+  const auto Selection = bridge::selectGeneratedSemanticImport(
+      Name, Ptr, Address, &RouteError);
+  if (Selection == bridge::GeneratedSemanticImportSelection::Rejected) {
+    Log.error() << "generated semantic import route rejected " << Name << ": "
+                << RouteError << Log.end();
+    return 0;
+  }
+#endif
+
+  return Address;
 }
 
 DylibSymbolIterator LoadedDylib::lookup(uint64_t Addr) {
