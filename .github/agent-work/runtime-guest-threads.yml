@@ -21,20 +21,19 @@ scope:
   - src/IpaSimulator/DarwinPthreadWorkqueueBridge.cpp
   - src/IpaSimulator/DarwinPthreadWorkqueueSmoke.cpp
   - src/IpaSimulator/CMakeLists.txt
-  - .github/workflows/threaded-guest-context.yml
+  - .github/workflows/synthetic-hello-ipa.yml
   - .github/agent-work/runtime-guest-threads.yml
 
 branch: runtime-guest-thread-execution
 started_utc: 2026-08-31T04:24:00Z
-updated_utc: 2026-08-31T04:40:00Z
+updated_utc: 2026-08-31T04:44:00Z
 base_sha: d00815c4557a2c038974214615a0f4bbdcee5b4a
 expected_pr: tbd
 
 next_checkpoint: >-
-  Keep nested guest callbacks on their originating ARM64 context, expose a
-  deterministic threaded IpaProbe mode, exercise it against a GitHub-built iOS
-  ARM64 Mach-O in public CI, and run the authoritative Windows ARM64 and
-  synthetic IPA workflows before merge.
+  Keep nested guest callbacks on their originating ARM64 context, exercise a
+  GitHub-built iOS ARM64 Mach-O on an independent worker CPU in public CI, and
+  run the authoritative Windows ARM64 and synthetic IPA workflows before merge.
 
 notes: >-
   Optimize for a working emulator. Audit code and audit self-tests remain
