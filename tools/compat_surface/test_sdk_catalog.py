@@ -159,7 +159,10 @@ class SdkCatalogTests(unittest.TestCase):
             [fact["install_name"] for fact in item["sdk_direct_exports"]],
             [a, b],
         )
-        self.assertEqual(item["sdk_direct_exports"][0]["targets"], ["arm64-ios", "arm64e-ios"])
+        self.assertEqual(
+            item["sdk_direct_exports"][0]["targets"],
+            ["arm64-ios", "arm64e-ios"],
+        )
         self.assertEqual(result["summary"]["multi_provider_symbol_count"], 1)
 
     def test_target_filter_excludes_arm64e_only_symbols(self):
@@ -207,6 +210,60 @@ class SdkCatalogTests(unittest.TestCase):
         self.assertIsNone(item["signature"])
         self.assertEqual(result["summary"]["untyped_global_symbol_count"], 1)
 
+    def test_abi_projection_contains_all_typed_globals_without_runtime_requirements(self):
+        provider = "/usr/lib/A.dylib"
+        sdk = catalog.build_sdk_catalog(
+            tapi_manifest(
+                [interface(provider)],
+                [
+                    symbol_entry("_alpha", "global", [(provider, ("arm64-ios",))]),
+                    symbol_entry("_unknown", "global", [(provider, ("arm64-ios",))]),
+                    symbol_entry("RootClass", "objc-class", [(provider, ("arm64-ios",))]),
+                ],
+            ),
+            header_manifest([signature("_alpha"), signature("RootClass")]),
+        )
+        projected = catalog.build_abi_inventory(sdk)
+        self.assertEqual(projected["kind"], "typed-compatibility-inventory")
+        self.assertEqual(projected["scope"], "sdk-wide-mechanical-projection")
+        self.assertEqual(projected["requirements"], [])
+        self.assertEqual(projected["summary"]["requirement_count"], 0)
+        self.assertEqual(
+            [item["symbol"] for item in projected["symbols"]],
+            ["_alpha"],
+        )
+        self.assertEqual(projected["symbols"][0]["required_by"], [])
+        self.assertEqual(projected["symbols"][0]["requirement_count"], 0)
+
+    def test_abi_projection_fails_if_callable_marker_loses_signature(self):
+        broken = {
+            "schema_version": 1,
+            "kind": "typed-sdk-catalog",
+            "targets": {
+                "clang": "arm64-apple-ios16.0",
+                "tapi": "arm64-ios",
+            },
+            "summary": {},
+            "symbols": [
+                {
+                    "symbol": "_broken",
+                    "callable_c_candidate": True,
+                    "sdk_direct_exports": [
+                        {
+                            "install_name": "/usr/lib/A.dylib",
+                            "kind": "global",
+                            "weak": False,
+                            "targets": ["arm64-ios"],
+                        }
+                    ],
+                    "signature": None,
+                }
+            ],
+            "orphan_header_signatures": [],
+        }
+        with self.assertRaisesRegex(catalog.SdkCatalogError, "callable without a Clang signature"):
+            catalog.build_abi_inventory(broken)
+
     def test_catalog_is_deterministic_across_input_order(self):
         a = "/usr/lib/A.dylib"
         b = "/usr/lib/B.dylib"
@@ -235,6 +292,7 @@ class SdkCatalogTests(unittest.TestCase):
             tapi_path = root / "private-sdk-surface.json"
             header_path = root / "private-header-surface.json"
             output = root / "catalog.json"
+            abi_output = root / "abi-inventory.json"
             tapi_path.write_text(
                 json.dumps(
                     tapi_manifest(
@@ -262,14 +320,24 @@ class SdkCatalogTests(unittest.TestCase):
                     str(header_path),
                     "--output",
                     str(output),
+                    "--abi-inventory-output",
+                    str(abi_output),
                 ]
             )
             self.assertEqual(code, 0)
             rendered = output.read_text(encoding="utf-8")
+            projected = abi_output.read_text(encoding="utf-8")
             self.assertNotIn(str(root), rendered)
+            self.assertNotIn(str(root), projected)
             parsed = json.loads(rendered)
+            parsed_projection = json.loads(projected)
             self.assertEqual(parsed["kind"], "typed-sdk-catalog")
             self.assertEqual(parsed["summary"]["symbol_count"], 1)
+            self.assertEqual(
+                parsed_projection["scope"],
+                "sdk-wide-mechanical-projection",
+            )
+            self.assertEqual(parsed_projection["requirements"], [])
 
     def test_duplicate_header_signature_fails_closed(self):
         provider = "/usr/lib/A.dylib"
