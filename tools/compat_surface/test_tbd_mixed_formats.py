@@ -8,7 +8,7 @@ V3_COHERENT = """\
 archs: [ arm64, arm64e ]
 platform: ios
 install-name: /System/Library/Frameworks/Test.framework/Test
-current-version: 7
+current-version: 126.4.1
 compatibility-version: 1
 exports:
   - archs: [ arm64, arm64e ]
@@ -22,7 +22,7 @@ V4_COHERENT = """\
 tbd-version: 4
 targets: [ arm64-ios, arm64e-ios ]
 install-name: '/System/Library/Frameworks/Test.framework/Test'
-current-version: 7
+current-version: 126.3.5
 reexported-libraries:
   - targets: [ arm64-ios, arm64e-ios ]
     libraries: [ '/usr/lib/libChild.dylib' ]
@@ -43,6 +43,11 @@ class MixedTapiFormatTests(unittest.TestCase):
         interface = manifest["interfaces"][0]
         self.assertEqual(interface["format_version"], 4)
         self.assertEqual(interface["source_format_versions"], [3, 4])
+        self.assertIsNone(interface["current_version"])
+        self.assertEqual(
+            interface["source_current_versions"],
+            ["126.3.5", "126.4.1"],
+        )
         self.assertEqual(interface["compatibility_version"], "1")
         self.assertEqual(
             interface["sources"],
