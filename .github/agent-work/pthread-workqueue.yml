@@ -16,8 +16,8 @@ scope:
 
 branch: compat-pthread-workqueue-batch
 started_utc: 2026-08-31T03:49:00Z
-updated_utc: 2026-08-31T03:49:00Z
-base_sha: 12dad56343f66f3c95e640ff8c407fb3eeee2857
+updated_utc: 2026-08-31T04:15:00Z
+base_sha: aa6612811fa55c46fae4b8117238753a7f9bd0f6
 expected_pr: tbd
 
 next_checkpoint: >-
