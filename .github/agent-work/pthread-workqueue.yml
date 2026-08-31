@@ -1,0 +1,32 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Implement the generic Darwin pthread workqueue subsystem boundary used by
+  libdispatch as one coherent batch, reusing ipaSim's existing ARM64 guest
+  backcall architecture and preserving truthful scheduler/override semantics.
+
+scope:
+  - src/IpaSimulator/DarwinPthreadWorkqueueBridge.cpp
+  - src/IpaSimulator/DarwinPthreadWorkqueueSmoke.cpp
+  - src/IpaSimulator/CMakeLists.txt
+  - src/IpaSimulator/SysTranslator.cpp
+  - .github/agent-work/pthread-workqueue.yml
+
+branch: compat-pthread-workqueue-batch
+started_utc: 2026-08-31T03:49:00Z
+updated_utc: 2026-08-31T03:49:00Z
+base_sha: 12dad56343f66f3c95e640ff8c407fb3eeee2857
+expected_pr: tbd
+
+next_checkpoint: >-
+  Implement and semantically test the libdispatch-facing workqueue setup,
+  feature, worker-request, narrowing, event-manager, and workqueue override
+  family together; register exact AAPCS64 host signatures and run public CI.
+
+notes: >-
+  StaticSymbolAudit and all audit self-tests are explicitly out of scope and
+  must not be modified. No blanket provider remap, monkey patching, or no-op
+  success exports. Use Apple workqueue_private.h and libdispatch behavior as
+  the ABI/semantic references, and reuse the existing general guest backcaller.
