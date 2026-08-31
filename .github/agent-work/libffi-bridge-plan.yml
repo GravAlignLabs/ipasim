@@ -1,0 +1,31 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Convert the merged Win64 carrier ABI evidence into a deterministic libffi-oriented
+  bridge adapter plan for the mechanically safe subset. Preserve guest capture and
+  result-commit operations, carrier ffi_type trees, host ABI evidence, and explicit
+  unresolved boundaries without calling semantic host implementations.
+
+scope:
+  - tools/compat_surface/bridge_plan.py
+  - tools/compat_surface/test_bridge_plan.py
+  - .github/workflows/compat-surface.yml
+  - .github/agent-work/libffi-bridge-plan.yml
+
+branch: compat-bridge-adapter-plan
+started_utc: 2026-08-31T14:28:00Z
+base_sha: f5a8e6c2889dcf4277db7931dd032a4d6196d59b
+expected_pr: draft
+
+next_checkpoint: >-
+  Build libffi type descriptors from fixed-width carrier LLVM types, distinguish guest
+  stack layout blockers from host stack placement that libffi owns, encode x8 indirect
+  result pointers as explicit logical arguments, preserve pointer validation policy,
+  and validate scalar/aggregate/HFA/stack/runtime-boundary cases deterministically.
+
+notes: >-
+  Planning evidence only. Do not modify SysTranslator or runtime behavior, call host
+  implementations, infer semantic compatibility, fabricate guest stack offsets, or
+  overlap the active Darwin pthread runtime claim.
