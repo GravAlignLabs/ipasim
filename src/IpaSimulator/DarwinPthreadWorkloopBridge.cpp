@@ -63,7 +63,6 @@ constexpr std::uint32_t MaximumCpuPercent = 100;
 constexpr std::uint32_t MinimumRefillMilliseconds = 1;
 
 struct WorkloopState {
-  std::uint64_t Options = 0;
   bool HasPriority = false;
   std::int32_t Priority = 0;
   bool HasPolicy = false;
@@ -94,8 +93,7 @@ bool validPolicy(std::uint32_t Policy) {
          Policy == PolicyFifo;
 }
 
-int decodeParameters(const DarwinPthreadAttr *Attr, std::uint64_t Options,
-                     WorkloopState &State) {
+int decodeParameters(const DarwinPthreadAttr *Attr, WorkloopState &State) {
   if (!Attr)
     return EINVAL;
 
@@ -110,7 +108,6 @@ int decodeParameters(const DarwinPthreadAttr *Attr, std::uint64_t Options,
     return EINVAL;
 
   WorkloopState Next;
-  Next.Options = Options;
 
   if (HasPriority) {
     const std::int32_t Priority = Attr->SchedParam.SchedPriority;
@@ -149,8 +146,13 @@ int createWorkloop(std::uint64_t Id, std::uint64_t Options,
   if (!validWorkloopId(Id))
     return EINVAL;
 
+  // Apple's current libpthread ABI accepts an options argument but does not
+  // consume it when issuing KQ_WORKLOOP_CREATE; preserve that observable
+  // behavior rather than inventing Windows-specific option semantics.
+  (void)Options;
+
   WorkloopState State;
-  const int Validation = decodeParameters(Attr, Options, State);
+  const int Validation = decodeParameters(Attr, State);
   if (Validation != 0)
     return Validation;
 
