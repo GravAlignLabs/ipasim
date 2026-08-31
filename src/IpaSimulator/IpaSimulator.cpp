@@ -7,6 +7,7 @@
 #include "ipasim/DynamicLoader.hpp"
 #include "ipasim/LoadedLibrary.hpp"
 
+#include <memory>
 #include <string>
 
 using namespace ipasim;
@@ -19,6 +20,25 @@ using namespace Windows::ApplicationModel::Activation;
 
 // TODO: This Emu-Dyld circular reference is not very cool.
 IpaSimulator::IpaSimulator() : Emu(Dyld), Dyld(Emu), Sys(Dyld, Emu) {}
+
+unique_ptr<GuestExecutionContext> IpaSimulator::createExecutionContext() {
+  auto Context = make_unique<GuestExecutionContext>();
+  Context->Emu = make_unique<Emulator>(Dyld);
+
+  // Every loaded Mach-O segment, native bridge page and previously discovered
+  // external guest page has the same Windows backing address in all contexts.
+  if (!Dyld.registerEmulator(*Context->Emu)) {
+    Log.error("could not replay guest address space into new ARM64 context");
+    return nullptr;
+  }
+
+  Context->Sys = make_unique<SysTranslator>(Dyld, *Context->Emu);
+  if (!Context->Sys->initializeExecutionContext()) {
+    Log.error("could not initialize new ARM64 execution context");
+    return nullptr;
+  }
+  return Context;
+}
 
 #if !defined(IPASIM_MODERN_CORE)
 void ipasim::start(const hstring &Path,
