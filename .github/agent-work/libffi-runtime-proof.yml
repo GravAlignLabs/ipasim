@@ -1,0 +1,29 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Execute a controlled cross-ABI libffi bridge proof from synthetic ARM64 guest
+  state into known local Win64 host functions and commit the returned values back
+  into synthetic guest result locations.
+
+scope:
+  - src/IpaSimulator/LibffiBridgeSmoke.cpp
+  - src/IpaSimulator/CMakeLists.txt
+  - .github/agent-work/libffi-runtime-proof.yml
+
+branch: compat-libffi-runtime-proof
+started_utc: 2026-08-31T14:43:00Z
+updated_utc: 2026-08-31T14:43:00Z
+base_sha: dde82e53125cc3320f91ef6e1380c4b53e7c487e
+expected_pr: draft
+
+next_checkpoint: >-
+  Prove ffi_prep_cif and ffi_call against controlled scalar, mixed floating-point,
+  aggregate, pointer, and ARM64 x8-style result-pointer cases, with exact synthetic
+  guest capture/commit assertions and no production dispatch changes.
+
+notes: >-
+  Runtime proof only. Do not modify SysTranslator, enable production symbol routing,
+  dereference arbitrary guest pointers, fabricate guest stack offsets, or overlap
+  the active Darwin pthread runtime claim.
