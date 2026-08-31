@@ -247,6 +247,7 @@ jobs:
           Copy-Item (Get-ChildItem $bin -Filter '*unicorn.dll' | Select-Object -First 1).FullName $package
           Copy-Item 'scripts\Test-Ipa.ps1' $package
           Copy-Item 'scripts\Test-Ipa.cmd' $package
+          Copy-Item 'scripts\Update-ipaSim-Tester.cmd' $package
 
           @'
           ipaSim generic IPA tester checkpoint
