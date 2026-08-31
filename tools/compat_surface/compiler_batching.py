@@ -2,13 +2,12 @@
 """Deterministic bounded orchestration for ipaSim's compiler-backed ABI probes.
 
 The underlying AAPCS64 and Win64 modules remain the authoritative single-pass
-lowering implementations.  This module partitions already-deterministic symbol
-surfaces into bounded contiguous batches, invokes those proven implementations,
-and merges their manifests back into the exact public schema.
+lowering implementations. This module partitions their already-deterministic
+symbol surfaces into bounded contiguous batches, invokes those proven
+implementations, and merges the results back into the exact public schemas.
 
-Batching is a scale mechanism only.  It must not create semantic approval,
-change ABI classifications, or turn an unsupported boundary into a generated
-candidate.
+Batching is a scale mechanism only. It must not create semantic approval, change
+ABI classifications, or turn an unsupported boundary into a generated candidate.
 """
 from __future__ import annotations
 
@@ -36,7 +35,10 @@ def _validate_batch_size(batch_size: int) -> int:
 
 
 def _chunks(items: list[dict], batch_size: int) -> list[list[dict]]:
-    return [items[index : index + batch_size] for index in range(0, len(items), batch_size)]
+    return [
+        items[index : index + batch_size]
+        for index in range(0, len(items), batch_size)
+    ]
 
 
 def _batch_label(kind: str, index: int, total: int, symbols: list[dict]) -> str:
@@ -46,29 +48,23 @@ def _batch_label(kind: str, index: int, total: int, symbols: list[dict]) -> str:
 
 
 def _typed_inventory_symbols(inventory: dict) -> list[dict]:
-    raw = inventory.get("symbols")
-    if not isinstance(raw, list):
-        # Let the authoritative validator produce the canonical schema error.
-        abi_surface.build_abi_manifest(
-            inventory,
-            header_root=__import__("pathlib").Path("."),
-        )
-        raise AssertionError("unreachable")
-    typed = []
-    for item in raw:
-        if not isinstance(item, dict):
-            # Preserve fail-closed behavior without attempting to normalize it.
-            return list(raw)
-        if item.get("signature") is not None:
-            typed.append(item)
-    return sorted(typed, key=lambda item: item.get("symbol", ""))
+    """Return raw typed rows in the authoritative AAPCS64 validator's order."""
+    _, selected = abi_surface._validate_inventory(inventory)
+    raw_symbols = inventory["symbols"]
+    by_symbol = {
+        item["symbol"]: item
+        for item in raw_symbols
+        if item.get("signature") is not None
+    }
+    return [deepcopy(by_symbol[item.symbol]) for item in selected]
 
 
 def _aapcs64_summary(symbols: list[dict]) -> dict:
     return {
         "typed_symbol_count": len(symbols),
         "generated_bridge_candidate_count": sum(
-            item.get("bridge_status") == "generated-bridge-candidate" for item in symbols
+            item.get("bridge_status") == "generated-bridge-candidate"
+            for item in symbols
         ),
         "callback_runtime_count": sum(
             item.get("bridge_status") == "callback-runtime" for item in symbols
@@ -80,10 +76,12 @@ def _aapcs64_summary(symbols: list[dict]) -> dict:
             item.get("bridge_status") == "needs-manual-abi" for item in symbols
         ),
         "unsupported_no_prototype_count": sum(
-            item.get("bridge_status") == "unsupported-no-prototype" for item in symbols
+            item.get("bridge_status") == "unsupported-no-prototype"
+            for item in symbols
         ),
         "indirect_result_count": sum(
-            item.get("return", {}).get("location", {}).get("kind") == "indirect-result"
+            item.get("return", {}).get("location", {}).get("kind")
+            == "indirect-result"
             for item in symbols
         ),
         "indirect_aggregate_argument_count": sum(
@@ -117,10 +115,16 @@ def build_aapcs64_manifest(
             partial = abi_surface.build_abi_manifest(partial_inventory, **kwargs)
         except abi_surface.AbiSurfaceError as exc:
             raise CompilerBatchError(
-                f"{_batch_label('AAPCS64', batch_index, len(batches), batch)} failed: {exc}"
+                f"{_batch_label('AAPCS64', batch_index, len(batches), batch)} "
+                f"failed: {exc}"
             ) from exc
-        if partial.get("kind") != "aapcs64-abi-surface" or partial.get("schema_version") != 1:
-            raise CompilerBatchError("AAPCS64 batch returned an unexpected manifest schema")
+        if (
+            partial.get("kind") != "aapcs64-abi-surface"
+            or partial.get("schema_version") != 1
+        ):
+            raise CompilerBatchError(
+                "AAPCS64 batch returned an unexpected manifest schema"
+            )
         if target is None:
             target = partial.get("target")
         elif partial.get("target") != target:
@@ -161,22 +165,33 @@ def _canonicalize_win64_batch(
     carrier_offset: int,
 ) -> tuple[list[dict], int, int]:
     """Translate batch-local synthetic compiler names to monolithic numbering."""
-    compiled = [item for item in symbols if isinstance(item.get("host_llvm_ir_name"), str)]
+    compiled = [
+        item
+        for item in symbols
+        if isinstance(item.get("host_llvm_ir_name"), str)
+    ]
     adapter_map: dict[int, int] = {}
     for global_index, item in enumerate(compiled, start=adapter_offset):
         match = _HOST_ADAPTER.search(item["host_llvm_ir_name"])
         if match is None:
             raise CompilerBatchError(
-                f"Win64 record {item.get('symbol')!r} has an unexpected synthetic adapter name"
+                f"Win64 record {item.get('symbol')!r} has an unexpected "
+                "synthetic adapter name"
             )
         local_index = int(match.group(1))
+        if local_index in adapter_map:
+            raise CompilerBatchError(
+                f"Win64 batch repeats synthetic adapter index {local_index}"
+            )
         adapter_map[local_index] = global_index
 
     carrier_ids: set[int] = set()
 
     def collect(value) -> None:
         if isinstance(value, str):
-            carrier_ids.update(int(match.group(1)) for match in _CARRIER.finditer(value))
+            carrier_ids.update(
+                int(match.group(1)) for match in _CARRIER.finditer(value)
+            )
         elif isinstance(value, list):
             for item in value:
                 collect(item)
@@ -186,7 +201,9 @@ def _canonicalize_win64_batch(
 
     collect(symbols)
     ordered_carriers = sorted(carrier_ids)
-    if ordered_carriers and ordered_carriers != list(range(ordered_carriers[-1] + 1)):
+    if ordered_carriers and ordered_carriers != list(
+        range(ordered_carriers[-1] + 1)
+    ):
         raise CompilerBatchError("Win64 batch carrier numbering is not dense")
     carrier_map = {
         local: carrier_offset + position
@@ -226,16 +243,20 @@ def _win64_summary(symbols: list[dict]) -> dict:
     return {
         "guest_symbol_count": len(symbols),
         "cross_abi_adapter_candidate_count": sum(
-            item.get("cross_abi_status") == "cross-abi-adapter-candidate" for item in symbols
+            item.get("cross_abi_status") == "cross-abi-adapter-candidate"
+            for item in symbols
         ),
         "inherited_runtime_boundary_count": sum(
-            item.get("cross_abi_status") == "inherited-runtime-boundary" for item in symbols
+            item.get("cross_abi_status") == "inherited-runtime-boundary"
+            for item in symbols
         ),
         "needs_carrier_type_count": sum(
-            item.get("cross_abi_status") == "needs-carrier-type" for item in symbols
+            item.get("cross_abi_status") == "needs-carrier-type"
+            for item in symbols
         ),
         "needs_manual_host_abi_count": sum(
-            item.get("cross_abi_status") == "needs-manual-host-abi" for item in symbols
+            item.get("cross_abi_status") == "needs-manual-host-abi"
+            for item in symbols
         ),
     }
 
@@ -248,10 +269,8 @@ def build_win64_manifest(
 ) -> dict:
     """Run ``win64_abi_surface`` over deterministic bounded guest-symbol batches."""
     batch_size = _validate_batch_size(batch_size)
-    raw_symbols = guest_manifest.get("symbols")
-    if not isinstance(raw_symbols, list):
-        return win64_abi_surface.build_win64_manifest(guest_manifest, **kwargs)
-    symbols = sorted(deepcopy(raw_symbols), key=lambda item: item.get("symbol", ""))
+    _, validated_symbols = win64_abi_surface._validate_guest(guest_manifest)
+    symbols = deepcopy(validated_symbols)
     if not symbols or len(symbols) <= batch_size:
         return win64_abi_surface.build_win64_manifest(guest_manifest, **kwargs)
 
@@ -265,17 +284,31 @@ def build_win64_manifest(
         partial_guest = deepcopy(guest_manifest)
         partial_guest["symbols"] = deepcopy(batch)
         try:
-            partial = win64_abi_surface.build_win64_manifest(partial_guest, **kwargs)
-        except (win64_abi_surface.Win64AbiError, win64_abi_surface.CarrierTypeError) as exc:
+            partial = win64_abi_surface.build_win64_manifest(
+                partial_guest, **kwargs
+            )
+        except (
+            win64_abi_surface.Win64AbiError,
+            win64_abi_surface.CarrierTypeError,
+        ) as exc:
             raise CompilerBatchError(
-                f"{_batch_label('Win64', batch_index, len(batches), batch)} failed: {exc}"
+                f"{_batch_label('Win64', batch_index, len(batches), batch)} "
+                f"failed: {exc}"
             ) from exc
-        if partial.get("kind") != "win64-carrier-abi-surface" or partial.get("schema_version") != 1:
-            raise CompilerBatchError("Win64 batch returned an unexpected manifest schema")
+        if (
+            partial.get("kind") != "win64-carrier-abi-surface"
+            or partial.get("schema_version") != 1
+        ):
+            raise CompilerBatchError(
+                "Win64 batch returned an unexpected manifest schema"
+            )
         if guest_target is None:
             guest_target = partial.get("guest_target")
             host_target = partial.get("host_target")
-        elif partial.get("guest_target") != guest_target or partial.get("host_target") != host_target:
+        elif (
+            partial.get("guest_target") != guest_target
+            or partial.get("host_target") != host_target
+        ):
             raise CompilerBatchError("Win64 batches disagree on compiler targets")
         partial_symbols = partial.get("symbols")
         if not isinstance(partial_symbols, list):
