@@ -240,43 +240,43 @@ jobs:
             Copy-Item 'scripts\Test-Ipa.cmd' $package
             Copy-Item 'scripts\Update-ipaSim-Tester.cmd' $package
 
-            @'
-            ipaSim generic IPA tester checkpoint
+          @'
+          ipaSim generic IPA tester checkpoint
 
-            Public validation flow:
-            1. "Windows ARM64 Core" builds and semantically validates the modern
-               core once, then publishes this exact tester artifact.
-            2. "Synthetic iOS IPA on Windows" reuses this exact-head tester rather
-               than recompiling ipaSim, then requires HelloBootstrap to execute on
-               Windows and return guest X0=42.
-            3. Synthetic also inspects the untouched native IPA and UIKit Hello World
-               boundaries with the same binaries.
-            4. Only after the public synthetic/core checks pass, optionally run a
-               private application locally with this package. Do not upload private
-               IPAs, RuntimeRoot contents, or private application logs to public CI.
+          Public validation flow:
+          1. "Windows ARM64 Core" builds and semantically validates the modern
+             core once, then publishes this exact tester artifact.
+          2. "Synthetic iOS IPA on Windows" reuses this exact-head tester rather
+             than recompiling ipaSim, then requires HelloBootstrap to execute on
+             Windows and return guest X0=42.
+          3. Synthetic also inspects the untouched native IPA and UIKit Hello World
+             boundaries with the same binaries.
+          4. Only after the public synthetic/core checks pass, optionally run a
+             private application locally with this package. Do not upload private
+             IPAs, RuntimeRoot contents, or private application logs to public CI.
 
-            Generic local method:
-            1. Extract this tester ZIP.
-            2. Drag any .ipa onto Test-Ipa.cmd.
-            3. Optionally supply an extracted iOS runtime root whose top level
-               contains System and usr.
+          Generic local method:
+          1. Extract this tester ZIP.
+          2. Drag any .ipa onto Test-Ipa.cmd.
+          3. Optionally supply an extracted iOS runtime root whose top level
+             contains System and usr.
 
-            Loader-only command:
-               Test-Ipa.cmd "C:\path\to\App.ipa"
+          Loader-only command:
+             Test-Ipa.cmd "C:\path\to\App.ipa"
 
-            Loader plus RuntimeRoot:
-               Test-Ipa.cmd "C:\path\to\App.ipa" "C:\path\to\RuntimeRoot"
+          Loader plus RuntimeRoot:
+             Test-Ipa.cmd "C:\path\to\App.ipa" "C:\path\to\RuntimeRoot"
 
-            ipaSim does not package or download Apple runtime binaries. The iOS
-            Simulator runtime can import a macOS-host libSystem surface; the tester
-            carries IpaSimDarwinHost.dll only for host semantics with defensible
-            Windows equivalents. Unsupported behavior remains an explicit failure.
+          ipaSim does not package or download Apple runtime binaries. The iOS
+          Simulator runtime can import a macOS-host libSystem surface; the tester
+          carries IpaSimDarwinHost.dll only for host semantics with defensible
+          Windows equivalents. Unsupported behavior remains an explicit failure.
 
-            The generic local tester auto-detects the top-level .app and Mach-O
-            executable instead of encoding any application name or bundle path.
-            For public collaboration, reproduce failures with the synthetic fixtures
-            and share those logs instead of private application output.
-            '@ | Set-Content (Join-Path $package 'README.txt')
+          The generic local tester auto-detects the top-level .app and Mach-O
+          executable instead of encoding any application name or bundle path.
+          For public collaboration, reproduce failures with the synthetic fixtures
+          and share those logs instead of private application output.
+          '@ | Set-Content (Join-Path $package 'README.txt')
 
             $items = @(Get-ChildItem $package)
             foreach ($item in $items) {
@@ -388,7 +388,7 @@ jobs:
               marker,
               '## Windows ARM64 core build diagnostic',
               '',
-              `Resolved by commit \`${headSha}\`.`,
+              `Resolved by commit \`${headSha}\`.",
               '',
               'The configure, ARM64 smoke, core/probe build, output verification, and tester packaging stages now succeed.'
             ].join('\n');
