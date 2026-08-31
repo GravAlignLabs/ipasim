@@ -23,7 +23,7 @@ struct FunctionHelper<T, RetTy(ArgTys...)> {
 
   struct DataTy {
     T *Instance;
-    F T::*Handler; // `F T::*` is a member pointer
+    F T::*Handler;
   };
 
   static RetTy hook(uc_engine *, ArgTys... Args, void *Data) {
@@ -34,7 +34,9 @@ struct FunctionHelper<T, RetTy(ArgTys...)> {
 
 } // namespace hooks
 
-// Wraps an instance of the Unicorn emulator. Automatically reports errors.
+// Wraps one ARM64 Unicorn CPU context. Guest process memory is backed directly
+// by Windows pages at the same addresses; DynamicLoader records normal mappings
+// so additional CPU contexts can replay the same address space.
 class Emulator {
 public:
   Emulator(DynamicLoader &Dyld)
@@ -46,10 +48,15 @@ public:
   }
   ~Emulator();
 
-  // Guest registers are pointer-width for the modern iOS ARM64 target.
   uint64_t readReg(int RegId);
   void writeReg(int RegId, uint64_t Value);
-  void mapMemory(uint64_t Addr, uint64_t Size, uc_prot Perms);
+
+  // Map a shared guest-process region and record it for future CPU contexts.
+  bool mapMemory(uint64_t Addr, uint64_t Size, uc_prot Perms);
+  // Replay an already-recorded region into this CPU context without recording
+  // it again.
+  bool mapRecordedMemory(uint64_t Addr, uint64_t Size, uc_prot Perms);
+
   void start(uint64_t Addr);
   void stop();
   template <typename F>
@@ -62,10 +69,11 @@ public:
     using Helper = hooks::FunctionHelper<T, F>;
     hook(Type, Helper::hook, new typename Helper::DataTy{Instance, Handler});
   }
-  // Won't report the next error.
   void ignoreNextError();
 
 private:
+  bool mapMemoryImpl(uint64_t Addr, uint64_t Size, uc_prot Perms);
+
   uc_engine *UC;
   DynamicLoader &Dyld;
   bool IgnoreError;
@@ -77,5 +85,4 @@ private:
 
 } // namespace ipasim
 
-// !defined(IPASIM_EMULATOR_HPP)
 #endif
