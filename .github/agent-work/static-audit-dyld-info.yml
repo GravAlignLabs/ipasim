@@ -1,0 +1,30 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Correct the closure-wide static symbol audit so legacy LC_DYLD_INFO and
+  LC_DYLD_INFO_ONLY export tries are recognized, then add provider-aware unique
+  missing-symbol ranking before using the audit to drive resolver architecture.
+
+scope:
+  - src/IpaSimulator/StaticSymbolAudit.hpp
+  - src/IpaSimulator/StaticSymbolAuditSelfTest.hpp
+  - .github/agent-work/static-audit-dyld-info.yml
+
+branch: compat-static-audit-dyld-info
+started_utc: 2026-08-31T01:45:00Z
+updated_utc: 2026-08-31T01:45:00Z
+base_sha: a775612f6419844a130541fbb7a67454e213bf51
+expected_pr: tbd
+
+next_checkpoint: >-
+  Parse export_off/export_size from LC_DYLD_INFO and LC_DYLD_INFO_ONLY using the
+  same export-trie parser as LC_DYLD_EXPORTS_TRIE, prove the parser behavior in
+  the audit self-test, and rank unique required (provider, symbol) pairs by
+  importer frequency without flattening Mach-O two-level namespaces.
+
+notes: >-
+  Diagnostic correctness only. Do not redirect libSystem.B.dylib to the native
+  host bridge: Apple dyld documents only kernel/platform/pthread as simulator
+  support dylibs supplied by the host. No private IPA or RuntimeRoot data.
