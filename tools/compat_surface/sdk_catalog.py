@@ -9,6 +9,12 @@ surface can be reasoned about and generated in bulk.
 The catalog is evidence only. TAPI metadata establishes export/provider facts;
 Clang establishes C type facts. Neither source grants semantic compatibility,
 selects a Windows implementation, or approves a runtime route.
+
+For the existing AAPCS64 lowering tool, this module can also emit a deliberately
+mechanical projection using the pre-existing ``typed-compatibility-inventory``
+shape. That projection contains every typed global C export in the SDK catalog,
+not just symbols observed in one Mach-O. It exists only to feed the already
+validated ABI generator and contains no runtime requirements or semantic claims.
 """
 
 from __future__ import annotations
@@ -338,6 +344,105 @@ def build_sdk_catalog(
     }
 
 
+def build_abi_inventory(catalog_manifest: dict) -> dict:
+    """Project SDK-wide typed C exports into the existing ABI-generator input shape.
+
+    This is a mechanical adapter between manifest schemas. It intentionally emits
+    no Mach-O requirements and does not invent semantic implementation status.
+    """
+    _schema(catalog_manifest, "SDK catalog", "typed-sdk-catalog")
+    targets = _mapping(catalog_manifest.get("targets"), "SDK catalog targets")
+    clang_target = _string(targets.get("clang"), "SDK catalog Clang target")
+    tapi_target = _string(targets.get("tapi"), "SDK catalog TAPI target")
+
+    projected = []
+    seen: set[str] = set()
+    for index, raw_item in enumerate(
+        _list(catalog_manifest.get("symbols"), "SDK catalog symbols")
+    ):
+        item = _mapping(raw_item, f"SDK catalog symbols[{index}]")
+        symbol = _string(item.get("symbol"), f"SDK catalog symbols[{index}].symbol")
+        if symbol in seen:
+            raise SdkCatalogError(f"duplicate SDK catalog symbol {symbol!r}")
+        seen.add(symbol)
+        callable_candidate = _boolean(
+            item.get("callable_c_candidate"),
+            f"SDK catalog symbol {symbol!r} callable_c_candidate",
+        )
+        signature = item.get("signature")
+        if not callable_candidate:
+            continue
+        if signature is None:
+            raise SdkCatalogError(
+                f"SDK catalog marks {symbol!r} callable without a Clang signature"
+            )
+        signature = _mapping(signature, f"SDK catalog signature for {symbol!r}")
+        if _string(signature.get("symbol"), f"signature symbol for {symbol!r}") != symbol:
+            raise SdkCatalogError(f"SDK catalog/signature symbol mismatch for {symbol!r}")
+
+        provider_rows = []
+        seen_provider_rows: set[tuple[str, bool]] = set()
+        for raw_fact in _list(
+            item.get("sdk_direct_exports"),
+            f"SDK catalog direct exports for {symbol!r}",
+        ):
+            fact = _mapping(raw_fact, f"SDK catalog direct export for {symbol!r}")
+            if _string(fact.get("kind"), f"SDK catalog export kind for {symbol!r}") != "global":
+                raise SdkCatalogError(
+                    f"callable SDK catalog symbol {symbol!r} has non-global provider evidence"
+                )
+            install_name = _string(
+                fact.get("install_name"),
+                f"SDK catalog provider install_name for {symbol!r}",
+            )
+            weak = _boolean(fact.get("weak"), f"SDK catalog provider weak for {symbol!r}")
+            key = (install_name, weak)
+            if key in seen_provider_rows:
+                continue
+            seen_provider_rows.add(key)
+            provider_rows.append({"install_name": install_name, "weak": weak})
+        provider_rows.sort(key=lambda value: (value["install_name"], value["weak"]))
+
+        projected.append(
+            {
+                "symbol": symbol,
+                "required_by": [],
+                "requirement_count": 0,
+                "sdk_direct_exports": provider_rows,
+                "signature": deepcopy(signature),
+            }
+        )
+
+    projected.sort(key=lambda item: item["symbol"])
+    return {
+        "schema_version": 1,
+        "kind": "typed-compatibility-inventory",
+        "scope": "sdk-wide-mechanical-projection",
+        "source_kind": "typed-sdk-catalog",
+        "targets": {
+            "clang": clang_target,
+            "tapi": tapi_target,
+        },
+        "summary": {
+            "requirement_count": 0,
+            "unique_required_symbol_count": 0,
+            "typed_unique_symbol_count": len(projected),
+            "untyped_unique_symbol_count": 0,
+            "sdk_wide_typed_symbol_count": len(projected),
+        },
+        "symbols": projected,
+        "requirements": [],
+    }
+
+
+def _write_json(path: str | None, value: dict) -> None:
+    rendered = json.dumps(value, indent=2, sort_keys=False) + "\n"
+    if path:
+        Path(path).write_text(rendered, encoding="utf-8")
+    else:
+        sys.stdout.write(rendered)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -358,6 +463,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--output",
         help="write SDK-wide JSON catalog to this file instead of stdout",
     )
+    parser.add_argument(
+        "--abi-inventory-output",
+        help=(
+            "also write an SDK-wide mechanical projection accepted by abi_surface.py; "
+            "this projection contains no Mach-O runtime requirements"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -366,11 +478,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             load_manifest(Path(args.headers), "header"),
             tapi_target=args.tapi_target,
         )
-        rendered = json.dumps(catalog, indent=2, sort_keys=False) + "\n"
         if args.output:
-            Path(args.output).write_text(rendered, encoding="utf-8")
+            _write_json(args.output, catalog)
         else:
-            sys.stdout.write(rendered)
+            _write_json(None, catalog)
+        if args.abi_inventory_output:
+            _write_json(args.abi_inventory_output, build_abi_inventory(catalog))
         return 0
     except (SdkCatalogError, OSError) as exc:
         print(f"[sdk-catalog] ERROR: {exc}", file=sys.stderr)
