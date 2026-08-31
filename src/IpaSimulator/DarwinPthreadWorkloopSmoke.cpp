@@ -179,9 +179,9 @@ int main(int argc, char **argv) {
     return fail("CPU percentage/refill validation failed");
   }
 
-  // Current XNU passes the options argument through the control call without
-  // defining option-bit validation. Preserve that behavior while still making
-  // the workloop itself a real, stateful registry object.
+  // Apple's current libpthread accepts the options argument but ignores it when
+  // issuing KQ_WORKLOOP_CREATE. Preserve that acceptance while still making the
+  // workloop itself a real, stateful registry object.
   constexpr std::uint64_t ArbitraryOptions = 0xfedcba9876543210ULL;
   if (CreateWorkloop(40, ArbitraryOptions, &ValidPriority) != 0 ||
       CreateWorkloop(40, 0, &ValidPriority) != EEXIST ||
