@@ -161,6 +161,25 @@ IPASIM_API int ipaSim_executeImageThreaded(const char *Path,
   return 0;
 }
 
+// Run one guest start routine on a fresh ARM64 CPU context in the *calling*
+// Windows thread. DarwinPthreadCoreBridge owns the host-thread lifetime so its
+// thread-local pthread identity/TSD state and the Unicorn CPU remain aligned.
+// This is synchronous by design; pthread_create provides the asynchronous host
+// thread around it.
+IPASIM_API int ipaSim_runGuestPthread(void *FP, void *Arg0,
+                                     void **ReturnValue) {
+  if (!FP || !ReturnValue)
+    return 64;
+
+  auto Context = IpaSim.createExecutionContext();
+  if (!Context)
+    return 72;
+
+  ScopedSysTranslatorActivation Active(*Context->Sys);
+  *ReturnValue = Context->Sys->callBackR(FP, Arg0);
+  return 0;
+}
+
 IPASIM_API void *ipaSim_translate(void *FP) {
   return currentSysTranslator().translate(FP);
 }
