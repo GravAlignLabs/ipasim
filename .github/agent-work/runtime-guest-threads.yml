@@ -9,29 +9,34 @@ task: >-
   address space.
 
 scope:
+  - include/ipasim/DynamicLoader.hpp
   - include/ipasim/Emulator.hpp
   - include/ipasim/SysTranslator.hpp
   - include/ipasim/IpaSimulator.hpp
+  - include/ipasim/Probe.hpp
   - src/IpaSimulator/Emulator.cpp
   - src/IpaSimulator/SysTranslator.cpp
   - src/IpaSimulator/IpaSimulator.cpp
+  - src/IpaSimulator/IpaProbe.cpp
   - src/IpaSimulator/DarwinPthreadWorkqueueBridge.cpp
+  - src/IpaSimulator/DarwinPthreadWorkqueueSmoke.cpp
   - src/IpaSimulator/CMakeLists.txt
+  - .github/workflows/threaded-guest-context.yml
   - .github/agent-work/runtime-guest-threads.yml
 
 branch: runtime-guest-thread-execution
 started_utc: 2026-08-31T04:24:00Z
-updated_utc: 2026-08-31T04:31:00Z
+updated_utc: 2026-08-31T04:40:00Z
 base_sha: d00815c4557a2c038974214615a0f4bbdcee5b4a
 expected_pr: tbd
 
 next_checkpoint: >-
-  Extract repeatable shared-memory engine setup from the architectural smoke,
-  give guest callbacks independent ARM64 CPU/register/stack contexts, expose a
-  dedicated threaded callback entry point to the workqueue host bridge, and run
-  the authoritative Windows ARM64 and synthetic IPA CI workflows.
+  Keep nested guest callbacks on their originating ARM64 context, expose a
+  deterministic threaded IpaProbe mode, exercise it against a GitHub-built iOS
+  ARM64 Mach-O in public CI, and run the authoritative Windows ARM64 and
+  synthetic IPA workflows before merge.
 
 notes: >-
   Optimize for a working emulator. Audit code and audit self-tests remain
   untouched. Do not report thread support as complete until independent engine
-  execution is exercised through the actual guest callback path.
+  execution is exercised through an actual guest callback path.
