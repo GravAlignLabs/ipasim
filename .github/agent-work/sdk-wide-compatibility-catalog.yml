@@ -3,24 +3,31 @@ owner: DeerSpotter
 agent: ChatGPT GPT-5.6 Sol
 
 task: >-
-  Build an SDK-wide typed compatibility catalog so mechanical iOS API/ABI coverage can be generated in bulk from TAPI and Clang evidence instead of being gated on one runtime failure at a time.
+  Build an SDK-wide compatibility planner and bulk route generator so mechanical iOS API/ABI coverage can be generated in bulk from TAPI and Clang evidence, classified against explicit semantic-provider status, and compiled into production route data without waiting for one runtime failure at a time.
 
 scope:
   - AGENTS.md
   - README.md
   - tools/compat_surface/sdk_catalog.py
   - tools/compat_surface/test_sdk_catalog.py
+  - tools/compat_surface/compat_planner.py
+  - tools/compat_surface/test_compat_planner.py
+  - tools/compat_surface/semantic_providers.json
+  - tools/compat_surface/generate_semantic_routes.py
+  - tools/compat_surface/test_generate_semantic_routes.py
   - tools/compat_surface/README.md
+  - src/IpaSimulator/ApprovedSemanticImportRoutes.inc
+  - .github/workflows/compat-surface.yml
   - .github/agent-work/sdk-wide-compatibility-catalog.yml
 
 branch: compat-sdk-wide-catalog
 started_utc: 2026-08-31T19:32:00Z
-updated_utc: 2026-08-31T19:38:00Z
+updated_utc: 2026-08-31T19:42:00Z
 base_sha: b61e0c4298958ae200074a1b903df5d25e1d6550
 expected_pr: https://github.com/GravAlignLabs/ipasim/pull/54
 
 next_checkpoint: >-
-  Validate the SDK-wide catalog and its zero-runtime-requirement ABI projection, document the SDK-first mechanical coverage strategy, and keep runtime-first debugging reserved for semantic/dynamic boundaries.
+  Extend PR #54 from catalog-only evidence into a deterministic compatibility planner plus generated production semantic-route table, with the existing _getpid route preserved as the first manifest-backed production record and SDK-wide rows classified before runtime execution.
 
 notes: >-
-  Keep the existing import-scoped inventory unchanged and add a separate SDK-wide catalog surface. Keep SDK/compiler evidence separate from semantic approval. Non-C metadata must remain explicitly classified rather than becoming callable functions. Do not touch active pthread/runtime scope. Update project guidance so first-runtime-failure remains a semantic truth check, not the primary strategy for mechanical SDK coverage.
+  Keep SDK/compiler evidence separate from semantic approval. The planner may aggressively classify and generate mechanical coverage, but only explicit semantic-provider records may become production routes. Provider addresses remain runtime facts and must continue exact live-address verification in the loader. Non-C metadata, data/TLS exports, callbacks, variadics, no-prototype declarations, unsupported ABI classes, and unresolved semantics must remain explicit and fail closed. Do not touch active pthread/runtime scope.
