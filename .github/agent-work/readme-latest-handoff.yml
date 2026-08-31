@@ -1,0 +1,26 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Refresh the root README with the latest merged generated-compatibility-engine
+  checkpoint so a new contributor or AI chat can recover current project state.
+
+scope:
+  - README.md
+  - .github/agent-work/readme-latest-handoff.yml
+
+branch: docs-latest-handoff
+started_utc: 2026-08-31T17:50:00Z
+updated_utc: 2026-08-31T17:50:00Z
+base_sha: 7dfe7f59c41de8e1656b832c0af319514c43c86e
+expected_pr: draft-or-tbd
+
+next_checkpoint: >-
+  Document PRs #48 through #50, the first real generated semantic-provider call,
+  current green validation state, remaining production-routing boundary, and the
+  still-active pthread-core claim; then merge the documentation update.
+
+notes: >-
+  Documentation only. Do not change runtime behavior or overlap the active
+  Darwin pthread-core implementation scope.
