@@ -1,0 +1,32 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Implement the next generic Darwin pthread workloop compatibility boundary used
+  by libdispatch, beginning with __pthread_workloop_create and the paired destroy
+  lifecycle, with executable semantic coverage and explicit ARM64 host-call ABI.
+
+scope:
+  - src/IpaSimulator/DarwinPthreadWorkloopBridge.cpp
+  - src/IpaSimulator/DarwinPthreadWorkloopSmoke.cpp
+  - src/IpaSimulator/CMakeLists.txt
+  - src/IpaSimulator/SysTranslator.cpp
+  - src/IpaSimulator/StaticSymbolAudit.hpp
+  - .github/agent-work/pthread-workloop.yml
+
+branch: compat-pthread-workloop
+started_utc: 2026-08-31T02:45:00Z
+updated_utc: 2026-08-31T02:45:00Z
+base_sha: 2727295354ac84d54eaadea50e51ac87388f15c5
+expected_pr: tbd
+
+next_checkpoint: >-
+  Preserve the libsystem_sim_pthread provider namespace, implement the workloop
+  create/destroy lifecycle without placeholder success, add exact host ABI
+  signatures and semantic smoke coverage, then let CI expose the next genuine
+  libdispatch pthread dependency.
+
+notes: >-
+  No blanket provider remap, no monkey patching, and no no-op workloop success.
+  Keep the change generic and public; do not include private IPA or RuntimeRoot data.
