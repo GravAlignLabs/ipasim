@@ -143,6 +143,7 @@ IPASIM_API int ipaSim_executeImageThreaded(const char *Path,
       auto Context = IpaSim.createExecutionContext();
       if (!Context)
         return;
+      ScopedSysTranslatorActivation Active(*Context->Sys);
       WorkerReturn = reinterpret_cast<uint64_t>(
           Context->Sys->callBackR(reinterpret_cast<void *>(Entry)));
       WorkerSucceeded = true;
@@ -186,6 +187,7 @@ IPASIM_API void ipaSim_callBack1Threaded(void *FP, void *Arg0) {
       auto Context = IpaSim.createExecutionContext();
       if (!Context)
         return;
+      ScopedSysTranslatorActivation Active(*Context->Sys);
       Context->Sys->callBack(FP, Arg0);
     }).detach();
   } catch (const system_error &Error) {
