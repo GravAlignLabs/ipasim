@@ -5,30 +5,39 @@ the modern ipaSim compatibility pipeline. They turn information that would
 otherwise live only in runtime logs, SDK text stubs, or SDK headers into
 deterministic JSON that tools, agents, and later code generators can consume.
 
-They are intentionally **diagnostic only**:
+They are intentionally evidence-oriented:
 
 - they never rewrite a Mach-O image;
 - they never patch or remap an import;
 - they never mark an unsupported API as successful;
 - they never infer a function signature from symbol spelling;
+- SDK/compiler evidence never grants semantic-provider approval;
 - parse ambiguities fail explicitly instead of silently normalizing evidence.
 
 ## Why this exists
 
 Jan Joneš's original ipaSim thesis used SDK metadata and generated wrappers so
 calling-convention plumbing did not have to scale one hand-written function at a
-time. The modern ARM64 work already has runtime import inventories, but that
-knowledge has historically been mostly emitted as text during a run.
+time. The modern ARM64 compatibility engine follows that same scaling principle,
+with a stronger separation between mechanical ABI evidence and runtime semantics.
 
-These tools start rebuilding the machine-readable half of that architecture so
-the same surface can later be joined with:
+The tooling supports two related views:
+
+- an **SDK-wide planning view**, built before any particular application executes;
+- an **import-scoped validation view**, showing what a particular Mach-O requires.
+
+The SDK-wide view is now the preferred source for broad mechanical API/ABI
+coverage. Runtime/import evidence remains essential for validating a specific
+application and for semantics that static SDK data cannot establish.
+
+The manifests can be joined with:
 
 - SDK `.tbd` export/re-export metadata;
 - SDK/header-derived function signatures;
-- `SysTranslator` ABI registrations;
-- `IpaSimDarwinHost.dll` exports;
-- runtime hit counts and transition timing;
-- generated ARM64 <-> Windows x64 bridge metadata.
+- ARM64 and Win64 compiler-lowered ABI evidence;
+- generated libffi adapter plans and runtime records;
+- explicit semantic-provider approval data;
+- runtime hit counts and transition timing.
 
 The manifests are evidence about what binaries and SDKs expose. They are not
 evidence that an implementation is semantically correct.
@@ -92,8 +101,9 @@ away.
 
 ## Apple TAPI SDK knowledge surface
 
-`tbd_surface.py` converts Apple TAPI `.tbd` metadata into a second deterministic
-manifest designed to join with the Mach-O import surface.
+`tbd_surface.py` converts Apple TAPI `.tbd` metadata into a deterministic SDK
+manifest. It can scan one file or the complete SDK tree; the whole-SDK scan is
+the foundation for SDK-wide compatibility planning.
 
 Install the one parser dependency:
 
@@ -138,9 +148,8 @@ For each matching interface it preserves:
 - source paths relative to the supplied SDK root.
 
 It also emits a `symbol_index` that maps each **direct export** to all interfaces
-that directly provide it. That index is candidate-provider metadata only. It
-does not chase re-export graphs, choose an implementation, or claim that a
-symbol is callable.
+that directly provide it. That index is provider metadata only. It does not
+choose an implementation or claim that a symbol is callable.
 
 ### TAPI SDK manifest v1
 
@@ -198,8 +207,8 @@ python tools/compat_surface/header_surface.py ^
 ```
 
 If `--sdk-root` is supplied without `--relative-header`, every `.h` below the SDK
-root is scanned. That is useful for offline indexing but can be substantially
-slower than targeting the subsystem currently under investigation.
+root is scanned. That is the mode used to build a broad SDK-wide C signature
+universe. It can be substantially slower than a subsystem-targeted scan.
 
 Feature macros or other parse settings can be passed explicitly without changing
 the analyzer:
@@ -251,8 +260,144 @@ The normalized shape is:
 ```
 
 The `symbol` field uses Clang's actual Darwin mangled name, so it can be joined
-directly with the Mach-O import surface and TAPI direct-export index without
+directly with both the Mach-O import surface and TAPI direct-export index without
 assuming that prefixing a source identifier is always sufficient.
+
+## SDK-wide typed compatibility catalog
+
+`sdk_catalog.py` is the SDK-scale join. It consumes the **complete target-matching
+TAPI symbol index** plus the Clang header-signature surface and produces a
+`typed-sdk-catalog` without requiring any Mach-O import manifest.
+
+That distinction is deliberate. Mechanical compatibility knowledge should not
+wait for a particular application to fail on each symbol one at a time.
+
+Build a catalog:
+
+```text
+python tools/compat_surface/sdk_catalog.py ^
+  --tapi ios-16.5-sdk-surface.json ^
+  --headers ios-16.5-header-signatures.json ^
+  --output ios-16.5-typed-sdk-catalog.json
+```
+
+To also feed all typed global C candidates into the already validated AAPCS64 ABI
+generator, request a mechanical projection:
+
+```text
+python tools/compat_surface/sdk_catalog.py ^
+  --tapi ios-16.5-sdk-surface.json ^
+  --headers ios-16.5-header-signatures.json ^
+  --output ios-16.5-typed-sdk-catalog.json ^
+  --abi-inventory-output ios-16.5-sdk-abi-input.json
+
+python tools/compat_surface/abi_surface.py ^
+  --inventory ios-16.5-sdk-abi-input.json ^
+  --header-root C:\path\to\iPhoneOS16.5.sdk ^
+  --sdk-root C:\path\to\iPhoneOS16.5.sdk ^
+  --output ios-16.5-aapcs64-surface.json
+```
+
+The ABI projection deliberately contains:
+
+- every SDK catalog row classified as a typed global C function;
+- exact Clang signature evidence;
+- direct TAPI provider evidence;
+- **zero Mach-O runtime requirements**;
+- no semantic-provider approval.
+
+It is marked `scope: sdk-wide-mechanical-projection` so downstream tooling and
+humans can distinguish it from an application/import-scoped inventory.
+
+The catalog keeps the following categories separate instead of flattening them
+into presumed functions:
+
+- typed global C functions;
+- untyped globals, which may be data or functions not described by the header surface;
+- Objective-C class/exception/ivar metadata;
+- thread-local exports;
+- mixed-kind evidence;
+- weak versus strong exports;
+- symbols with multiple direct providers;
+- header signatures that have no target-matching TAPI export.
+
+### SDK catalog manifest v1
+
+The high-level shape is:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "typed-sdk-catalog",
+  "targets": {
+    "clang": "arm64-apple-ios16.0",
+    "tapi": "arm64-ios"
+  },
+  "summary": {
+    "interface_count": 0,
+    "symbol_count": 0,
+    "global_symbol_count": 0,
+    "typed_global_symbol_count": 0,
+    "untyped_global_symbol_count": 0,
+    "weak_symbol_count": 0,
+    "objc_symbol_count": 0,
+    "thread_local_symbol_count": 0,
+    "mixed_kind_symbol_count": 0,
+    "multi_provider_symbol_count": 0,
+    "header_signature_count": 0,
+    "orphan_header_signature_count": 0
+  },
+  "symbols": [],
+  "orphan_header_signatures": []
+}
+```
+
+A catalog row becomes `callable_c_candidate: true` only when its target-matching
+TAPI kind is exactly `global` and an exact Clang signature exists. The catalog
+may retain a coincidentally matching header signature for non-C TAPI metadata,
+but that metadata remains non-callable and is excluded from the ABI projection.
+
+This is still mechanical evidence only. The next layer must compare the generated
+mechanical surface with an independently maintained semantic-provider inventory;
+SDK presence is never semantic approval.
+
+## Import-scoped typed compatibility inventory
+
+`inventory_surface.py` remains useful for a different question: what does a
+**particular Mach-O set** require, and does that import/provider requirement agree
+with the SDK evidence?
+
+It joins:
+
+```text
+Mach-O import requirement
+        +
+TAPI provider/re-export evidence
+        +
+Clang header signature evidence
+        -> typed compatibility inventory
+```
+
+Use this view for application validation, provider/re-export mismatch diagnosis,
+weak/special ordinals, and importer-specific requirements. Do not require an
+import-scoped inventory before generating SDK-wide mechanical coverage.
+
+## Downstream ABI and bridge surfaces
+
+The existing downstream tools remain the mechanical execution pipeline:
+
+```text
+typed mechanical inventory
+        -> abi_surface.py            (AAPCS64)
+        -> win64_abi_surface.py      (Win64 carrier ABI)
+        -> bridge_plan.py            (libffi-oriented repacking plan)
+        -> runtime_adapter_table.py  (runtime records / generated C++)
+```
+
+These tools deliberately classify unsupported cases instead of guessing. Current
+AAPCS64 status classes include generated bridge candidates, callback-runtime,
+variadic-runtime, manual ABI, and no-prototype cases. Exact unknown guest stack
+placement remains unknown until proven.
 
 ## Tests
 
@@ -281,8 +426,15 @@ record returns, old-style no-prototype declarations, duplicate/conflicting
 signatures, include/static filtering, deterministic output, and SDK-root path
 privacy.
 
+The SDK catalog tests prove that symbols do not need to appear in a Mach-O import
+manifest before entering the mechanical map. They also cover typed/untyped global
+separation, Objective-C/TLS non-callability, target filtering, weak/strong and
+multi-provider evidence, deterministic output, SDK-wide ABI projection, path
+privacy, and fail-closed inconsistent callable records.
+
 Malformed ordinals, unsafe offsets, ambiguous TAPI metadata, invalid YAML, Clang
-parse failures, and conflicting header signatures fail explicitly.
+parse failures, conflicting header signatures, and inconsistent SDK catalog facts
+fail explicitly.
 
 ## Privacy
 
@@ -304,20 +456,24 @@ correctness. `.tbd` files establish symbol/provider/version/re-export evidence.
 
 The header analyzer currently indexes externally visible **C ABI function
 declarations**. It does not yet index Objective-C methods/properties, C++ overloads,
-Swift declarations, record layout/field offsets, AAPCS64 register/stack classes,
-or generate host-call implementations. Those are separate layers so a failure in
-one source of evidence cannot silently become a compatibility claim.
+Swift declarations, every record layout/field offset, or runtime behavior.
 
-The next useful join is therefore:
+The SDK catalog does not turn untyped globals into functions, does not interpret
+Objective-C/TLS metadata as callable C, and does not approve semantic providers.
+The SDK-wide ABI projection is intentionally a schema adapter into the existing
+AAPCS64 generator; its empty requirement list is not evidence that any application
+requested or executed those symbols.
+
+The major remaining scaling layers are therefore:
 
 ```text
-Mach-O import requirement
-        +
-TAPI provider/version evidence
-        +
-Clang header signature/type evidence
-        -> typed compatibility inventory
+SDK-wide typed catalog
+        -> bulk AAPCS64 / Win64 / libffi coverage report
+        -> machine-readable semantic-provider inventory
+        -> generated explicit production route data
+        -> runtime validation and dynamic-discovery feedback
 ```
 
-Generated AAPCS64 <-> Win64 bridges, runtime telemetry, callbacks, and semantic
-implementations should consume that inventory rather than replace its evidence.
+Runtime telemetry, callbacks, variadics, Objective-C/Swift semantics, XPC/Mach
+behavior, framework lifecycle, graphics, and other semantic implementations must
+remain separate from the static evidence pipeline.
