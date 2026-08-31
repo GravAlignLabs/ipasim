@@ -19,6 +19,11 @@ public:
   SysTranslator(DynamicLoader &Dyld, Emulator &Emu)
       : Dyld(Dyld), Emu(Emu), Restart(false), Continue(false),
         RestartFromLRs(false) {}
+  ~SysTranslator() {
+    if (ExecutionStack)
+      _aligned_free(ExecutionStack);
+  }
+
   void execute(LoadedLibrary *Lib);
   void execute(uint64_t Addr);
 
@@ -37,8 +42,11 @@ public:
     }
 
     const uint64_t StackAddr = reinterpret_cast<uint64_t>(StackPtr);
-    if (!Emu.mapMemory(StackAddr, StackSize,
-                       UC_PROT_READ | UC_PROT_WRITE)) {
+    // A worker stack belongs only to this CPU context. Do not register it as a
+    // process-shared dyld mapping, otherwise later worker contexts would replay
+    // a stack whose backing allocation is freed when this context exits.
+    if (!Emu.mapRecordedMemory(StackAddr, StackSize,
+                               UC_PROT_READ | UC_PROT_WRITE)) {
       _aligned_free(StackPtr);
       return false;
     }
@@ -49,8 +57,6 @@ public:
     Emu.hook(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED,
              &SysTranslator::handleMemUnmapped, this);
 
-    // Keep the backing page alive. Thread join/detach lifetime will own stack
-    // reclamation once pthread objects are layered over this execution context.
     ExecutionStack = StackPtr;
     ExecutionContextInitialized = true;
     return true;
