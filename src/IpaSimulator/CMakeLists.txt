@@ -353,6 +353,16 @@ if (IPASIM_MODERN_CORE)
     target_compile_options (IpaProbe PRIVATE -std=c++17)
     target_include_directories (IpaProbe PRIVATE "${SOURCE_DIR}/include")
     target_link_libraries (IpaProbe PRIVATE IpaSimLibrary)
+
+    # Synthetic CI uses the same real loader/runtime but starts the image entry
+    # point from an independent shared-memory Unicorn context on another Windows
+    # thread. Building IpaProbe also builds this validation host so the exact-head
+    # tester artifact can carry both executables without recompiling the core.
+    add_executable (ThreadedGuestCallbackSmoke ThreadedGuestCallbackSmoke.cpp)
+    target_compile_options (ThreadedGuestCallbackSmoke PRIVATE -std=c++17)
+    target_include_directories (ThreadedGuestCallbackSmoke PRIVATE "${SOURCE_DIR}/include")
+    target_link_libraries (ThreadedGuestCallbackSmoke PRIVATE IpaSimLibrary)
+    add_dependencies (IpaProbe ThreadedGuestCallbackSmoke)
 endif ()
 
 # The current milestone is a real x64 emulator core. The Windows application
