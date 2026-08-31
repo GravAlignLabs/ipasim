@@ -10,6 +10,7 @@
 #include "ipasim/Emulator.hpp"
 #include "ipasim/SysTranslator.hpp"
 
+#include <memory>
 #include <string>
 #include <unicorn/unicorn.h>
 
@@ -20,9 +21,20 @@
 
 namespace ipasim {
 
+struct GuestExecutionContext {
+  std::unique_ptr<Emulator> Emu;
+  std::unique_ptr<SysTranslator> Sys;
+};
+
 class IpaSimulator {
 public:
   IpaSimulator();
+
+  // Create another ARM64 CPU/register context inside this already-loaded guest
+  // process. It replays the shared host-backed address space into a fresh
+  // Unicorn engine and gives the context its own AAPCS64 stack and translation
+  // hooks. The caller owns the context lifetime.
+  std::unique_ptr<GuestExecutionContext> createExecutionContext();
 
   Emulator Emu;
   DynamicLoader Dyld;
