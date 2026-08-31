@@ -9,6 +9,7 @@
 #include "ipasim/LoadedLibrary.hpp"
 
 #include <ffi.h>
+#include <malloc.h>
 #include <stack>
 
 namespace ipasim {
@@ -20,6 +21,49 @@ public:
         RestartFromLRs(false) {}
   void execute(LoadedLibrary *Lib);
   void execute(uint64_t Addr);
+
+  // Prepare a fresh ARM64 CPU context for execution inside the already-loaded
+  // guest process. Unlike execute(LoadedLibrary*), this does not initialize the
+  // process-wide Objective-C runtime or run an image entry point. It only gives
+  // this Unicorn engine its own stack/register state and the normal ipaSim
+  // cross-platform/unmapped-memory hooks, after which execute(address) can run a
+  // pthread start routine or another independent guest entry point.
+  bool initializeExecutionContext() {
+    if (ExecutionContextInitialized)
+      return true;
+
+    constexpr size_t StackSize = 8 * 1024 * 1024;
+    void *StackPtr = _aligned_malloc(StackSize, DynamicLoader::PageSize);
+    if (!StackPtr) {
+      Log.error("could not allocate guest execution-context stack");
+      return false;
+    }
+    const uint64_t StackAddr = reinterpret_cast<uint64_t>(StackPtr);
+    if (!Emu.mapMemory(StackAddr, StackSize, UC_PROT_READ | UC_PROT_WRITE)) {
+      _aligned_free(StackPtr);
+      return false;
+    }
+
+    // AAPCS64 requires SP to remain 16-byte aligned at public call boundaries.
+    Emu.writeReg(UC_ARM64_REG_SP,
+                 (StackAddr + StackSize) & ~uint64_t(0xF));
+
+    Emu.hook(UC_HOOK_MEM_FETCH_PROT, &SysTranslator::handleFetchProtMem, this);
+    if constexpr (PrintInstructions)
+      Emu.hook(UC_HOOK_CODE, &SysTranslator::handleCode, this);
+    if constexpr (PrintMemoryWrites)
+      Emu.hook(UC_HOOK_MEM_WRITE, &SysTranslator::handleMemWrite, this);
+    Emu.hook(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED,
+             &SysTranslator::handleMemUnmapped, this);
+
+    // Keep stack backing alive for the execution-context lifetime. Guest stacks
+    // are process mappings and are deliberately retained until pthread lifetime
+    // management grows join/detach reclamation semantics.
+    ExecutionStack = StackPtr;
+    ExecutionContextInitialized = true;
+    return true;
+  }
+
   void *translate(void *FP);
   // This overload is intentionally limited to the AAPCS64 integer/pointer
   // register class. FP/SIMD and aggregate calls require a separate real ABI
@@ -69,6 +113,8 @@ private:
   std::stack<uint64_t> LRs;
   bool Restart, Continue, RestartFromLRs;
   std::function<void()> Continuation;
+  bool ExecutionContextInitialized = false;
+  void *ExecutionStack = nullptr;
 };
 
 class DynamicCaller {
