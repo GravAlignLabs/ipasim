@@ -1,0 +1,211 @@
+name: Theos iPhoneOS16.5 SDK Preflight
+
+on:
+  pull_request:
+    paths:
+      - 'tools/compat_surface/**'
+      - '.github/workflows/theos-sdk-preflight.yml'
+      - '.github/agent-work/theos-sdk-full-preflight.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: theos-sdk-preflight-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  sdk-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out ipaSim
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check out pinned public Theos SDK
+        uses: actions/checkout@v4
+        with:
+          repository: theos/sdks
+          ref: 0222fd5413cf4b9af096f37b4621afa2688572f7
+          path: theos-sdks
+          fetch-depth: 1
+          sparse-checkout: |
+            iPhoneOS16.5.sdk
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run complete SDK compatibility preflight
+        id: sdk_preflight
+        shell: bash
+        run: |
+          set +e
+          rm -rf "$RUNNER_TEMP/ipasim-sdk-plan"
+          (
+            clang --version &&
+            python -m pip install --disable-pip-version-check PyYAML==6.0.2 &&
+            python tools/compat_surface/sdk_compatibility.py \
+              --sdk-root "$GITHUB_WORKSPACE/theos-sdks/iPhoneOS16.5.sdk" \
+              --output-dir "$RUNNER_TEMP/ipasim-sdk-plan" \
+              --header-jobs 8 \
+              --compiler-batch-size 256 \
+              --timeout 120
+          ) 2>&1 | tee theos-sdk-preflight.log
+          code=${PIPESTATUS[0]}
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Summarize successful SDK map
+        if: always() && steps.sdk_preflight.outputs.exit_code == '0'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'ipasim-sdk-plan'
+          compatibility = json.loads((root / 'compatibility-plan.json').read_text(encoding='utf-8'))
+          tapi = json.loads((root / 'tapi-sdk-surface.json').read_text(encoding='utf-8'))
+          headers = json.loads((root / 'header-signatures.json').read_text(encoding='utf-8'))
+          guest = json.loads((root / 'aapcs64-abi.json').read_text(encoding='utf-8'))
+          host = json.loads((root / 'win64-abi.json').read_text(encoding='utf-8'))
+          adapters = json.loads((root / 'runtime-adapters.json').read_text(encoding='utf-8'))
+
+          summary = compatibility['summary']
+          lines = [
+              '# Theos iPhoneOS16.5 SDK compatibility preflight',
+              '',
+              f"Pinned Theos SDK commit: `0222fd5413cf4b9af096f37b4621afa2688572f7`",
+              f"TAPI symbols: **{tapi['summary']['unique_symbol_count']}**",
+              f"Header C signatures: **{headers['summary']['unique_symbol_count']}**",
+              f"SDK catalog symbols: **{summary['symbol_count']}**",
+              f"Typed C candidates: **{summary['typed_c_candidate_count']}**",
+              f"AAPCS64 generated candidates: **{guest['summary']['generated_bridge_candidate_count']}**",
+              f"Win64 cross-ABI candidates: **{host['summary']['cross_abi_adapter_candidate_count']}**",
+              f"Runtime adapters: **{len(adapters.get('adapters') or [])}**",
+              '',
+              '## Route status',
+          ]
+          for key, value in sorted((summary.get('route_status_counts') or {}).items()):
+              lines.append(f'- `{key}`: {value}')
+          lines += ['', '## Semantic status']
+          for key, value in sorted((summary.get('semantic_status_counts') or {}).items()):
+              lines.append(f'- `{key}`: {value}')
+          text = '\n'.join(lines) + '\n'
+          Path('theos-sdk-summary.md').write_text(text, encoding='utf-8')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as stream:
+              stream.write(text)
+          PY
+
+      - name: Publish SDK preflight diagnostic
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          SDK_EXIT_CODE: ${{ steps.sdk_preflight.outputs.exit_code }}
+          SDK_LOG: theos-sdk-preflight.log
+          SDK_SUMMARY: theos-sdk-summary.md
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ipasim-theos-sdk-preflight-diagnostic -->';
+            const exitCode = process.env.SDK_EXIT_CODE || 'unknown';
+            const failed = exitCode !== '0';
+            const logLines = fs.existsSync(process.env.SDK_LOG)
+              ? fs.readFileSync(process.env.SDK_LOG, 'utf8').split(/\r?\n/)
+              : ['Theos SDK preflight log was not produced.'];
+            const highSignalPattern = /(^\[sdk-compatibility\] ERROR:)|(^\[sdk-header-surface\] ERROR:)|(^\[header-surface\] ERROR:)|(^\[tbd-surface\] ERROR:)|(^\[bulk-compatibility\] ERROR:)|CompilerBatchError|HeaderParseError|TbdParseError|SdkCompatibilityError|AbiSurfaceError|Win64AbiError|BridgePlanError|RuntimeAdapterTableError|CompatibilityPlannerError|SemanticRouteError|Traceback|AssertionError|\bFAILED\b|\bERROR\b/i;
+            const highSignal = logLines.filter(line => highSignalPattern.test(line)).slice(0, 100);
+            const tail = logLines.slice(-160);
+            const headSha = context.payload.pull_request.head.sha;
+            const summary = fs.existsSync(process.env.SDK_SUMMARY)
+              ? fs.readFileSync(process.env.SDK_SUMMARY, 'utf8').trim()
+              : '';
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+            const existing = comments.find(comment => comment.body && comment.body.includes(marker));
+
+            let body;
+            if (failed) {
+              body = [
+                marker,
+                '## Theos iPhoneOS16.5 SDK preflight diagnostic',
+                '',
+                `Commit: \`${headSha}\``,
+                'Pinned public SDK: `theos/sdks@0222fd5413cf4b9af096f37b4621afa2688572f7`',
+                '',
+                ...(highSignal.length ? [
+                  '### High-signal diagnostics',
+                  '```text',
+                  ...highSignal,
+                  '```',
+                  ''
+                ] : []),
+                '### Log tail',
+                '```text',
+                ...tail,
+                '```'
+              ].join('\n').slice(0, 60000);
+            } else {
+              body = [
+                marker,
+                '## Theos iPhoneOS16.5 SDK preflight',
+                '',
+                `Commit: \`${headSha}\``,
+                '',
+                '✅ Complete pinned public-SDK compatibility preflight passed.',
+                '',
+                summary
+              ].join('\n').slice(0, 60000);
+            }
+
+            if (existing) {
+              await github.rest.issues.updateComment({owner, repo, comment_id: existing.id, body});
+            } else {
+              await github.rest.issues.createComment({owner, repo, issue_number, body});
+            }
+            console.log(body);
+
+      - name: Upload successful SDK compatibility bundle
+        if: always() && steps.sdk_preflight.outputs.exit_code == '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: theos-iphoneos16.5-sdk-compatibility
+          path: |
+            ${{ runner.temp }}/ipasim-sdk-plan
+            theos-sdk-summary.md
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload SDK preflight diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: theos-sdk-preflight-log
+          path: theos-sdk-preflight.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Fail after publishing diagnostic
+        if: always() && steps.sdk_preflight.outputs.exit_code != '0'
+        shell: bash
+        run: |
+          echo "::error::The pinned Theos SDK compatibility preflight failed. The first actionable diagnostic was published above."
+          exit 1
