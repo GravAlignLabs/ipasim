@@ -2,6 +2,7 @@
 
 #include "ipasim/Emulator.hpp"
 
+#include "ipasim/DynamicLoader.hpp"
 #include "ipasim/IpaSimulator.hpp"
 
 #include <unicorn/unicorn.h>
@@ -23,11 +24,31 @@ void Emulator::writeReg(int RegId, uint64_t Value) {
   callUC(uc_reg_write(UC, RegId, &Value));
 }
 
-// TODO: What if the mappings overlap?
-void Emulator::mapMemory(uint64_t Addr, uint64_t Size, uc_prot Perms) {
-  if (uc_mem_map_ptr(UC, Addr, Size, Perms, reinterpret_cast<void *>(Addr)))
+bool Emulator::mapMemoryImpl(uint64_t Addr, uint64_t Size, uc_prot Perms) {
+  if (uc_err Error = uc_mem_map_ptr(UC, Addr, Size, Perms,
+                                    reinterpret_cast<void *>(Addr))) {
     Log.error() << "couldn't map memory at 0x" << to_hex_string(Addr)
-                << " of size 0x" << to_hex_string(Size) << Log.end();
+                << " of size 0x" << to_hex_string(Size) << ": "
+                << uc_strerror(Error) << Log.end();
+    return false;
+  }
+  return true;
+}
+
+// Shared guest mappings are backed by the Windows process at the identical
+// address. Record only successful mappings so a later Unicorn execution context
+// can replay exactly the process memory that this engine can see.
+bool Emulator::mapMemory(uint64_t Addr, uint64_t Size, uc_prot Perms) {
+  if (!mapMemoryImpl(Addr, Size, Perms))
+    return false;
+  Dyld.recordSharedMemory(Addr, Size, Perms);
+  return true;
+}
+
+// Per-execution-context mappings (currently guest stacks) must never be
+// replayed into another Unicorn engine.
+bool Emulator::mapPrivateMemory(uint64_t Addr, uint64_t Size, uc_prot Perms) {
+  return mapMemoryImpl(Addr, Size, Perms);
 }
 
 void Emulator::start(uint64_t Addr) { callUC(uc_emu_start(UC, Addr, 0, 0, 0)); }
