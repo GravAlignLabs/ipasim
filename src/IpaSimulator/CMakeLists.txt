@@ -348,6 +348,24 @@ endif ()
 
 target_link_libraries (IpaSimLibrary PRIVATE WindowsApp.lib unicorn LIEF ffi)
 
+# The first executable compatibility bridge proof deliberately stays outside
+# production SysTranslator dispatch. It feeds controlled synthetic ARM64 values
+# into Jan's vendored Win64 libffi backend, invokes only local test functions,
+# and checks that canonical result storage is committed back to the expected
+# synthetic guest locations.
+if (IPASIM_MODERN_CORE)
+    add_executable (LibffiBridgeSmoke LibffiBridgeSmoke.cpp)
+    target_compile_options (LibffiBridgeSmoke PRIVATE -std=c++17)
+    target_sources (LibffiBridgeSmoke PRIVATE $<TARGET_OBJECTS:ffi-win64-machdep>)
+    target_link_libraries (LibffiBridgeSmoke PRIVATE ffi)
+
+    add_custom_target (LibffiBridgeCheck
+        COMMAND "$<TARGET_FILE:LibffiBridgeSmoke>"
+        DEPENDS LibffiBridgeSmoke
+        USES_TERMINAL)
+    add_dependencies (IpaSimLibrary LibffiBridgeCheck)
+endif ()
+
 # This executable is deliberately independent of the ipaSim core. It proves
 # that the vendored Unicorn DLL exposes both AArch64 endian backends and can
 # execute real little-endian AArch64 instructions before a core build is trusted.
