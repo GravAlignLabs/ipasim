@@ -8,6 +8,8 @@ Extend ipaSim toward running modern ARM64 iOS applications on Windows while pres
 
 The goal is correctness and progressively broader compatibility, not merely getting a particular binary past a failure point.
 
+The long-term scaling objective is to derive the **mechanical iOS API/ABI surface from Apple SDK metadata and compiler evidence in bulk**, generate reusable ARM64-to-Win64 bridge records, and keep semantic-provider approval as a separate, explicit layer. Real application execution is a validation and dynamic-discovery mechanism; it is not the primary discovery mechanism for mechanical SDK coverage.
+
 ## Non-negotiable rules
 
 - Do **not** monkey patch, runtime-swap methods, or add hidden compatibility hooks.
@@ -37,16 +39,33 @@ The historical WinObjC/32-bit paths remain part of the repository, but do not fo
 
 ## Development strategy
 
-Work from the **first genuine non-cascading failure**.
+Use **two complementary development loops** and do not confuse them.
+
+### Mechanical SDK/API/ABI coverage
+
+Mechanical coverage should be derived in bulk whenever Apple SDK/compiler evidence can establish it safely.
+
+1. Scan the target SDK's TAPI interfaces and headers across the full relevant SDK surface.
+2. Join provider/export evidence with exact Clang-backed signatures.
+3. Generate AAPCS64 lowering, Win64 carrier lowering, libffi plans, and runtime adapter records for every mechanically supported candidate in deterministic batches.
+4. Keep Objective-C metadata, TLS/data symbols, callbacks, variadics, no-prototype declarations, unknown stack placement, and other unsupported ABI classes explicit rather than guessing.
+5. Measure mechanical coverage by framework/subsystem and ABI class instead of waiting for an application to execute every symbol.
+6. Never treat generated SDK/ABI evidence as semantic implementation approval.
+
+Do **not** require a runtime failure before adding safe SDK-wide mechanical knowledge. Once a generated mechanism is proven in production, prefer SDK-wide or coherent subsystem-wide generation over migrating trivial ABI-known symbols one PR at a time.
+
+### Semantic and runtime compatibility
+
+For behavior that static SDK/compiler evidence cannot prove, work from the **first genuine non-cascading runtime failure**.
 
 1. Reproduce the failure with the smallest public fixture or semantic smoke test available.
-2. Identify the actual subsystem boundary: loader, Mach-O, dyld, ABI, host bridge, descriptor model, Mach IPC, filesystem, sockets, process APIs, VM, timing, Objective-C/runtime, framework dependency, etc.
+2. Identify the actual subsystem boundary: loader, Mach-O, dyld, host bridge, descriptor model, Mach IPC, filesystem, sockets, process APIs, VM, timing, Objective-C/runtime, framework dependency, etc.
 3. Implement the behavior generally at the correct subsystem boundary.
 4. Add or extend a semantic test that proves the required behavior.
 5. Run the public validation workflows in order.
-6. Only then advance to the next compatibility boundary.
+6. Only then advance to the next genuine semantic/runtime boundary.
 
-Prefer subsystem fixes over symbol-by-symbol exceptions when several failures share the same missing abstraction.
+Prefer subsystem fixes over symbol-by-symbol exceptions when several failures share the same missing abstraction. Runtime failures remain authoritative evidence for dynamic lookup, callbacks, XPC/Mach behavior, Objective-C/Swift runtime behavior, framework lifecycle, and other semantics that static SDK metadata cannot establish.
 
 ## Integration cadence
 
@@ -56,7 +75,7 @@ Prefer subsystem fixes over symbol-by-symbol exceptions when several failures sh
 - Open a PR as soon as there is a coherent compatibility increment. Draft PRs are appropriate while that increment is still being validated.
 - Merge an increment back to `master` when it is independently correct, reviewable, preserves known-good behavior, and its applicable public tests are green.
 - Full iOS compatibility, full framework support, or success with every application is **not** a prerequisite for merging a completed subsystem increment.
-- Examples of mergeable increments include a loader semantic, an ABI correction, a Darwin API implementation plus smoke coverage, a descriptor-model improvement, a synthetic fixture, or a CI diagnostic improvement.
+- Examples of mergeable increments include an SDK-wide mechanical catalog/generator improvement, a loader semantic, an ABI correction, a Darwin API implementation plus smoke coverage, a descriptor-model improvement, a synthetic fixture, or a CI diagnostic improvement.
 - Keep branches short-lived by default. If work spans multiple independent boundaries, split it into sequential PRs instead of keeping one branch open indefinitely.
 - After a PR merges, start follow-on work from the updated `master` so later work continuously incorporates what has already landed.
 - Record unfinished adjacent work as follow-up issues/PRs rather than holding completed work hostage to future milestones.
@@ -66,7 +85,7 @@ Prefer subsystem fixes over symbol-by-symbol exceptions when several failures sh
 The preferred rhythm is:
 
 ```text
-small genuine boundary
+coherent mechanical batch or genuine semantic boundary
         |
         v
 implementation + focused test
@@ -100,7 +119,7 @@ This is the one intentional exception to the normal “implementation through PR
 
 If work lasts more than 72 hours, update the claim's `updated_utc` and `next_checkpoint` with a small metadata-only `claim update: <slug>` commit. A claim is considered stale after **7 days without an update** and must not reserve a subsystem indefinitely. Before taking over stale work, check for recent branch or PR activity. Maintainers may remove abandoned stale claims.
 
-If work is abandoned intentionally, delete its claim with a small `release claim: <slug>` metadata commit.
+If work is abandoned intentionally, delete its claim with a small commit such as `release claim: <slug>` metadata commit.
 
 Contributors without direct `master` write access should not be granted write access just to create claims. They should check existing claims, open a draft PR immediately for the narrow boundary they intend to work on, and use that draft PR as the public claim until a maintainer decides whether a claim file should be landed.
 
@@ -110,11 +129,13 @@ See `.github/agent-work/README.md` for the full claim lifecycle.
 
 ## Public validation order
 
-Run these in order:
+Run the applicable public checks in this order:
 
 1. **Synthetic iOS IPA on Windows** — `.github/workflows/synthetic-hello-ipa.yml`
 2. **Windows ARM64 Core** — `.github/workflows/windows-arm64-core.yml`
-3. Optional private/local acceptance only after the public synthetic/core checks are understood
+3. **Threaded ARM64 Guest Context** when guest-thread/callback execution is relevant
+4. **Compatibility Surface Analyzer** when generated compatibility tooling or fixtures change
+5. Optional private/local acceptance only after the public synthetic/core/tooling checks are understood
 
 Public fixtures currently include:
 
@@ -122,7 +143,7 @@ Public fixtures currently include:
 - `HelloNative.ipa` — untouched minimal iOS executable used to expose the next genuine Apple runtime boundary
 - `HelloUIKit.ipa` — small UIKit/Foundation application used to expose framework/runtime boundaries publicly
 
-If private/local testing finds a new boundary, reproduce the semantic requirement with a public synthetic fixture whenever practical before asking outside contributors to debug it.
+If private/local testing finds a new semantic boundary, reproduce the semantic requirement with a public synthetic fixture whenever practical before asking outside contributors to debug it.
 
 ## PR-based CI diagnostics
 
