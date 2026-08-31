@@ -62,6 +62,7 @@ if (IPASIM_MODERN_CORE)
 
     add_library (IpaSimDarwinHost SHARED
         DarwinHostBridge.cpp
+        DarwinMemoryBridge.cpp
         DarwinTimeBridge.cpp
         DarwinSocketBridge.cpp
         DarwinKernelBridge.cpp
@@ -104,6 +105,10 @@ if (IPASIM_MODERN_CORE)
     add_executable (DarwinKernelSmoke
         DarwinKernelSmoke.cpp)
     target_compile_options (DarwinKernelSmoke PRIVATE -std=c++17)
+
+    add_executable (DarwinMemorySmoke
+        DarwinMemorySmoke.cpp)
+    target_compile_options (DarwinMemorySmoke PRIVATE -std=c++17)
 
     add_executable (DarwinVoucherSmoke
         DarwinVoucherSmoke.cpp)
@@ -157,6 +162,10 @@ if (IPASIM_MODERN_CORE)
     add_custom_target (DarwinKernelCheck
         COMMAND "$<TARGET_FILE:DarwinKernelSmoke>" "$<TARGET_FILE:IpaSimDarwinHost>"
         DEPENDS DarwinKernelSmoke IpaSimDarwinHost
+        USES_TERMINAL)
+    add_custom_target (DarwinMemoryCheck
+        COMMAND "$<TARGET_FILE:DarwinMemorySmoke>" "$<TARGET_FILE:IpaSimDarwinHost>"
+        DEPENDS DarwinMemorySmoke IpaSimDarwinHost
         USES_TERMINAL)
     add_custom_target (DarwinVoucherCheck
         COMMAND "$<TARGET_FILE:DarwinVoucherSmoke>" "$<TARGET_FILE:IpaSimDarwinHost>"
@@ -215,6 +224,7 @@ else ()
         DarwinTimeCheck
         DarwinSocketCheck
         DarwinKernelCheck
+        DarwinMemoryCheck
         DarwinVoucherCheck
         DarwinTelemetryCheck
         DarwinUlockCheck
