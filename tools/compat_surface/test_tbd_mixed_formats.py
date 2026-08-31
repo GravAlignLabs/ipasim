@@ -33,13 +33,15 @@ exports:
 
 
 class MixedTapiFormatTests(unittest.TestCase):
-    def test_coherent_v3_and_v4_representations_merge_without_losing_provenance(self):
+    def test_mixed_representations_merge_without_losing_evidence_or_provenance(self):
         v3 = ts.parse_tbd_text(V3_COHERENT, "standalone/Test.tbd")
         v4 = ts.parse_tbd_text(V4_COHERENT, "Umbrella.tbd")
 
         manifest = ts.build_sdk_manifest(v3 + v4)
 
         self.assertEqual(manifest["summary"]["interface_count"], 1)
+        self.assertEqual(manifest["summary"]["mixed_format_interface_count"], 1)
+        self.assertEqual(manifest["summary"]["evidence_variation_count"], 2)
         interface = manifest["interfaces"][0]
         self.assertEqual(interface["format_version"], 4)
         self.assertEqual(interface["source_format_versions"], [3, 4])
@@ -62,42 +64,62 @@ class MixedTapiFormatTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            interface["reexports"],
+            interface["evidence_variations"],
             [
                 {
-                    "install_name": "/usr/lib/libChild.dylib",
-                    "targets": ["arm64-ios", "arm64e-ios"],
-                }
+                    "target": "arm64-ios",
+                    "category": "export:objc-class",
+                    "format_versions": [3, 4],
+                },
+                {
+                    "target": "arm64e-ios",
+                    "category": "export:objc-class",
+                    "format_versions": [3, 4],
+                },
             ],
         )
 
-    def test_mixed_formats_with_conflicting_shared_export_kind_fail_closed(self):
+    def test_different_global_inventories_are_unioned_and_marked_as_variation(self):
         v3 = ts.parse_tbd_text(V3_COHERENT, "standalone/Test.tbd")
-        conflicting = ts.parse_tbd_text(
+        v4 = ts.parse_tbd_text(
             V4_COHERENT.replace("_alpha, _beta", "_alpha, _gamma"),
             "Umbrella.tbd",
         )
 
-        with self.assertRaisesRegex(
-            ts.TbdParseError,
-            r"conflicting export evidence on arm64-ios across TAPI format versions \[3, 4\] for kind 'global'",
-        ):
-            ts.build_sdk_manifest(v3 + conflicting)
+        manifest = ts.build_sdk_manifest(v3 + v4)
+        interface = manifest["interfaces"][0]
+        globals_ = [
+            item["name"] for item in interface["exports"] if item["kind"] == "global"
+        ]
+        self.assertEqual(globals_, ["_alpha", "_beta", "_gamma"])
+        categories = {
+            (item["target"], item["category"])
+            for item in interface["evidence_variations"]
+        }
+        self.assertIn(("arm64-ios", "export:global"), categories)
+        self.assertIn(("arm64e-ios", "export:global"), categories)
 
-    def test_mixed_formats_with_conflicting_reexports_fail_closed(self):
+    def test_different_reexport_inventories_are_unioned_and_marked_as_variation(self):
         v3 = ts.parse_tbd_text(V3_COHERENT, "standalone/Test.tbd")
-        conflicting = ts.parse_tbd_text(
+        v4 = ts.parse_tbd_text(
             V4_COHERENT.replace("/usr/lib/libChild.dylib", "/usr/lib/libOther.dylib"),
             "Umbrella.tbd",
         )
 
-        with self.assertRaisesRegex(
-            ts.TbdParseError,
-            r"conflicting re-export evidence on arm64-ios across TAPI format versions \[3, 4\]",
-        ):
-            ts.build_sdk_manifest(v3 + conflicting)
+        manifest = ts.build_sdk_manifest(v3 + v4)
+        interface = manifest["interfaces"][0]
+        self.assertEqual(
+            [item["install_name"] for item in interface["reexports"]],
+            ["/usr/lib/libChild.dylib", "/usr/lib/libOther.dylib"],
+        )
+        categories = {
+            (item["target"], item["category"])
+            for item in interface["evidence_variations"]
+        }
+        self.assertIn(("arm64-ios", "reexports"), categories)
+        self.assertIn(("arm64e-ios", "reexports"), categories)
 
-    def test_reexport_evidence_present_in_only_one_format_is_preserved(self):
+    def test_reexport_evidence_present_in_only_one_format_is_preserved_and_marked(self):
         v3 = ts.parse_tbd_text(V3_COHERENT, "standalone/Test.tbd")
         v4 = ts.parse_tbd_text(
             V4_COHERENT.replace(
@@ -118,6 +140,12 @@ class MixedTapiFormatTests(unittest.TestCase):
                 }
             ],
         )
+        categories = {
+            (item["target"], item["category"])
+            for item in interface["evidence_variations"]
+        }
+        self.assertIn(("arm64-ios", "reexports"), categories)
+        self.assertIn(("arm64e-ios", "reexports"), categories)
 
 
 if __name__ == "__main__":
