@@ -120,6 +120,43 @@ IPASIM_API int ipaSim_executeImage(const char *Path, uint64_t *ReturnValue) {
   return 0;
 }
 
+IPASIM_API int ipaSim_executeImageThreaded(const char *Path,
+                                           uint64_t *ReturnValue) {
+  if (!Path || !*Path || !ReturnValue)
+    return 64;
+
+  IpaSim.MainBinary = Path;
+  LoadedLibrary *App = IpaSim.Dyld.load(IpaSim.MainBinary);
+  auto *Dylib = dynamic_cast<LoadedDylib *>(App);
+  if (!Dylib)
+    return App ? 3 : 2;
+
+  const uint64_t Entry = Dylib->Bin.entrypoint() + Dylib->StartAddress;
+  uint64_t WorkerReturn = 0;
+  bool WorkerSucceeded = false;
+
+  try {
+    thread Worker([&]() {
+      auto Context = IpaSim.createExecutionContext();
+      if (!Context)
+        return;
+      WorkerReturn = reinterpret_cast<uint64_t>(
+          Context->Sys->callBackR(reinterpret_cast<void *>(Entry)));
+      WorkerSucceeded = true;
+    });
+    Worker.join();
+  } catch (const system_error &Error) {
+    Log.error() << "could not create Windows host thread for threaded probe: "
+                << Error.what() << Log.end();
+    return 71;
+  }
+
+  if (!WorkerSucceeded)
+    return 72;
+  *ReturnValue = WorkerReturn;
+  return 0;
+}
+
 IPASIM_API void *ipaSim_translate(void *FP) { return IpaSim.Sys.translate(FP); }
 IPASIM_API void ipaSim_translate4(uint64_t *Addr) {
   // Historical export name retained for generated-wrapper compatibility; the
