@@ -64,6 +64,7 @@ class TbdInterface:
     exports: tuple[TbdExport, ...]
     reexports: tuple[TbdReexport, ...]
     sources: tuple[str, ...]
+    source_format_versions: tuple[int, ...] = ()
 
 
 def _require_yaml() -> None:
@@ -252,16 +253,18 @@ def _parse_document(
         TbdReexport(name, tuple(sorted(targets)))
         for name, targets in sorted(reexport_targets.items())
     )
+    format_version = _format_version(document)
 
     return TbdInterface(
         install_name=install_name,
-        format_version=_format_version(document),
+        format_version=format_version,
         current_version=_as_string(document.get("current-version")),
         compatibility_version=_as_string(document.get("compatibility-version")),
         targets=tuple(document_targets),
         exports=exports,
         reexports=reexports,
         sources=(source.replace("\\", "/"),),
+        source_format_versions=(format_version,),
     )
 
 
@@ -305,17 +308,66 @@ def parse_tbd_file(
     return parse_tbd_text(text, display_name or path.name, requested_targets)
 
 
+def _export_facts_for_target(
+    interface: TbdInterface,
+    target: str,
+) -> set[tuple[str, str, bool]]:
+    return {
+        (item.name, item.kind, item.weak)
+        for item in interface.exports
+        if target in item.targets
+    }
+
+
+def _reexport_facts_for_target(
+    interface: TbdInterface,
+    target: str,
+) -> set[str]:
+    return {
+        item.install_name
+        for item in interface.reexports
+        if target in item.targets
+    }
+
+
+def _validate_mixed_format_evidence(group: Sequence[TbdInterface]) -> None:
+    """Allow representation-version duplicates only when overlapping facts agree."""
+    for left_index, left in enumerate(group):
+        for right in group[left_index + 1 :]:
+            if left.format_version == right.format_version:
+                continue
+            overlap = sorted(set(left.targets).intersection(right.targets))
+            for target in overlap:
+                left_exports = _export_facts_for_target(left, target)
+                right_exports = _export_facts_for_target(right, target)
+                if left_exports != right_exports:
+                    versions = sorted({left.format_version, right.format_version})
+                    raise TbdParseError(
+                        f"{left.install_name}: conflicting export evidence on {target} "
+                        f"across TAPI format versions {versions}"
+                    )
+                left_reexports = _reexport_facts_for_target(left, target)
+                right_reexports = _reexport_facts_for_target(right, target)
+                if left_reexports != right_reexports:
+                    versions = sorted({left.format_version, right.format_version})
+                    raise TbdParseError(
+                        f"{left.install_name}: conflicting re-export evidence on {target} "
+                        f"across TAPI format versions {versions}"
+                    )
+
+
 def _merge_interface_group(group: Sequence[TbdInterface]) -> TbdInterface:
     first = group[0]
-    versions = {item.format_version for item in group}
+    versions = {
+        version
+        for item in group
+        for version in (item.source_format_versions or (item.format_version,))
+    }
     current_versions = {item.current_version for item in group if item.current_version}
     compatibility_versions = {
         item.compatibility_version for item in group if item.compatibility_version
     }
-    if len(versions) != 1:
-        raise TbdParseError(
-            f"{first.install_name}: conflicting TAPI format versions {sorted(versions)}"
-        )
+    _validate_mixed_format_evidence(group)
     if len(current_versions) > 1:
         raise TbdParseError(
             f"{first.install_name}: conflicting current-version values "
@@ -353,13 +405,14 @@ def _merge_interface_group(group: Sequence[TbdInterface]) -> TbdInterface:
     )
     return TbdInterface(
         install_name=first.install_name,
-        format_version=first.format_version,
+        format_version=max(versions),
         current_version=next(iter(current_versions), None),
         compatibility_version=next(iter(compatibility_versions), None),
         targets=tuple(sorted(all_targets)),
         exports=exports,
         reexports=reexports,
         sources=tuple(sorted(sources)),
+        source_format_versions=tuple(sorted(versions)),
     )
 
 
@@ -403,24 +456,26 @@ def build_sdk_manifest(interfaces: Iterable[TbdInterface]) -> dict:
             )
             providers.setdefault(interface.install_name, set()).update(item.targets)
 
-        rendered.append(
-            {
-                "install_name": interface.install_name,
-                "format_version": interface.format_version,
-                "current_version": interface.current_version,
-                "compatibility_version": interface.compatibility_version,
-                "targets": list(interface.targets),
-                "sources": list(interface.sources),
-                "exports": rendered_exports,
-                "reexports": [
-                    {
-                        "install_name": item.install_name,
-                        "targets": list(item.targets),
-                    }
-                    for item in interface.reexports
-                ],
-            }
-        )
+        rendered_interface = {
+            "install_name": interface.install_name,
+            "format_version": interface.format_version,
+            "current_version": interface.current_version,
+            "compatibility_version": interface.compatibility_version,
+            "targets": list(interface.targets),
+            "sources": list(interface.sources),
+            "exports": rendered_exports,
+            "reexports": [
+                {
+                    "install_name": item.install_name,
+                    "targets": list(item.targets),
+                }
+                for item in interface.reexports
+            ],
+        }
+        source_versions = interface.source_format_versions or (interface.format_version,)
+        if len(source_versions) > 1:
+            rendered_interface["source_format_versions"] = list(source_versions)
+        rendered.append(rendered_interface)
 
     symbol_index = []
     for (name, kind, weak), providers in sorted(
