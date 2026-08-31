@@ -10,6 +10,9 @@ EXPORTS
     open$NOCANCEL=darwin_open
     close$NOCANCEL=close
     fcntl$NOCANCEL=fcntl
+    fstat=darwin_fstat
+    stat=darwin_stat
+    lstat=darwin_lstat
     lseek=darwin_lseek
     read=darwin_read
     read$NOCANCEL=darwin_read
