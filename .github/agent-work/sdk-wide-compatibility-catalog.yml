@@ -1,0 +1,28 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Build an SDK-wide typed compatibility catalog so mechanical iOS API/ABI coverage can be generated in bulk from TAPI and Clang evidence instead of being gated on one runtime failure at a time.
+
+scope:
+  - AGENTS.md
+  - README.md
+  - tools/compat_surface/inventory_surface.py
+  - tools/compat_surface/abi_surface.py
+  - tools/compat_surface/test_inventory_surface.py
+  - tools/compat_surface/test_abi_surface.py
+  - tools/compat_surface/README.md
+  - .github/agent-work/sdk-wide-compatibility-catalog.yml
+
+branch: compat-sdk-wide-catalog
+started_utc: 2026-08-31T19:32:00Z
+updated_utc: 2026-08-31T19:32:00Z
+base_sha: b61e0c4298958ae200074a1b903df5d25e1d6550
+expected_pr: tbd
+
+next_checkpoint: >-
+  Add a deterministic SDK-wide catalog mode that joins all target-matching TAPI symbols with exact Clang signatures, allow the existing AAPCS64 generator to consume that catalog, and prove that symbols need not be observed in a Mach-O runtime import before mechanical coverage can be generated.
+
+notes: >-
+  Keep SDK/compiler evidence separate from semantic approval. Non-C metadata must remain explicitly classified rather than becoming callable functions. Preserve the existing import-scoped inventory mode. Do not touch active pthread/runtime scope. Update project guidance so first-runtime-failure remains a semantic truth check, not the primary strategy for mechanical SDK coverage.
