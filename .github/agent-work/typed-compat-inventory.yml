@@ -1,0 +1,33 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Join the merged Mach-O import, TAPI provider/re-export, and Clang header-signature
+  evidence into one deterministic typed compatibility inventory. Preserve exact
+  evidence, classify direct/re-export/provider mismatches without inventing behavior,
+  and surface which required imports have usable C type metadata for later ABI work.
+
+scope:
+  - tools/compat_surface/inventory_surface.py
+  - tools/compat_surface/test_inventory_surface.py
+  - tools/compat_surface/README.md
+  - .github/workflows/compat-surface.yml
+  - .github/agent-work/typed-compat-inventory.yml
+
+branch: compat-typed-inventory
+started_utc: 2026-08-31T13:52:00Z
+updated_utc: 2026-08-31T13:52:00Z
+base_sha: c194afaab33cc6b17abbc5c69c82dc6ed44b5868
+expected_pr: draft
+
+next_checkpoint: >-
+  Validate schema versions, index the three evidence manifests, resolve explicit
+  TAPI re-export paths per target, attach header signatures by exact Mach-O symbol,
+  emit deterministic per-import compatibility records and summary counts, and fail
+  explicitly on contradictory evidence.
+
+notes: >-
+  Metadata only. Do not modify SysTranslator or pthread runtime files, generate
+  callable bridges, classify AAPCS64 registers/stack locations, infer semantic
+  correctness, or mark missing implementations as successful.
