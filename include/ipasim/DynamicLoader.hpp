@@ -69,7 +69,7 @@ public:
   // same guest process memory. New execution contexts replay all loader-known
   // mappings; contexts that encounter a mapping added later can install it
   // lazily without remapping a concurrently executing engine.
-  void registerEmulator(Emulator &ExecutionEmulator);
+  bool registerEmulator(Emulator &ExecutionEmulator);
   bool mapKnownSharedMemory(Emulator &ExecutionEmulator, uint64_t Address);
   bool mapExternalSharedMemory(Emulator &ExecutionEmulator, uint64_t Address,
                                uint64_t Size);
