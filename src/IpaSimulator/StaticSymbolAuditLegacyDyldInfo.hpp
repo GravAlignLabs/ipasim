@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -18,7 +19,7 @@ namespace static_symbol_audit_detail {
 
 // Older and extracted Mach-O images can carry their export trie inside the
 // 48-byte dyld_info_command rather than LC_DYLD_EXPORTS_TRIE. Apple dyld treats
-// LC_DYLD_INFO and LC_DYLD_INFO_ONLY as first-class sources of export_off / 
+// LC_DYLD_INFO and LC_DYLD_INFO_ONLY as first-class sources of export_off /
 // export_size. The base audit already has the correct trie parser; this layer
 // supplies the missing load-command coverage without changing namespace rules.
 constexpr std::uint32_t LcDyldInfo = 0x00000022U;
@@ -311,6 +312,24 @@ inline bool runLegacyDyldInfoAuditSelfTest() {
     return Fail("LC_DYLD_INFO export trie was not recognized");
   if (!CheckCommand(LcDyldInfoOnly))
     return Fail("LC_DYLD_INFO_ONLY export trie was not recognized");
+
+  // Ranking is allowed to deduplicate repeated bindings only within the same
+  // two-level provider namespace. The same symbol expected from another dylib
+  // is a distinct compatibility item.
+  std::vector<Binding> Missing{
+      {"importer-a", 2, "provider-a", "_same", false, "missing"},
+      {"importer-b", 3, "provider-a", "_same", false, "missing"},
+      {"importer-c", 4, "provider-b", "_same", false, "missing"},
+  };
+  const std::vector<RankedMissing> Ranked = buildMissingRanking(Missing);
+  if (Ranked.size() != 2 || Ranked[0].ExpectedLibrary != "provider-a" ||
+      Ranked[0].Symbol != "_same" || Ranked[0].RequiredBindings != 2 ||
+      Ranked[0].RequiredImporters.size() != 2 ||
+      Ranked[1].ExpectedLibrary != "provider-b" ||
+      Ranked[1].RequiredBindings != 1) {
+    return Fail("provider-aware ranking flattened two-level namespaces");
+  }
+
   return true;
 }
 
