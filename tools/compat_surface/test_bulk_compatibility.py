@@ -48,12 +48,12 @@ class BulkCompatibilityTests(unittest.TestCase):
                 return_value=inventory,
             ) as build_inventory,
             mock.patch.object(
-                bulk_compatibility.abi_surface,
-                "build_abi_manifest",
+                bulk_compatibility.compiler_batching,
+                "build_aapcs64_manifest",
                 return_value=guest,
             ) as build_guest,
             mock.patch.object(
-                bulk_compatibility.win64_abi_surface,
+                bulk_compatibility.compiler_batching,
                 "build_win64_manifest",
                 return_value=host,
             ) as build_host,
@@ -93,12 +93,28 @@ class BulkCompatibilityTests(unittest.TestCase):
                 host_target="x86_64-pc-windows-msvc",
                 clang_args=("-DTEST",),
                 timeout_seconds=30,
+                compiler_batch_size=17,
             )
 
         build_catalog.assert_called_once_with({"tapi": True}, {"headers": True})
         build_inventory.assert_called_once_with(catalog)
-        build_guest.assert_called_once()
-        build_host.assert_called_once()
+        build_guest.assert_called_once_with(
+            inventory,
+            header_root=Path("headers"),
+            clang="clang",
+            sdk_root=Path("sdk"),
+            extra_args=("-DTEST",),
+            timeout_seconds=30,
+            batch_size=17,
+        )
+        build_host.assert_called_once_with(
+            guest,
+            clang="clang",
+            host_target="x86_64-pc-windows-msvc",
+            extra_args=("-DTEST",),
+            timeout_seconds=30,
+            batch_size=17,
+        )
         build_bridge.assert_called_once_with(host)
         build_adapters.assert_called_once_with(ffi_plan)
         build_plan.assert_called_once_with(catalog, semantics, abi_manifest=guest)
