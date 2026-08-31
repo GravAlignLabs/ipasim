@@ -6,7 +6,7 @@ task: >-
   Implement the Darwin/libplatform memory primitive boundary reached by modern libdispatch, including zeroing and adjacent byte-memory operations with semantic tests.
 
 scope:
-  - src/IpaSimulator/DarwinHostBridge.cpp
+  - src/IpaSimulator/DarwinMemoryBridge.cpp
   - src/IpaSimulator/DarwinHostCompatBridge.cpp
   - src/IpaSimulator/DarwinMemorySmoke.cpp
   - src/IpaSimulator/SysTranslator.cpp
@@ -15,7 +15,7 @@ scope:
 
 branch: compat/darwin-memory-primitives
 started_utc: 2026-08-31T05:06:00Z
-updated_utc: 2026-08-31T05:06:00Z
+updated_utc: 2026-08-31T05:10:00Z
 base_sha: 43034e21ffa7c465466526560cb61ed1d664d3ee
 expected_pr: tbd
 
@@ -23,4 +23,4 @@ next_checkpoint: >-
   Bridge the exact bzero/platform-bzero family and adjacent memory primitives with Apple-compatible semantics, add semantic smoke coverage, and run Windows ARM64 Core.
 
 notes: >-
-  The current real loader stop is libdispatch chained fixups on __platform_bzero and _bzero. Treat the family as one memory subsystem; do not change the static audit or add application-specific behavior.
+  The current real loader stop is libdispatch chained fixups on __platform_bzero and _bzero. Treat the family as one memory subsystem; do not change the static audit or add application-specific behavior. A dedicated DarwinMemoryBridge keeps this provider surface separate from unrelated host syscall compatibility code.
