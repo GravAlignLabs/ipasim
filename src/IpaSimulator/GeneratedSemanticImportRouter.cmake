@@ -18,18 +18,16 @@ if (NOT TARGET IpaSimLibrary OR
         "GeneratedSemanticImportRouter.cmake requires the modern ipaSim runtime targets")
 endif ()
 
+# IpaSimLibrary is created in the IpaSimulator directory. Do not opt around that
+# ownership with CMP0079. Compile the same generated bridge implementation into
+# the production library instead: IpaSimLibrary already owns its configured
+# libffi dependency and Win64 machine object in the directory where it is
+# defined. There is still one bridge implementation source and no second ABI
+# table to maintain.
 target_sources (IpaSimLibrary PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/GeneratedBridgeAdapter.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/GeneratedSemanticProvider.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/GeneratedSemanticImportRouter.cpp")
-
-# This follow-on file is intentionally included from src/ after IpaSimulator's
-# targets exist so it does not overlap the active pthread CMake scope. CMake's
-# cross-directory target_link_libraries behavior is governed by CMP0079; opt in
-# locally and restore the caller's policy state immediately afterward.
-cmake_policy (PUSH)
-cmake_policy (SET CMP0079 NEW)
-target_link_libraries (IpaSimLibrary PRIVATE IpaSimGeneratedBridgeAdapter)
-cmake_policy (POP)
 
 add_executable (GeneratedSemanticImportRouterSmoke
     "${CMAKE_CURRENT_LIST_DIR}/GeneratedSemanticProvider.cpp"
