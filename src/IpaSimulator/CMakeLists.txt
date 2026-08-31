@@ -71,7 +71,8 @@ if (IPASIM_MODERN_CORE)
         DarwinUlockBridge.cpp
         DarwinPthreadQosBridge.cpp
         DarwinPthreadTsdBridge.cpp
-        DarwinPthreadWorkloopBridge.cpp)
+        DarwinPthreadWorkloopBridge.cpp
+        DarwinPthreadWorkqueueBridge.cpp)
     target_compile_options (IpaSimDarwinHost PRIVATE -std=c++17)
     target_link_libraries (IpaSimDarwinHost PRIVATE
         IpaSimMachIpc
@@ -128,6 +129,10 @@ if (IPASIM_MODERN_CORE)
         DarwinPthreadWorkloopSmoke.cpp)
     target_compile_options (DarwinPthreadWorkloopSmoke PRIVATE -std=c++17)
 
+    add_executable (DarwinPthreadWorkqueueSmoke
+        DarwinPthreadWorkqueueSmoke.cpp)
+    target_compile_options (DarwinPthreadWorkqueueSmoke PRIVATE -std=c++17)
+
     # Run the semantic checks as part of the normal core dependency graph. A
     # compile/link/runtime failure therefore flows through the existing captured
     # core-build log and the single self-updating PR diagnostic comment before
@@ -177,6 +182,10 @@ if (IPASIM_MODERN_CORE)
         COMMAND "$<TARGET_FILE:DarwinPthreadWorkloopSmoke>" "$<TARGET_FILE:IpaSimDarwinHost>"
         DEPENDS DarwinPthreadWorkloopSmoke IpaSimDarwinHost
         USES_TERMINAL)
+    add_custom_target (DarwinPthreadWorkqueueCheck
+        COMMAND "$<TARGET_FILE:DarwinPthreadWorkqueueSmoke>" "$<TARGET_FILE:IpaSimDarwinHost>"
+        DEPENDS DarwinPthreadWorkqueueSmoke IpaSimDarwinHost
+        USES_TERMINAL)
 
     # A module-definition file is linker input, not an object/source input.
     # The modern core deliberately uses clang.exe as the compiler driver and
@@ -211,7 +220,8 @@ else ()
         DarwinUlockCheck
         DarwinPthreadQosCheck
         DarwinPthreadTsdCheck
-        DarwinPthreadWorkloopCheck)
+        DarwinPthreadWorkloopCheck
+        DarwinPthreadWorkqueueCheck)
 endif ()
 
 # The legacy path used a patched Clang plus the Coroutines TS. Current Clang
