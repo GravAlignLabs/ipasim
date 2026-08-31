@@ -10,34 +10,97 @@
 
 ## Current ARM64 work
 
-The modern ARM64 foundation was merged through [PR #3: ARM64 + modern dyld foundation for iOS compatibility](https://github.com/GravAlignLabs/ipasim/pull/3), which established the first large loader/runtime modernization checkpoint. Development has since advanced through [PR #37: Implement Darwin stat metadata ABI](https://github.com/GravAlignLabs/ipasim/pull/37), with subsystem-level compatibility work, semantic smoke tests, independent guest execution contexts, and a repeatable Windows tester pipeline now established on `master`.
+The modern ARM64 foundation began with [PR #3: ARM64 + modern dyld foundation for iOS compatibility](https://github.com/GravAlignLabs/ipasim/pull/3). Development has since advanced through [PR #46: Execute controlled libffi cross-ABI bridge proof](https://github.com/GravAlignLabs/ipasim/pull/46).
+
+The project is now working on **two connected layers at the same time**:
+
+1. continuing the real Windows-backed Darwin/runtime implementation required by modern iOS binaries, and
+2. reviving the strongest idea from Jan Joneš's original ipaSim thesis: use SDK/compiler metadata to generate the mechanical ABI bridge instead of hand-writing one symbol signature at a time.
 
 ### Verified checkpoint — August 31, 2026
 
-At this checkpoint, the following three public validation paths are green together on the current implementation:
+The public runtime validation paths currently prove that the ARM64 emulator core, threaded guest execution model, and synthetic iOS loader path work together:
 
-- **Windows ARM64 Core** — builds the x64 Windows emulator core, executes real AArch64 instructions through Unicorn, and runs the Darwin subsystem semantic smoke suite.
-- **Threaded ARM64 Guest Context** — executes an ARM64 guest function on an independent Windows host thread with its own Unicorn engine, register state, and guest stack, returning the expected `X0=42`.
-- **Synthetic iOS IPA on Windows** — builds public iOS ARM64 fixtures with Xcode and exercises the Windows ipaSim loader/runtime path against them.
+- **Windows ARM64 Core** builds the x64 Windows emulator core, executes real AArch64 instructions through Unicorn, and runs the Darwin subsystem semantic smoke suite.
+- **Threaded ARM64 Guest Context** executes an ARM64 guest function on an independent Windows host thread with its own Unicorn engine, register state, and guest stack, returning the expected `X0=42`.
+- **Synthetic iOS IPA on Windows** builds public iOS ARM64 fixtures with Xcode and exercises the Windows ipaSim loader/runtime path against them.
 
-The current green state proves the following pieces are real and working together:
+The current implementation has also proven a controlled ARM64-to-Win64 call through the vendored libffi backend. The proof captures synthetic AAPCS64 state, materializes canonical carrier storage, calls a real Win64 host function through `ffi_call`, and commits the result back into the expected synthetic guest state.
 
-- IPA extraction and ARM64 Mach-O loading on Windows
-- real AArch64 instruction execution through Unicorn on an x64 Windows host
-- 64-bit guest registers and the AAPCS64 integer/pointer call boundary
-- modern dyld support including `LC_DYLD_CHAINED_FIXUPS`, exports tries, dependency ordinals, and RuntimeRoot dependency resolution
-- shared guest memory mapped into multiple Unicorn engines
-- independent guest execution contexts with separate registers and private stacks
-- Windows host threads capable of running secondary ARM64 guest callbacks without reusing the main Unicorn CPU state
-- thread-local routing of nested guest -> host -> guest callbacks back to the correct guest execution context
-- semantic Windows-backed Darwin compatibility services instead of loader-only symbol placeholders
-- reproducible public fixtures and a packaged Windows tester that can update itself to the latest published green snapshot with SHA256 verification
+That controlled bridge proof covers integer arguments/results, mixed GPR/SIMD arguments, opaque pointer transport, ARM64 `x8` indirect results, a two-word aggregate, and a two-float HFA that must be repacked for Win64.
 
-This is **not yet a claim that arbitrary modern iOS applications run to completion**. The emulator now advances substantially farther through a modern RuntimeRoot, but additional Darwin, Objective-C, Foundation/UIKit, graphics, event-delivery, and framework behavior remains to be implemented as real runtime boundaries are encountered.
+This is **not yet a claim that arbitrary modern iOS applications run to completion**, and the generated bridge is **not yet production symbol routing**. Semantic Darwin/iOS behavior still has to be implemented and tested independently.
 
-### Compatibility subsystems implemented so far
+## Current direction: generated cross-ABI compatibility engine
 
-#### ARM64 execution and loader
+The original thesis did not scale ipaSim by manually writing every ABI wrapper. Its `HeadersAnalyzer` used SDK metadata and Clang type information to generate mechanical glue. The modern ARM64 fork is rebuilding that idea as a deterministic, testable pipeline for AAPCS64-to-Win64 compatibility.
+
+The merged progression is now:
+
+```text
+ARM64 Mach-O import requirements
+        |
+        v
+Apple TAPI provider / re-export metadata
+        |
+        v
+Clang SDK header signatures and type trees
+        |
+        v
+typed compatibility inventory
+        |
+        v
+Clang-proven ARM64 iOS ABI lowering
+        |
+        v
+Clang-proven Win64 carrier lowering
+        |
+        v
+libffi adapter plan
+        |
+        v
+controlled executable cross-ABI bridge
+        |
+        v
+production-independent runtime adapter table   <- next layer
+        |
+        v
+validated symbol routing + semantic implementations
+```
+
+The important design boundary is that **mechanical ABI translation and semantic compatibility are separate problems**.
+
+The generated side may determine that a function uses `x0`, `v0`, an `x8` indirect result, a Win64 `sret`, a pointer carrier, or aggregate repacking. It does **not** decide that the corresponding iOS API is semantically implemented on Windows. Provider choice, guest pointer validation, callbacks, variadics, stateful Darwin behavior, Objective-C runtime behavior, XPC, graphics, and other subsystem semantics remain explicit runtime work.
+
+The current generator therefore follows these rules:
+
+- use the actual Mach-O importer, ordinal, and provider requirement rather than guessing from a symbol name
+- use Apple TAPI metadata for direct exports and explicit re-export relationships
+- use Clang to recover SDK header signatures and compiler-lowered ABI evidence
+- preserve Apple LP64 carrier widths instead of recompiling source spellings naively under Win64 LLP64
+- let libffi own proven Win64 call mechanics where appropriate
+- keep guest stack offsets unknown until they are actually proven
+- treat guest pointers as opaque addresses until the runtime validates them
+- keep callbacks, variadics, no-prototype functions, and unresolved ABI classes outside the generic bridge until their rules are implemented
+- never convert unsupported behavior into fake success
+- do not use runtime monkey patching as a substitute for a clean compatibility boundary
+
+### What PRs #38–#46 added
+
+- [PR #38](https://github.com/GravAlignLabs/ipasim/pull/38) — machine-readable ARM64 Mach-O import/dependency surface
+- [PR #40](https://github.com/GravAlignLabs/ipasim/pull/40) — Apple TAPI SDK provider and re-export knowledge surface
+- [PR #41](https://github.com/GravAlignLabs/ipasim/pull/41) — Clang-backed SDK C signature/type surface
+- [PR #42](https://github.com/GravAlignLabs/ipasim/pull/42) — deterministic typed compatibility inventory joining importer, provider, and signature evidence
+- [PR #43](https://github.com/GravAlignLabs/ipasim/pull/43) — Clang-backed ARM64 iOS/AAPCS64 lowering surface
+- [PR #44](https://github.com/GravAlignLabs/ipasim/pull/44) — compiler-backed Win64 carrier lowering and cross-ABI repacking evidence
+- [PR #45](https://github.com/GravAlignLabs/ipasim/pull/45) — deterministic libffi-oriented bridge adapter plans
+- [PR #46](https://github.com/GravAlignLabs/ipasim/pull/46) — first controlled executable ARM64-to-Win64 libffi bridge proof
+
+The next increment is intended to connect the machine-readable bridge-plan records to a **production-independent runtime adapter table**. That still comes before routing arbitrary real iOS symbols through the generated path. The adapter layer needs to prove that generated records can be loaded, validated, selected, and executed safely without weakening the existing semantic provider boundaries.
+
+## Compatibility subsystems implemented so far
+
+### ARM64 execution and loader
 
 - real ARM64/AArch64 Unicorn execution on Windows x64
 - AAPCS64 register handling and pointer-width host-call translation
@@ -47,7 +110,7 @@ This is **not yet a claim that arbitrary modern iOS applications run to completi
 - shared-memory multi-engine execution
 - independent secondary guest execution contexts and threaded callbacks
 
-#### Darwin process, kernel, and memory services
+### Darwin process, kernel, and memory services
 
 - process identity and selected `proc_pidinfo` behavior backed by Windows process information
 - Mach task identity and Mach IPC compatibility work
@@ -57,7 +120,7 @@ This is **not yet a claim that arbitrary modern iOS applications run to completi
 - libplatform byte/string primitives including bzero, memset/memmove/memcmp families, pattern fills, and adjacent string helpers
 - explicit failure for unsupported behavior rather than fabricated success records
 
-#### Guest file and descriptor model
+### Guest file and descriptor model
 
 - a coherent guest-visible descriptor namespace rather than treating arbitrary Windows descriptors as iOS descriptors
 - `open`, `close`, `fcntl`, `lseek`, `read`, `write`, `pread`, and `pwrite`
@@ -70,14 +133,14 @@ This is **not yet a claim that arbitrary modern iOS applications run to completi
 - Windows-backed file identity, link count, size, allocation, block size, and access/write/change/birth timestamps
 - guest descriptor lifetime tracking so a closed descriptor is no longer visible and `fstat` correctly returns `EBADF`
 
-#### Sockets and host re-exports
+### Sockets and host re-exports
 
 - a Darwin socket descriptor registry over WinSock rather than pointer-width `SOCKET` passthrough
 - socket creation, connection, and `sendto` translation for the implemented boundary
 - target-proven simulator host companion re-exports for `libsystem_sim_kernel`, `libsystem_sim_platform`, and `libsystem_sim_pthread`
 - direct ARM64 signatures for the native Darwin host bridge so resolved functions are callable, not merely linkable
 
-#### pthread and concurrency work
+### pthread and concurrency work
 
 - pthread QoS encode/decode helpers and direct QoS override behavior
 - pthread thread-specific-data key lifecycle and get/set semantics
@@ -86,7 +149,7 @@ This is **not yet a claim that arbitrary modern iOS applications run to completi
 - real secondary guest worker execution through a new Windows thread and independent Unicorn guest context
 - intentionally conservative feature advertisement: unsupported workqueue delivery modes are not reported as available merely to satisfy a caller
 
-### Selected merged milestones after the initial ARM64 foundation
+## Selected merged milestones
 
 - [PR #26](https://github.com/GravAlignLabs/ipasim/pull/26) — pthread thread-specific-data semantics
 - [PR #28](https://github.com/GravAlignLabs/ipasim/pull/28) — simulator libSystem host re-export support
@@ -99,33 +162,59 @@ This is **not yet a claim that arbitrary modern iOS applications run to completi
 - [PR #35](https://github.com/GravAlignLabs/ipasim/pull/35) — Darwin/libplatform memory and string primitives
 - [PR #36](https://github.com/GravAlignLabs/ipasim/pull/36) — Darwin `$NOCANCEL` file syscalls and positional I/O
 - [PR #37](https://github.com/GravAlignLabs/ipasim/pull/37) — exact Darwin ARM64 `stat` metadata ABI
+- [PR #38](https://github.com/GravAlignLabs/ipasim/pull/38) — ARM64 compatibility surface analyzer
+- [PR #40](https://github.com/GravAlignLabs/ipasim/pull/40) — TAPI SDK compatibility knowledge surface
+- [PR #41](https://github.com/GravAlignLabs/ipasim/pull/41) — Clang SDK header signature surface
+- [PR #42](https://github.com/GravAlignLabs/ipasim/pull/42) — typed compatibility inventory
+- [PR #43](https://github.com/GravAlignLabs/ipasim/pull/43) — AAPCS64 ABI lowering surface
+- [PR #44](https://github.com/GravAlignLabs/ipasim/pull/44) — Win64 carrier ABI surface
+- [PR #45](https://github.com/GravAlignLabs/ipasim/pull/45) — libffi bridge adapter planning surface
+- [PR #46](https://github.com/GravAlignLabs/ipasim/pull/46) — controlled executable libffi cross-ABI proof
 
 These are selected checkpoints rather than a complete changelog. Earlier merged work also established getpid/lseek/read/readlink/sendto boundaries, platform strings, Mach task helpers, pthread CPU/QoS behavior, VM/process support, semantic smokes, synthetic fixtures, loader diagnostics, and the public CI workflow used to identify each next compatibility boundary.
 
-### What remains
+## What remains
 
 The project should still be treated as an active emulator bring-up effort, not a finished modern iOS compatibility layer. Important remaining areas include:
 
+- connecting generated bridge plans to a production-independent runtime adapter table
+- validating generated adapters against real provider registrations before enabling production symbol routing
+- exact guest stack placement for ABI cases that overflow ARM64 register banks
+- callback/closure trampolines for host-to-guest calls
+- variadic and no-prototype runtime boundaries
+- broader vector/SIMD and aggregate ABI classes where compiler evidence is not yet sufficient
 - additional libSystem/kernel syscall families as the real loader reaches them
 - broader file, directory, metadata, xattr, process, Mach, and networking behavior
 - complete pthread scheduling/event delivery and signal semantics
 - Objective-C runtime integration beyond the currently proven bridge paths
 - Foundation/UIKit and other framework behavior required by normal applications
+- XPC and service-level compatibility
 - graphics, UI/event-loop, media, and device-service compatibility
-- additional ARM64 ABI classes such as FP/SIMD and aggregate calling conventions where target code requires them
 
-The static symbol audit intentionally reports a much broader missing compatibility surface than the current runtime may immediately require. Treat it as an independent inventory and prioritization aid, **not** as proof that every reported symbol is the next runtime blocker. The development loop remains: fix the first genuine non-cascading loader/runtime boundary, implement the coherent subsystem behind it, add semantic coverage, and rerun.
+The static symbol audit intentionally reports a much broader missing compatibility surface than the current runtime may immediately require. Treat it as an independent inventory and prioritization aid, **not** as proof that every reported symbol is the next runtime blocker.
 
-Current areas of work continue to emphasize:
+The runtime development loop remains:
 
-- real AArch64 execution through Unicorn on a Windows x64 host
-- modern ARM64 Mach-O and dyld compatibility
-- Windows-backed Darwin behavior where a defensible semantic mapping exists
-- subsystem-level implementations instead of one-symbol fake-success stubs
-- public synthetic reproductions and semantic tests
-- GitHub Actions diagnostics that expose the first useful failure
+```text
+first genuine non-cascading runtime failure
+        -> identify importer/provider/subsystem
+        -> implement real semantics
+        -> add semantic coverage
+        -> rerun
+```
 
-### Apple SDK metadata for compatibility research
+The mechanical compatibility-engine loop now runs alongside it:
+
+```text
+Mach-O requirement
+        -> SDK provider evidence
+        -> Clang type + ABI evidence
+        -> deterministic bridge plan
+        -> controlled runtime adapter
+        -> validated routing only when safe
+```
+
+## Apple SDK metadata for compatibility research
 
 When a modern Darwin/iOS runtime boundary is encountered, use the [Theos SDK archive](https://github.com/theos/sdks) as a symbol/provider reference before treating the failure as an isolated one-off symbol.
 
@@ -182,7 +271,7 @@ runtime failure
 
 The historical [`mstg/iOS-full-sdk`](https://github.com/mstg/iOS-full-sdk) repository points users to Theos; prefer the maintained Theos SDK collection above for future research.
 
-### Public test strategy
+## Public test strategy
 
 Contributors do **not** need a private commercial application to reproduce compatibility work.
 
@@ -201,7 +290,7 @@ Run public validation in this order:
 
 If you find a compatibility problem, prefer adding or extending a small synthetic reproduction that can live in this repository. That keeps debugging reproducible for everyone.
 
-### Windows tester update path
+## Windows tester update path
 
 The generic Windows tester is published from a green Windows ARM64 Core result and includes `Update-ipaSim-Tester.cmd`.
 
@@ -216,7 +305,7 @@ The updater:
 
 This gives local compatibility testing a repeatable path to the same green binaries validated by CI rather than relying on manually copied executables from an older build.
 
-### PR-based CI diagnostic loop
+## PR-based CI diagnostic loop
 
 The Windows ARM64 Core workflow is designed so a failed build leaves a useful diagnostic directly on the pull request instead of forcing contributors to hunt through a long Actions log.
 
@@ -267,17 +356,17 @@ The persistent PR-comment collector currently applies specifically to the **x64 
 
 Public diagnostic comments and public bug reports must remain target-neutral. Use the repository-generated synthetic IPAs and public smoke tests for reproduction; do not upload private IPAs, RuntimeRoot contents, private application names, paths, screenshots, or private application logs.
 
-### AI coding agents
+## AI coding agents
 
 [`AGENTS.md`](AGENTS.md) is the canonical instruction set for autonomous and AI-assisted coding work in this repository. Changes under `src/IpaSimulator/` also follow the scoped [`src/IpaSimulator/AGENTS.md`](src/IpaSimulator/AGENTS.md).
 
 Tool-specific entry files exist only to route major coding assistants into those same rules: [`CLAUDE.md`](CLAUDE.md), [`GEMINI.md`](GEMINI.md), and [`.github/copilot-instructions.md`](.github/copilot-instructions.md). Keep policy in `AGENTS.md` rather than duplicating divergent versions for each tool.
 
-### Contributing
+## Contributing
 
 This repository is public and accepts pull requests from forks. You do not need collaborator access.
 
-A useful contribution can be a loader fix, Darwin/Windows semantic bridge, ARM64 ABI correction, synthetic test case, diagnostic improvement, documentation update, or analysis of how another emulator solves a comparable subsystem.
+A useful contribution can be a loader fix, Darwin/Windows semantic bridge, ARM64 ABI correction, compatibility-surface/generator improvement, synthetic test case, diagnostic improvement, documentation update, or analysis of how another emulator solves a comparable subsystem.
 
 Please keep changes target-neutral and evidence-driven. Do not add application-specific names, paths, patches, or success shims for private binaries.
 
@@ -285,7 +374,7 @@ See [`docs/arm64-ios-compatibility.md`](docs/arm64-ios-compatibility.md) for the
 
 ---
 
-## Original ipaSim project
+# Original ipaSim project
 
 This repository contains source code of `ipasim`, an iOS emulator for Windows.
 It takes a compiled iOS application and emulates it. However, only the
@@ -293,14 +382,14 @@ application's machine code is emulated, whereas system functionality originally
 provided by iOS is translated to an equivalent functionality available on
 Windows. [More detailed documentation](docs/README.md) is available.
 
-### Historical project status
+## Historical project status
 
 The original ipaSim implementation supported simple applications. Working samples can be
 found in folder [`samples`](samples). For more information about the original
 implemented and unimplemented features, see the [author's thesis](docs/thesis/README.md),
 its *Conclusion* in particular.
 
-### Related projects
+## Related projects
 
 - [touchHLE](https://github.com/touchHLE/touchHLE) — a high-level iOS emulator whose subsystem designs can provide useful comparison points, although its architecture and target era differ from this ARM64 effort
 
