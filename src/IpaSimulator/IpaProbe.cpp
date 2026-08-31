@@ -1,4 +1,5 @@
 #include "HostImportInventoryV2.hpp"
+#include "StaticSymbolAudit.hpp"
 #include "ipasim/Probe.hpp"
 
 #include <cstdio>
@@ -23,12 +24,20 @@ int main(int argc, char **argv) {
     if (runtimeRoot) {
         std::printf("[ipasim-probe] iOS runtime root: %s\n", runtimeRoot);
 
-        // Inventory the complete simulator-host chained-import surface before
-        // the normal loader runs. The simulator libsystem layers bind through
-        // libsystem_sim_*_host proxy dylibs, which then re-export the macOS host
-        // libSystem surface. The inventory recognizes both that proxy layer and
-        // direct host install names, but remains read-only: it never patches an
-        // import or turns a missing symbol into success.
+        // Walk the app's complete dependency closure statically before the
+        // normal dyld-style loader starts. Unlike a global symbol union, this
+        // audit preserves Mach-O's two-level namespace: each positive ordinal
+        // is checked only against the library named by that ordinal, including
+        // ipaSim's explicit Darwin-host -> native bridge mapping. It is
+        // diagnostic only and never turns a missing runtime binding into
+        // success. The normal loader still supplies the authoritative first
+        // execution boundary below.
+        ipasim::probe::reportStaticClosureSymbolAudit(imagePath, runtimeRoot);
+
+        // Retain the focused simulator-host inventory as a compact compatibility
+        // checkpoint for the three libsystem_sim_* layers. The closure-wide
+        // audit above covers the rest of the dependency graph; this historical
+        // view remains useful for tracking that native host surface separately.
         ipasim::probe::reportDarwinHostImportInventoryV2(runtimeRoot);
 
         const int runtimeResult = ipaSim_setRuntimeRoot(runtimeRoot);
