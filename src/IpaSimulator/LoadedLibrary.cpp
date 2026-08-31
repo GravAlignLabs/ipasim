@@ -5,6 +5,7 @@
 
 #include "ipasim/DynamicLoader.hpp"
 #include "ipasim/IpaSimulator.hpp"
+#include "ipasim/SimulatorLibSystem.hpp"
 
 using namespace ipasim;
 using namespace std;
@@ -69,9 +70,11 @@ uint64_t LoadedDylib::findSymbol(DynamicLoader &DL, const string &Name) {
   }
 
   if (!Bin.has_symbol(Name)) {
-    // Try also classic re-exported libraries.
+    // Classic LC_REEXPORT_DYLIB exposes the dependency namespace. Apple's
+    // simulator libSystem overlays also expose the matching *_host companion.
     for (DylibCommand &Lib : Bin.libraries()) {
-      if (Lib.command() != LOAD_COMMAND_TYPES::LC_REEXPORT_DYLIB)
+      if (Lib.command() != LOAD_COMMAND_TYPES::LC_REEXPORT_DYLIB &&
+          !isSimulatorLibSystemHostReexport(Lib.name()))
         continue;
 
       LoadedLibrary *LL = DL.load(Lib.name());
