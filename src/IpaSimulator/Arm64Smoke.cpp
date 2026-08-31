@@ -4,6 +4,9 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <malloc.h>
+#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -131,6 +134,157 @@ LONG CALLBACK exceptionProbe(EXCEPTION_POINTERS *info) {
 }
 #endif
 
+bool runSharedMemoryMultiEngineSmoke() {
+    stage("starting shared-memory multi-engine check");
+
+    constexpr std::size_t pageSize = 0x1000;
+    constexpr std::uint64_t valueA = 0x1122334455667788ULL;
+    constexpr std::uint64_t valueB = 0x8877665544332211ULL;
+
+    void *dataPage = _aligned_malloc(pageSize, pageSize);
+    void *codePage = _aligned_malloc(pageSize, pageSize);
+    if (!dataPage || !codePage) {
+        stage("shared-memory check could not allocate aligned pages");
+        if (codePage)
+            _aligned_free(codePage);
+        if (dataPage)
+            _aligned_free(dataPage);
+        return false;
+    }
+    std::memset(dataPage, 0, pageSize);
+    std::memset(codePage, 0, pageSize);
+
+    const auto dataAddress = reinterpret_cast<std::uint64_t>(dataPage);
+    const auto codeAddress = reinterpret_cast<std::uint64_t>(codePage);
+    if ((dataAddress & (pageSize - 1)) != 0 ||
+        (codeAddress & (pageSize - 1)) != 0) {
+        stage("shared-memory backing page is not aligned");
+        _aligned_free(codePage);
+        _aligned_free(dataPage);
+        return false;
+    }
+
+    // str x1, [x0]
+    // ldr x2, [x0]
+    // ret
+    constexpr std::array<std::uint32_t, 3> sharedProgram = {
+        0xF9000001u,
+        0xF9400002u,
+        0xD65F03C0u,
+    };
+    std::memcpy(codePage, sharedProgram.data(), sizeof(sharedProgram));
+
+    uc_engine *engineA = nullptr;
+    uc_engine *engineB = nullptr;
+    if (!check(uc_open(UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN, &engineA),
+               "uc_open(shared engine A)") ||
+        !check(uc_open(UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN, &engineB),
+               "uc_open(shared engine B)")) {
+        if (engineA)
+            uc_close(engineA);
+        if (engineB)
+            uc_close(engineB);
+        _aligned_free(codePage);
+        _aligned_free(dataPage);
+        return false;
+    }
+
+    auto mapSharedPages = [&](uc_engine *engine, const char *which) {
+        if (!check(uc_mem_map_ptr(engine, dataAddress, pageSize,
+                                  UC_PROT_READ | UC_PROT_WRITE, dataPage),
+                   which))
+            return false;
+        if (!check(uc_mem_map_ptr(engine, codeAddress, pageSize,
+                                  UC_PROT_READ | UC_PROT_EXEC, codePage),
+                   which))
+            return false;
+        return true;
+    };
+
+    if (!mapSharedPages(engineA, "map shared pages in engine A") ||
+        !mapSharedPages(engineB, "map shared pages in engine B")) {
+        uc_close(engineA);
+        uc_close(engineB);
+        _aligned_free(codePage);
+        _aligned_free(dataPage);
+        return false;
+    }
+
+    auto writeReg = [](uc_engine *engine, int reg, std::uint64_t value) {
+        return check(uc_reg_write(engine, reg, &value), "shared uc_reg_write");
+    };
+
+    bool threadAOk = true;
+    bool threadBOk = true;
+    std::thread threadA([&]() {
+        threadAOk = writeReg(engineA, UC_ARM64_REG_X0, dataAddress) &&
+                    writeReg(engineA, UC_ARM64_REG_X1, valueA) &&
+                    check(uc_emu_start(engineA, codeAddress, 0, 0, 1),
+                          "engine A shared STR");
+    });
+    std::thread threadB([&]() {
+        threadBOk =
+            writeReg(engineB, UC_ARM64_REG_X0,
+                     dataAddress + sizeof(std::uint64_t)) &&
+            writeReg(engineB, UC_ARM64_REG_X1, valueB) &&
+            check(uc_emu_start(engineB, codeAddress, 0, 0, 1),
+                  "engine B shared STR");
+    });
+    threadA.join();
+    threadB.join();
+
+    bool ok = threadAOk && threadBOk;
+    const auto *words = reinterpret_cast<const std::uint64_t *>(dataPage);
+    if (words[0] != valueA || words[1] != valueB) {
+        stage("concurrent engines did not update the shared host backing page");
+        ok = false;
+    }
+
+    std::uint64_t observed = 0;
+    if (ok &&
+        writeReg(engineB, UC_ARM64_REG_X0, dataAddress) &&
+        check(uc_emu_start(engineB, codeAddress + sizeof(std::uint32_t),
+                           0, 0, 1),
+              "engine B shared LDR") &&
+        check(uc_reg_read(engineB, UC_ARM64_REG_X2, &observed),
+              "engine B shared X2 read")) {
+        if (observed != valueA) {
+            stage("engine B did not observe engine A shared-memory write");
+            ok = false;
+        }
+    } else {
+        ok = false;
+    }
+
+    observed = 0;
+    if (ok &&
+        writeReg(engineA, UC_ARM64_REG_X0,
+                 dataAddress + sizeof(std::uint64_t)) &&
+        check(uc_emu_start(engineA, codeAddress + sizeof(std::uint32_t),
+                           0, 0, 1),
+              "engine A shared LDR") &&
+        check(uc_reg_read(engineA, UC_ARM64_REG_X2, &observed),
+              "engine A shared X2 read")) {
+        if (observed != valueB) {
+            stage("engine A did not observe engine B shared-memory write");
+            ok = false;
+        }
+    } else {
+        ok = false;
+    }
+
+    if (!check(uc_close(engineA), "uc_close(shared engine A)"))
+        ok = false;
+    if (!check(uc_close(engineB), "uc_close(shared engine B)"))
+        ok = false;
+    _aligned_free(codePage);
+    _aligned_free(dataPage);
+
+    if (ok)
+        stage("shared-memory multi-engine check passed");
+    return ok;
+}
+
 } // namespace
 
 int main() {
@@ -218,7 +372,10 @@ int main() {
         return 8;
     }
 
-    std::printf("ARM64 Unicorn smoke passed: X0=%llu.\n",
+    if (!runSharedMemoryMultiEngineSmoke())
+        return 9;
+
+    std::printf("ARM64 Unicorn smoke passed: X0=%llu; shared multi-engine memory passed.\n",
                 static_cast<unsigned long long>(x0));
     std::fflush(stdout);
 
