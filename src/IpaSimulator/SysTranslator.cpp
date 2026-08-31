@@ -58,6 +58,7 @@ const DarwinHostCallSignature *findDarwinHostCallSignature(
       {"_pthread_qos_class_and_override_decode", 4, true},
       {"_pthread_sched_pri_encode", 2, true},
       {"_pthread_sched_pri_decode", 2, true},
+      {"_pthread_set_properties_self", 3, true},
       {"_pthread_qos_override_start_direct", 3, true},
       {"_pthread_qos_override_end_direct", 2, true},
       {"_pthread_override_qos_class_start_direct", 2, true},
