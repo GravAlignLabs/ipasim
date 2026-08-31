@@ -13,6 +13,7 @@ compatibility-version: 1
 exports:
   - archs: [ arm64, arm64e ]
     symbols: [ _alpha, _beta ]
+    objc-classes: [ OS_test_object ]
     re-exports: [ /usr/lib/libChild.dylib ]
 """
 
@@ -48,8 +49,12 @@ class MixedTapiFormatTests(unittest.TestCase):
             ["Umbrella.tbd", "standalone/Test.tbd"],
         )
         self.assertEqual(
-            [item["name"] for item in interface["exports"]],
-            ["_alpha", "_beta"],
+            [(item["name"], item["kind"]) for item in interface["exports"]],
+            [
+                ("OS_test_object", "objc-class"),
+                ("_alpha", "global"),
+                ("_beta", "global"),
+            ],
         )
         self.assertEqual(
             interface["reexports"],
@@ -61,7 +66,7 @@ class MixedTapiFormatTests(unittest.TestCase):
             ],
         )
 
-    def test_mixed_formats_with_conflicting_exports_fail_closed(self):
+    def test_mixed_formats_with_conflicting_shared_export_kind_fail_closed(self):
         v3 = ts.parse_tbd_text(V3_COHERENT, "standalone/Test.tbd")
         conflicting = ts.parse_tbd_text(
             V4_COHERENT.replace("_alpha, _beta", "_alpha, _gamma"),
@@ -70,7 +75,7 @@ class MixedTapiFormatTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ts.TbdParseError,
-            r"conflicting export evidence on arm64-ios across TAPI format versions \[3, 4\]",
+            r"conflicting export evidence on arm64-ios across TAPI format versions \[3, 4\] for kind 'global'",
         ):
             ts.build_sdk_manifest(v3 + conflicting)
 
@@ -86,6 +91,28 @@ class MixedTapiFormatTests(unittest.TestCase):
             r"conflicting re-export evidence on arm64-ios across TAPI format versions \[3, 4\]",
         ):
             ts.build_sdk_manifest(v3 + conflicting)
+
+    def test_reexport_evidence_present_in_only_one_format_is_preserved(self):
+        v3 = ts.parse_tbd_text(V3_COHERENT, "standalone/Test.tbd")
+        v4 = ts.parse_tbd_text(
+            V4_COHERENT.replace(
+                "reexported-libraries:\n  - targets: [ arm64-ios, arm64e-ios ]\n    libraries: [ '/usr/lib/libChild.dylib' ]\n",
+                "",
+            ),
+            "Umbrella.tbd",
+        )
+
+        manifest = ts.build_sdk_manifest(v3 + v4)
+        interface = manifest["interfaces"][0]
+        self.assertEqual(
+            interface["reexports"],
+            [
+                {
+                    "install_name": "/usr/lib/libChild.dylib",
+                    "targets": ["arm64-ios", "arm64e-ios"],
+                }
+            ],
+        )
 
 
 if __name__ == "__main__":
