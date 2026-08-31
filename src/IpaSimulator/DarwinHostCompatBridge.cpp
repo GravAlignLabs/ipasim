@@ -193,16 +193,16 @@ __interposition_sim_system_record_system_event_as_kernel(
   return 0;
 }
 
-// libplatform's aligned8 primitive is a zero-comparison operation. Preserve the
-// observable memcmp contract: zero for an all-zero range and positive for the
-// first non-zero byte. The implementation is independent of host vector width.
-__declspec(dllexport) int
+// Apple libplatform's LP64 memcmp_zero_aligned8 contract is boolean-shaped:
+// return 0 when every byte in the aligned range is zero (including size 0),
+// otherwise return exactly 1. Do not leak the first nonzero byte value.
+__declspec(dllexport) std::uint64_t
 __interposition_sim_system__platform_memcmp_zero_aligned8(
     const void *Buffer, std::size_t Size) {
   const auto *Bytes = static_cast<const unsigned char *>(Buffer);
   for (std::size_t Index = 0; Index < Size; ++Index) {
     if (Bytes[Index] != 0)
-      return static_cast<int>(Bytes[Index]);
+      return 1;
   }
   return 0;
 }
