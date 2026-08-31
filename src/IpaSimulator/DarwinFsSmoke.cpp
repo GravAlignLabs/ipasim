@@ -9,6 +9,39 @@
 
 namespace {
 
+struct DarwinTimespec64 {
+  std::int64_t Seconds;
+  std::int64_t Nanoseconds;
+};
+static_assert(sizeof(DarwinTimespec64) == 16);
+
+struct DarwinStat64 {
+  std::int32_t DeviceId;
+  std::uint16_t ModeBits;
+  std::uint16_t LinkCount;
+  std::uint64_t Inode;
+  std::uint32_t UserId;
+  std::uint32_t GroupId;
+  std::int32_t SpecialDeviceId;
+  DarwinTimespec64 AccessTime;
+  DarwinTimespec64 ModificationTime;
+  DarwinTimespec64 StatusChangeTime;
+  DarwinTimespec64 BirthTime;
+  std::int64_t Size;
+  std::int64_t Blocks;
+  std::int32_t BlockSize;
+  std::uint32_t Flags;
+  std::uint32_t Generation;
+  std::int32_t Spare;
+  std::int64_t QuadSpare[2];
+};
+static_assert(sizeof(DarwinStat64) == 144);
+
+bool plausibleTimespec(const DarwinTimespec64 &Value) {
+  return Value.Seconds > 0 && Value.Nanoseconds >= 0 &&
+         Value.Nanoseconds < 1000000000LL;
+}
+
 int fail(const char *Message, int Code) {
   std::fprintf(stderr, "[darwin-fs-smoke] %s\n", Message);
   return Code;
@@ -73,6 +106,7 @@ int main(int ArgC, char **ArgV) {
                             &DirectHandleFlags) ||
       (DirectHandleFlags & HANDLE_FLAG_INHERIT) != 0) {
     _close(DirectFd);
+    forgetOpenNodeDescriptor(DirectFd);
     return fail("O_CLOEXEC did not produce a non-inheritable descriptor", 13);
   }
 
@@ -80,15 +114,18 @@ int main(int ArgC, char **ArgV) {
   if (_write(DirectFd, Payload, sizeof(Payload)) != sizeof(Payload) ||
       _lseeki64(DirectFd, 0, SEEK_SET) != 0) {
     _close(DirectFd);
+    forgetOpenNodeDescriptor(DirectFd);
     return fail("regular Darwin descriptor write/seek failed", 14);
   }
   char Readback[sizeof(Payload)] = {};
   if (_read(DirectFd, Readback, sizeof(Readback)) != sizeof(Readback) ||
       std::memcmp(Payload, Readback, sizeof(Payload)) != 0) {
     _close(DirectFd);
+    forgetOpenNodeDescriptor(DirectFd);
     return fail("regular Darwin descriptor readback failed", 15);
   }
   _close(DirectFd);
+  forgetOpenNodeDescriptor(DirectFd);
 
   const std::wstring RegularBacking = Node.BackingPath;
   if (!removeNode("/tmp/ipasim-regular") ||
@@ -105,9 +142,11 @@ int main(int ArgC, char **ArgV) {
   if (!lookupNode(OpenCreatePath, Node) || Node.Type != NodeType::Regular ||
       Node.Permissions != 0604) {
     _close(CreatedFd);
+    forgetOpenNodeDescriptor(CreatedFd);
     return fail("O_CREAT did not preserve regular-node mode metadata", 18);
   }
   _close(CreatedFd);
+  forgetOpenNodeDescriptor(CreatedFd);
 
   errno = 0;
   if (openNode(OpenCreatePath,
@@ -134,18 +173,30 @@ int main(int ArgC, char **ArgV) {
   using Mknod = int (*)(const char *, std::uint16_t, std::int32_t);
   using Open = int (*)(const char *, int, std::uint16_t);
   using Close = int (*)(int);
+  using Write = std::intptr_t (*)(int, const void *, std::size_t);
+  using Fstat = int (*)(int, void *);
+  using PathStat = int (*)(const char *, void *);
   using Error = int *(*)();
   auto HostMkfifo = reinterpret_cast<Mkfifo>(GetProcAddress(DarwinHost, "mkfifo"));
   auto HostMknod = reinterpret_cast<Mknod>(GetProcAddress(DarwinHost, "mknod"));
   auto HostOpen = reinterpret_cast<Open>(GetProcAddress(DarwinHost, "open"));
   auto HostClose = reinterpret_cast<Close>(GetProcAddress(DarwinHost, "close"));
+  auto HostWrite = reinterpret_cast<Write>(GetProcAddress(DarwinHost, "write"));
+  auto HostFstat = reinterpret_cast<Fstat>(GetProcAddress(DarwinHost, "fstat"));
+  auto HostStat = reinterpret_cast<PathStat>(GetProcAddress(DarwinHost, "stat"));
+  auto HostLstat = reinterpret_cast<PathStat>(GetProcAddress(DarwinHost, "lstat"));
   auto HostError = reinterpret_cast<Error>(GetProcAddress(DarwinHost, "__error"));
-  if (!HostMkfifo || !HostMknod || !HostOpen || !HostClose || !HostError) {
+  if (!HostMkfifo || !HostMknod || !HostOpen || !HostClose || !HostWrite ||
+      !HostFstat || !HostStat || !HostLstat || !HostError) {
     FreeLibrary(DarwinHost);
     return fail(!HostMkfifo   ? "mkfifo export was missing"
                 : !HostMknod ? "mknod export was missing"
                 : !HostOpen  ? "open export was missing"
                 : !HostClose ? "close export was missing"
+                : !HostWrite ? "write export was missing"
+                : !HostFstat ? "fstat export was missing"
+                : !HostStat  ? "stat export was missing"
+                : !HostLstat ? "lstat export was missing"
                              : "__error export was missing",
                 24);
   }
@@ -189,20 +240,83 @@ int main(int ArgC, char **ArgV) {
       DarwinOpenReadWrite | DarwinOpenCreate | DarwinOpenExclusive |
           DarwinOpenCloseOnExec,
       0600);
-  if (HostFd < 0 || HostClose(HostFd) != 0) {
+  if (HostFd < 0) {
     FreeLibrary(DarwinHost);
     return fail("open export did not create a usable CRT-backed descriptor", 29);
   }
+
+  constexpr char StatPayload[] = "darwin-stat-metadata";
+  if (HostWrite(HostFd, StatPayload, sizeof(StatPayload) - 1) !=
+      static_cast<std::intptr_t>(sizeof(StatPayload) - 1)) {
+    HostClose(HostFd);
+    FreeLibrary(DarwinHost);
+    return fail("write export did not populate the stat test file", 30);
+  }
+
+  DarwinStat64 ByFd{};
+  DarwinStat64 ByPath{};
+  DarwinStat64 ByLinkPath{};
+  if (HostFstat(HostFd, &ByFd) != 0 || HostStat(HostOpenPath, &ByPath) != 0 ||
+      HostLstat(HostOpenPath, &ByLinkPath) != 0) {
+    HostClose(HostFd);
+    FreeLibrary(DarwinHost);
+    return fail("fstat/stat/lstat did not describe the guest regular file", 31);
+  }
+
+  const std::uint16_t ExpectedMode =
+      static_cast<std::uint16_t>(DarwinRegular | 0600);
+  if (ByFd.ModeBits != ExpectedMode || ByFd.LinkCount == 0 || ByFd.Inode == 0 ||
+      ByFd.Size != static_cast<std::int64_t>(sizeof(StatPayload) - 1) ||
+      ByFd.Blocks < 0 || ByFd.BlockSize <= 0 ||
+      !plausibleTimespec(ByFd.AccessTime) ||
+      !plausibleTimespec(ByFd.ModificationTime) ||
+      !plausibleTimespec(ByFd.StatusChangeTime) ||
+      !plausibleTimespec(ByFd.BirthTime)) {
+    HostClose(HostFd);
+    FreeLibrary(DarwinHost);
+    return fail("fstat returned invalid Darwin LP64 metadata", 32);
+  }
+
+  if (ByPath.DeviceId != ByFd.DeviceId || ByPath.ModeBits != ByFd.ModeBits ||
+      ByPath.LinkCount != ByFd.LinkCount || ByPath.Inode != ByFd.Inode ||
+      ByPath.UserId != ByFd.UserId || ByPath.GroupId != ByFd.GroupId ||
+      ByPath.Size != ByFd.Size || ByPath.Blocks != ByFd.Blocks ||
+      ByPath.BlockSize != ByFd.BlockSize ||
+      std::memcmp(&ByPath, &ByLinkPath, sizeof(ByPath)) != 0) {
+    HostClose(HostFd);
+    FreeLibrary(DarwinHost);
+    return fail("stat/lstat metadata disagreed with fstat for one guest node", 33);
+  }
+
+  *HostError() = 0;
+  DarwinStat64 Missing{};
+  if (HostStat("/tmp/ipasim-stat-missing", &Missing) != -1 ||
+      *HostError() != ENOENT) {
+    HostClose(HostFd);
+    FreeLibrary(DarwinHost);
+    return fail("stat missing-path behavior did not report ENOENT", 34);
+  }
+
+  if (HostClose(HostFd) != 0) {
+    FreeLibrary(DarwinHost);
+    return fail("close export did not release the stat test descriptor", 35);
+  }
+  *HostError() = 0;
+  if (HostFstat(HostFd, &ByFd) != -1 || *HostError() != EBADF) {
+    FreeLibrary(DarwinHost);
+    return fail("fstat did not observe descriptor lifetime after close", 36);
+  }
+
   *HostError() = 0;
   if (HostOpen(HostOpenPath,
                DarwinOpenReadWrite | DarwinOpenCreate | DarwinOpenExclusive,
                0600) != -1 ||
       *HostError() != EEXIST) {
     FreeLibrary(DarwinHost);
-    return fail("open export did not preserve guest-visible O_EXCL/EEXIST", 30);
+    return fail("open export did not preserve guest-visible O_EXCL/EEXIST", 37);
   }
 
   FreeLibrary(DarwinHost);
-  std::printf("Darwin filesystem smoke passed: shared typed node registry, FIFO named-pipe transport, regular-file backing, device metadata, real CRT open descriptors, O_CREAT/O_EXCL/O_TRUNC/O_CLOEXEC translation, mkfifo/mknod/open bridge exports, removal, and guest-visible errno.\n");
+  std::printf("Darwin filesystem smoke passed: shared typed node registry, FIFO named-pipe transport, regular-file backing, device metadata, real CRT open descriptors, O_CREAT/O_EXCL/O_TRUNC/O_CLOEXEC translation, Darwin LP64 fstat/stat/lstat metadata, descriptor-lifetime cleanup, mkfifo/mknod/open bridge exports, removal, and guest-visible errno.\n");
   return 0;
 }
