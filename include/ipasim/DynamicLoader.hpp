@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <map>
+#include <mutex>
 #include <set>
 #include <stack>
 #include <string>
@@ -63,6 +64,16 @@ public:
   uint64_t resolveSymbol(LoadedDylib &Image, int Ordinal,
                          const std::string &Name, bool WeakImport = false);
 
+  // ipaSim maps guest images directly onto Windows host backing pages with
+  // uc_mem_map_ptr(). Additional Unicorn CPU contexts can therefore share the
+  // same guest process memory. New execution contexts replay all loader-known
+  // mappings; contexts that encounter a mapping added later can install it
+  // lazily without remapping a concurrently executing engine.
+  void registerEmulator(Emulator &ExecutionEmulator);
+  bool mapKnownSharedMemory(Emulator &ExecutionEmulator, uint64_t Address);
+  bool mapExternalSharedMemory(Emulator &ExecutionEmulator, uint64_t Address,
+                               uint64_t Size);
+
   // Used for dyld-objc integration. Notifies registered listeners that a new
   // library was loaded into memory. Objective-C runtime uses this to initialize
   // the library's classes.
@@ -95,17 +106,30 @@ private:
     _dyld_objc_notify_unmapped Unmapped;
   };
 
+  struct SharedMemoryMapping {
+    uint64_t Address;
+    uint64_t Size;
+    uc_prot Permissions;
+  };
+
   bool canSegmentsSlide(LIEF::MachO::Binary &Bin);
   BinaryPath resolvePath(const std::string &Path);
   LoadedLibrary *loadMachO(const std::string &Path);
   LoadedLibrary *loadPE(const std::string &Path);
   void handleMachOs(size_t HdrOffset, size_t HandlerOffset);
+  void mapAndRecordSharedMemory(Emulator &ExecutionEmulator, uint64_t Address,
+                                uint64_t Size, uc_prot Permissions);
 
   static constexpr int R_SCATTERED = 0x80000000; // From `<mach-o/reloc.h>`
   Emulator &Emu;
   uint64_t KernelAddr;
   LoadedDylib *MainExecutable = nullptr;
   std::string RuntimeRoot;
+  // Guest image/external pages are backed by the Windows process at identical
+  // addresses. The registry is the process-wide mapping description replayed
+  // into each independent Unicorn CPU context.
+  std::mutex SharedMemoryMutex;
+  std::vector<SharedMemoryMapping> SharedMemoryMappings;
   // Loaded libraries and their paths. LoadOrder preserves dyld-style flat
   // lookup order; LLs remains the path-indexed ownership map.
   std::map<std::string, std::unique_ptr<LoadedLibrary>> LLs;
