@@ -1,0 +1,31 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Execute generated runtime-adapter records through a reusable C++ registry and
+  libffi adapter engine, binding only explicit controlled host functions before
+  any production iOS symbol routing is enabled.
+
+scope:
+  - src/IpaSimulator/GeneratedBridgeAdapter.hpp
+  - src/IpaSimulator/GeneratedBridgeAdapter.cpp
+  - src/IpaSimulator/GeneratedBridgeAdapterSmoke.cpp
+  - src/IpaSimulator/CMakeLists.txt
+  - .github/agent-work/generated-runtime-executor.yml
+
+branch: compat-generated-runtime-executor
+started_utc: 2026-08-31T17:01:00Z
+updated_utc: 2026-08-31T17:01:00Z
+base_sha: f282554e1238e6c9ba1a91c8539c29fe9c02cb2b
+expected_pr: draft-or-tbd
+
+next_checkpoint: >-
+  Load the generated adapter fixture into a duplicate-safe registry, bind
+  controlled host implementations, execute scalar/SIMD/aggregate records through
+  libffi, validate pointer-gated records explicitly, and prove unbound or unsafe
+  records fail without falling through.
+
+notes: >-
+  No SysTranslator production routing in this increment. Generated metadata is
+  mechanical ABI evidence only; semantic ownership remains explicit.
