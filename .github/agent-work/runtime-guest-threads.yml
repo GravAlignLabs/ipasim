@@ -1,0 +1,35 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Promote the proven shared-memory multi-Unicorn model into a reusable runtime
+  guest-thread execution layer so pthread/workqueue workers can run with
+  independent ARM64 register and stack contexts while sharing one guest process
+  address space.
+
+scope:
+  - include/ipasim/Emulator.hpp
+  - include/ipasim/SysTranslator.hpp
+  - src/IpaSimulator/Emulator.cpp
+  - src/IpaSimulator/SysTranslator.cpp
+  - src/IpaSimulator/DarwinPthreadWorkqueueBridge.cpp
+  - src/IpaSimulator/CMakeLists.txt
+  - .github/agent-work/runtime-guest-threads.yml
+
+branch: runtime-guest-thread-execution
+started_utc: 2026-08-31T04:24:00Z
+updated_utc: 2026-08-31T04:24:00Z
+base_sha: 6f803b6598f6ce283026c2eaa9f602492fa393ce
+expected_pr: tbd
+
+next_checkpoint: >-
+  Extract repeatable shared-memory engine setup from the architectural smoke,
+  give guest callbacks independent ARM64 CPU/register/stack contexts, wire
+  pthread workqueue worker requests to that execution layer, and run the
+  authoritative Windows ARM64 and synthetic IPA CI workflows.
+
+notes: >-
+  Optimize for a working emulator. Audit code and audit self-tests remain
+  untouched. Do not report thread support as complete until independent engine
+  execution is exercised through the actual guest callback path.
