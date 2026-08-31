@@ -52,7 +52,7 @@ int main(int argc, char **argv) {
   using KeyCreate = int (*)(DarwinPthreadKey *, GuestDestructor);
   using KeyDelete = int (*)(DarwinPthreadKey);
   using SetSpecific = int (*)(DarwinPthreadKey, const void *);
-  using SetStatic = int (*)(DarwinPthreadKey, void *);
+  using StaticSetter = int (*)(DarwinPthreadKey, void *);
   using GetSpecific = void *(*)(DarwinPthreadKey);
 
   auto InitStaticKey = reinterpret_cast<KeyInit>(
@@ -63,7 +63,7 @@ int main(int argc, char **argv) {
       requireExport(Host, "pthread_key_delete"));
   auto Set = reinterpret_cast<SetSpecific>(
       requireExport(Host, "pthread_setspecific"));
-  auto SetStatic = reinterpret_cast<::SetStatic>(
+  auto SetStatic = reinterpret_cast<StaticSetter>(
       requireExport(Host, "_pthread_setspecific_static"));
   auto Get = reinterpret_cast<GetSpecific>(
       requireExport(Host, "pthread_getspecific"));
