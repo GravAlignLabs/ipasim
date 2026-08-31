@@ -64,7 +64,7 @@ jobs:
             const failed = exitCode !== '0';
             const headSha = context.payload.pull_request.head.sha;
 
-            const highSignalPattern = /(^\[compat-surface\] ERROR:)|(^\[tbd-surface\] ERROR:)|(^\[header-surface\] ERROR:)|(^\[inventory-surface\] ERROR:)|(^\[abi-surface\] ERROR:)|\bFAIL\b|\bFAILED\b|\bERROR\b|Traceback|AssertionError|ParseError|TbdParseError|HeaderParseError|InventoryError|AbiSurfaceError/i;
+            const highSignalPattern = /(^\[compat-surface\] ERROR:)|(^\[tbd-surface\] ERROR:)|(^\[header-surface\] ERROR:)|(^\[inventory-surface\] ERROR:)|(^\[abi-surface\] ERROR:)|(^\[win64-abi-surface\] ERROR:)|\bFAIL\b|\bFAILED\b|\bERROR\b|Traceback|AssertionError|ParseError|TbdParseError|HeaderParseError|InventoryError|AbiSurfaceError|Win64AbiError|CarrierTypeError/i;
             const highSignal = lines.filter(line => highSignalPattern.test(line)).slice(0, 80);
             const tail = lines.slice(-120);
 
