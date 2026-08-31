@@ -6,20 +6,123 @@
 
 [![Synthetic iOS IPA on Windows](https://github.com/GravAlignLabs/ipasim/actions/workflows/synthetic-hello-ipa.yml/badge.svg?branch=master)](https://github.com/GravAlignLabs/ipasim/actions/workflows/synthetic-hello-ipa.yml)
 [![Windows ARM64 Core](https://github.com/GravAlignLabs/ipasim/actions/workflows/windows-arm64-core.yml/badge.svg?branch=master)](https://github.com/GravAlignLabs/ipasim/actions/workflows/windows-arm64-core.yml)
+[![Threaded ARM64 Guest Context](https://github.com/GravAlignLabs/ipasim/actions/workflows/threaded-guest-context.yml/badge.svg?branch=master)](https://github.com/GravAlignLabs/ipasim/actions/workflows/threaded-guest-context.yml)
 
 ## Current ARM64 work
 
-The modern ARM64 foundation was merged through [PR #3: ARM64 + modern dyld foundation for iOS compatibility](https://github.com/GravAlignLabs/ipasim/pull/3), which preserves 16 substantive engineering milestones across the loader, runtime translation, Darwin compatibility services, testing, and CI. Current work continues from `master`.
+The modern ARM64 foundation was merged through [PR #3: ARM64 + modern dyld foundation for iOS compatibility](https://github.com/GravAlignLabs/ipasim/pull/3), which established the first large loader/runtime modernization checkpoint. Development has since advanced through [PR #37: Implement Darwin stat metadata ABI](https://github.com/GravAlignLabs/ipasim/pull/37), with subsystem-level compatibility work, semantic smoke tests, independent guest execution contexts, and a repeatable Windows tester pipeline now established on `master`.
 
-Current areas of work include:
+### Verified checkpoint — August 31, 2026
+
+At this checkpoint, the following three public validation paths are green together on the current implementation:
+
+- **Windows ARM64 Core** — builds the x64 Windows emulator core, executes real AArch64 instructions through Unicorn, and runs the Darwin subsystem semantic smoke suite.
+- **Threaded ARM64 Guest Context** — executes an ARM64 guest function on an independent Windows host thread with its own Unicorn engine, register state, and guest stack, returning the expected `X0=42`.
+- **Synthetic iOS IPA on Windows** — builds public iOS ARM64 fixtures with Xcode and exercises the Windows ipaSim loader/runtime path against them.
+
+The current green state proves the following pieces are real and working together:
+
+- IPA extraction and ARM64 Mach-O loading on Windows
+- real AArch64 instruction execution through Unicorn on an x64 Windows host
+- 64-bit guest registers and the AAPCS64 integer/pointer call boundary
+- modern dyld support including `LC_DYLD_CHAINED_FIXUPS`, exports tries, dependency ordinals, and RuntimeRoot dependency resolution
+- shared guest memory mapped into multiple Unicorn engines
+- independent guest execution contexts with separate registers and private stacks
+- Windows host threads capable of running secondary ARM64 guest callbacks without reusing the main Unicorn CPU state
+- thread-local routing of nested guest -> host -> guest callbacks back to the correct guest execution context
+- semantic Windows-backed Darwin compatibility services instead of loader-only symbol placeholders
+- reproducible public fixtures and a packaged Windows tester that can update itself to the latest published green snapshot with SHA256 verification
+
+This is **not yet a claim that arbitrary modern iOS applications run to completion**. The emulator now advances substantially farther through a modern RuntimeRoot, but additional Darwin, Objective-C, Foundation/UIKit, graphics, event-delivery, and framework behavior remains to be implemented as real runtime boundaries are encountered.
+
+### Compatibility subsystems implemented so far
+
+#### ARM64 execution and loader
+
+- real ARM64/AArch64 Unicorn execution on Windows x64
+- AAPCS64 register handling and pointer-width host-call translation
+- modern ARM64 Mach-O parsing and image loading
+- chained fixups and exports-trie resolution
+- dependency ordinal handling and RuntimeRoot image resolution
+- shared-memory multi-engine execution
+- independent secondary guest execution contexts and threaded callbacks
+
+#### Darwin process, kernel, and memory services
+
+- process identity and selected `proc_pidinfo` behavior backed by Windows process information
+- Mach task identity and Mach IPC compatibility work
+- monotonic/continuous time and Mach timebase behavior
+- `vm_allocate`, `vm_deallocate`, and guest-visible page-size handling
+- `__ulock_wait`, `__ulock_wait2`, and `__ulock_wake` synchronization semantics
+- libplatform byte/string primitives including bzero, memset/memmove/memcmp families, pattern fills, and adjacent string helpers
+- explicit failure for unsupported behavior rather than fabricated success records
+
+#### Guest file and descriptor model
+
+- a coherent guest-visible descriptor namespace rather than treating arbitrary Windows descriptors as iOS descriptors
+- `open`, `close`, `fcntl`, `lseek`, `read`, `write`, `pread`, and `pwrite`
+- `$NOCANCEL` file-syscall aliases where the existing operation already provides the correct non-cancellation boundary
+- explicit `ENOTSUP` for `sigsuspend$NOCANCEL` until Darwin signal-mask wait/delivery semantics exist
+- `mkfifo` and `mknod` guest namespace support with preserved Darwin type/mode metadata
+- FIFO backing through Windows named pipes
+- regular-file backing with real Windows handles
+- exact ARM64/LP64 Darwin `struct stat` translation for `fstat`, `stat`, and `lstat`
+- Windows-backed file identity, link count, size, allocation, block size, and access/write/change/birth timestamps
+- guest descriptor lifetime tracking so a closed descriptor is no longer visible and `fstat` correctly returns `EBADF`
+
+#### Sockets and host re-exports
+
+- a Darwin socket descriptor registry over WinSock rather than pointer-width `SOCKET` passthrough
+- socket creation, connection, and `sendto` translation for the implemented boundary
+- target-proven simulator host companion re-exports for `libsystem_sim_kernel`, `libsystem_sim_platform`, and `libsystem_sim_pthread`
+- direct ARM64 signatures for the native Darwin host bridge so resolved functions are callable, not merely linkable
+
+#### pthread and concurrency work
+
+- pthread QoS encode/decode helpers and direct QoS override behavior
+- pthread thread-specific-data key lifecycle and get/set semantics
+- pthread workloop create/destroy lifecycle
+- pthread workqueue configuration, supported-feature reporting, worker-demand requests, priority forwarding, and override control-plane behavior
+- real secondary guest worker execution through a new Windows thread and independent Unicorn guest context
+- intentionally conservative feature advertisement: unsupported workqueue delivery modes are not reported as available merely to satisfy a caller
+
+### Selected merged milestones after the initial ARM64 foundation
+
+- [PR #26](https://github.com/GravAlignLabs/ipasim/pull/26) — pthread thread-specific-data semantics
+- [PR #28](https://github.com/GravAlignLabs/ipasim/pull/28) — simulator libSystem host re-export support
+- [PR #29](https://github.com/GravAlignLabs/ipasim/pull/29) — pthread workloop lifecycle
+- [PR #30](https://github.com/GravAlignLabs/ipasim/pull/30) — pthread workqueue subsystem/control plane
+- [PR #31](https://github.com/GravAlignLabs/ipasim/pull/31) — shared-memory multi-Unicorn execution proof
+- [PR #32](https://github.com/GravAlignLabs/ipasim/pull/32) — independent ARM64 guest worker execution
+- [PR #33](https://github.com/GravAlignLabs/ipasim/pull/33) — durable Theos SDK research/provider guidance
+- [PR #34](https://github.com/GravAlignLabs/ipasim/pull/34) — reliable self-updating Windows tester packaging
+- [PR #35](https://github.com/GravAlignLabs/ipasim/pull/35) — Darwin/libplatform memory and string primitives
+- [PR #36](https://github.com/GravAlignLabs/ipasim/pull/36) — Darwin `$NOCANCEL` file syscalls and positional I/O
+- [PR #37](https://github.com/GravAlignLabs/ipasim/pull/37) — exact Darwin ARM64 `stat` metadata ABI
+
+These are selected checkpoints rather than a complete changelog. Earlier merged work also established getpid/lseek/read/readlink/sendto boundaries, platform strings, Mach task helpers, pthread CPU/QoS behavior, VM/process support, semantic smokes, synthetic fixtures, loader diagnostics, and the public CI workflow used to identify each next compatibility boundary.
+
+### What remains
+
+The project should still be treated as an active emulator bring-up effort, not a finished modern iOS compatibility layer. Important remaining areas include:
+
+- additional libSystem/kernel syscall families as the real loader reaches them
+- broader file, directory, metadata, xattr, process, Mach, and networking behavior
+- complete pthread scheduling/event delivery and signal semantics
+- Objective-C runtime integration beyond the currently proven bridge paths
+- Foundation/UIKit and other framework behavior required by normal applications
+- graphics, UI/event-loop, media, and device-service compatibility
+- additional ARM64 ABI classes such as FP/SIMD and aggregate calling conventions where target code requires them
+
+The static symbol audit intentionally reports a much broader missing compatibility surface than the current runtime may immediately require. Treat it as an independent inventory and prioritization aid, **not** as proof that every reported symbol is the next runtime blocker. The development loop remains: fix the first genuine non-cascading loader/runtime boundary, implement the coherent subsystem behind it, add semantic coverage, and rerun.
+
+Current areas of work continue to emphasize:
 
 - real AArch64 execution through Unicorn on a Windows x64 host
-- 64-bit guest register and AAPCS64 handling
-- modern ARM64 Mach-O loading
-- `LC_DYLD_CHAINED_FIXUPS`, exports trie, dependency ordinals, and RuntimeRoot resolution
-- Windows-backed Darwin host compatibility where a defensible semantic mapping exists
-- Mach IPC, process, filesystem, socket, VM, and guest descriptor compatibility
-- explicit failure for unsupported behavior instead of fake-success stubs or hidden fallbacks
+- modern ARM64 Mach-O and dyld compatibility
+- Windows-backed Darwin behavior where a defensible semantic mapping exists
+- subsystem-level implementations instead of one-symbol fake-success stubs
+- public synthetic reproductions and semantic tests
 - GitHub Actions diagnostics that expose the first useful failure
 
 ### Apple SDK metadata for compatibility research
@@ -93,9 +196,25 @@ Run public validation in this order:
 
 1. **Synthetic iOS IPA on Windows** — `.github/workflows/synthetic-hello-ipa.yml`
 2. **Windows ARM64 Core** — `.github/workflows/windows-arm64-core.yml`
-3. Optional local testing with another IPA only after the public synthetic/core tests are understood
+3. **Threaded ARM64 Guest Context** — `.github/workflows/threaded-guest-context.yml`
+4. Optional local testing with another IPA only after the public synthetic/core tests are understood
 
 If you find a compatibility problem, prefer adding or extending a small synthetic reproduction that can live in this repository. That keeps debugging reproducible for everyone.
+
+### Windows tester update path
+
+The generic Windows tester is published from a green Windows ARM64 Core result and includes `Update-ipaSim-Tester.cmd`.
+
+The updater:
+
+1. runs the replacement operation from a temporary copy so it can update itself safely,
+2. downloads the repository-published `BUILD.txt` and tester ZIP from `tester/windows/latest/`,
+3. verifies the published SHA256 before installation,
+4. extracts into a staging directory,
+5. verifies the required tester files, and
+6. replaces the installed tester only after verification succeeds.
+
+This gives local compatibility testing a repeatable path to the same green binaries validated by CI rather than relying on manually copied executables from an older build.
 
 ### PR-based CI diagnostic loop
 
