@@ -5,6 +5,7 @@
 // point must have a real Windows semantic equivalent or a real compatibility
 // subsystem and is added only when the target reaches that boundary.
 
+#include "DarwinSocketAdapter.hpp"
 #include "FifoAdapter.hpp"
 #include "MachIpc.hpp"
 
@@ -219,11 +220,24 @@ __declspec(dllexport) int __pthread_fchdir(int NewFd) {
   return 0;
 }
 
-// Mach-O symbol _close is exposed to PE lookup as close after ipaSim removes
-// Mach-O's symbol prefix. The host bridge's descriptor namespace is explicitly
-// CRT-backed, so Windows _close provides the matching descriptor lifetime and
-// errno contract without bypassing CRT bookkeeping through CloseHandle().
-__declspec(dllexport) int close(int Fd) { return _close(Fd); }
+// close participates in the same guest descriptor namespace as open/socket and
+// proc_pidinfo. Dispatch sockets through the Winsock registry, and forget a
+// filesystem descriptor only after the CRT close succeeds so stale fds cannot
+// remain visible through PROC_PIDLISTFDS.
+__declspec(dllexport) int close(int Fd) {
+  if (ipasim::darwinsock::isSocketDescriptor(Fd))
+    return ipasim::darwinsock::closeSocket(Fd);
+
+  if (!ipasim::darwinfs::isOpenNodeDescriptor(Fd)) {
+    errno = EBADF;
+    return -1;
+  }
+
+  const int Result = _close(Fd);
+  if (Result == 0)
+    ipasim::darwinfs::forgetOpenNodeDescriptor(Fd);
+  return Result;
+}
 
 // Darwin read operates on the same descriptor namespace as open/close/lseek.
 // UCRT _read accepts a 32-bit request count; POSIX permits a successful read to
