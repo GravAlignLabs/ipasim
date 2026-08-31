@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run ipaSim's SDK-wide compatibility pipeline in one deterministic pass.
+"""Run ipaSim's SDK-wide compatibility pipeline in deterministic bounded passes.
 
 This orchestrates the already-separated evidence layers over the complete SDK
 surface rather than waiting for a Mach-O runtime failure:
@@ -7,9 +7,11 @@ surface rather than waiting for a Mach-O runtime failure:
 TAPI + Clang -> typed SDK catalog -> AAPCS64 -> Win64 carrier ABI -> libffi plan
 -> runtime adapters -> compatibility plan -> approved semantic route table.
 
-A Mach-O import manifest is intentionally not an input. Semantic approval remains
-explicit and fail-closed; this command only generates a production route when the
-semantic-provider inventory already marks it approved.
+The two compiler-backed ABI stages use deterministic bounded batching by default
+so SDK-wide runs do not require one monolithic Clang probe. A Mach-O import
+manifest is intentionally not an input. Semantic approval remains explicit and
+fail-closed; this command only generates a production route when the semantic-
+provider inventory already marks it approved.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ from typing import Sequence
 import abi_surface
 import bridge_plan
 import compat_planner
+import compiler_batching
 import generate_semantic_routes
 import runtime_adapter_table
 import sdk_catalog
@@ -85,24 +88,27 @@ def run_pipeline(
     host_target: str,
     clang_args: Sequence[str] = (),
     timeout_seconds: int = 120,
+    compiler_batch_size: int = compiler_batching.DEFAULT_COMPILER_BATCH_SIZE,
 ) -> dict:
     """Run all mechanical stages over the SDK and return their in-memory outputs."""
     catalog = sdk_catalog.build_sdk_catalog(tapi_manifest, header_manifest)
     inventory = sdk_catalog.build_abi_inventory(catalog)
-    guest_abi = abi_surface.build_abi_manifest(
+    guest_abi = compiler_batching.build_aapcs64_manifest(
         inventory,
         header_root=header_root,
         clang=clang,
         sdk_root=sdk_root,
         extra_args=clang_args,
         timeout_seconds=timeout_seconds,
+        batch_size=compiler_batch_size,
     )
-    host_abi = win64_abi_surface.build_win64_manifest(
+    host_abi = compiler_batching.build_win64_manifest(
         guest_abi,
         clang=clang,
         host_target=host_target,
         extra_args=clang_args,
         timeout_seconds=timeout_seconds,
+        batch_size=compiler_batch_size,
     )
     ffi_plan = bridge_plan.build_bridge_plan(host_abi)
     adapters = runtime_adapter_table.build_runtime_adapter_table(ffi_plan)
@@ -175,12 +181,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--host-target",
         default=win64_abi_surface.DEFAULT_HOST_TARGET,
     )
+    parser.add_argument(
+        "--compiler-batch-size",
+        type=int,
+        default=compiler_batching.DEFAULT_COMPILER_BATCH_SIZE,
+        help=(
+            "maximum symbols per AAPCS64/Win64 Clang probe "
+            f"(default {compiler_batching.DEFAULT_COMPILER_BATCH_SIZE})"
+        ),
+    )
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args(argv)
 
     try:
         if args.timeout <= 0:
             raise BulkCompatibilityError("timeout must be positive")
+        if args.compiler_batch_size <= 0:
+            raise BulkCompatibilityError("compiler batch size must be positive")
         if shutil.which(args.clang) is None and not Path(args.clang).is_file():
             raise BulkCompatibilityError(f"Clang executable not found: {args.clang}")
         header_root = Path(args.header_root).resolve()
@@ -204,6 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             host_target=args.host_target,
             clang_args=args.clang_arg,
             timeout_seconds=args.timeout,
+            compiler_batch_size=args.compiler_batch_size,
         )
         write_outputs(Path(args.output_dir), outputs)
         summary = outputs["compatibility_plan"]["summary"]
@@ -212,12 +230,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "[bulk-compatibility] "
             f"SDK symbols={summary['symbol_count']} "
             f"typed-C={summary['typed_c_candidate_count']} "
+            f"compiler-batch-size={args.compiler_batch_size} "
             "route-ready="
             f"{route_counts.get('approved-mechanical-route-ready', 0)}"
         )
         return 0
     except (
         BulkCompatibilityError,
+        compiler_batching.CompilerBatchError,
         sdk_catalog.SdkCatalogError,
         abi_surface.AbiSurfaceError,
         win64_abi_surface.Win64AbiError,
