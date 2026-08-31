@@ -488,6 +488,47 @@ jobs:
           '## Bootstrap IPA' | Add-Content $env:GITHUB_STEP_SUMMARY
           'GitHub built an iOS ARM64 IPA; ipaSim loaded and executed its LC_MAIN entry point on Windows and observed X0=42.' | Add-Content $env:GITHUB_STEP_SUMMARY
 
+      - name: Execute bootstrap on independent guest worker CPU
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $image = Join-Path $env:RUNNER_TEMP 'HelloBootstrap-expanded\Payload\HelloBootstrap.app\HelloBootstrap'
+          if (-not (Test-Path $image)) { throw "Expanded bootstrap image not found: $image" }
+
+          $core = Get-ChildItem $env:IPASIM_BIN -Filter '*IpaSimLibrary.dll' | Select-Object -First 1
+          if (-not $core) { throw 'IpaSimLibrary DLL was not found for threaded execution proof.' }
+
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+
+          [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+          public delegate int IpaSimExecuteImageThreaded(
+              [MarshalAs(UnmanagedType.LPStr)] string path,
+              out UInt64 returnValue);
+          '@
+
+          $handle = [System.Runtime.InteropServices.NativeLibrary]::Load($core.FullName)
+          try {
+            $address = [System.Runtime.InteropServices.NativeLibrary]::GetExport(
+              $handle, 'ipaSim_executeImageThreaded')
+            $call = [System.Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer(
+              $address, [IpaSimExecuteImageThreaded])
+            [UInt64]$returnValue = 0
+            $result = $call.Invoke($image, [ref]$returnValue)
+            if ($result -ne 0) {
+              throw "Threaded guest execution stopped with code $result."
+            }
+            if ($returnValue -ne 42) {
+              throw "Threaded guest CPU returned X0=$returnValue instead of 42."
+            }
+            Write-Host '[threaded-guest-callback-smoke] independent ARM64 guest context returned X0=42'
+            '## Independent guest worker CPU' | Add-Content $env:GITHUB_STEP_SUMMARY
+            'The same iOS ARM64 image returned X0=42 from a separate Windows thread and separate Unicorn CPU/register/stack context sharing the loaded guest process pages.' | Add-Content $env:GITHUB_STEP_SUMMARY
+          } finally {
+            [System.Runtime.InteropServices.NativeLibrary]::Free($handle)
+          }
+
       - name: Probe untouched native IPA boundary
         shell: pwsh
         run: |
