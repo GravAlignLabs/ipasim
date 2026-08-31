@@ -14,6 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
   issues: write
   pull-requests: write
@@ -57,8 +58,6 @@ jobs:
               .asciz "Hello from a GitHub-built iOS ARM64 IPA"
           ASM
 
-          # Apple requires a dynamic iOS executable to link libSystem. Keep one
-          # completely normal copy as the real iOS loader fixture.
           xcrun --sdk iphoneos clang \
             -arch arm64 \
             -target arm64-apple-ios15.0 \
@@ -86,11 +85,6 @@ jobs:
           xcrun otool -L "$native_app/HelloNative" | tee "$out/native-dependencies.txt"
           xcrun nm -u "$native_app/HelloNative" | tee "$out/native-undefined.txt"
 
-          # This assembly fixture calls no libSystem functions. Prove that before
-          # making a bootstrap copy. The only libSystem relationship is Apple's
-          # mandatory load command, so redirecting that unused dependency to the
-          # real ipaSim host bridge tests loader+Unicorn execution without
-          # pretending to implement any guest symbol.
           undefined="$(xcrun nm -u "$native_app/HelloNative" | sed '/^[[:space:]]*$/d')"
           if [[ -n "$undefined" ]]; then
             echo "Minimal fixture unexpectedly has undefined symbols:" >&2
@@ -202,9 +196,79 @@ jobs:
           if-no-files-found: error
           path: synthetic-output/
 
+  resolve-core-tester:
+    name: Reuse Windows Core tester
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      reuse: ${{ steps.core.outputs.reuse }}
+      run_id: ${{ steps.core.outputs.run_id }}
+
+    steps:
+      - name: Find exact-head Core artifact
+        id: core
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Core and Synthetic normally start together. Give Core a short
+          # discovery window. Workflow-only/manual Synthetic runs keep a
+          # standalone fallback build instead of depending on another workflow.
+          run_id=''
+          for attempt in {1..9}; do
+            runs_json="$(gh api -H 'Accept: application/vnd.github+json' \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/windows-arm64-core.yml/runs?head_sha=$TARGET_SHA&per_page=20")"
+            run_id="$(jq -r '.workflow_runs[0].id // empty' <<<"$runs_json")"
+            if [[ -n "$run_id" ]]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [[ -z "$run_id" ]]; then
+            echo 'reuse=false' >> "$GITHUB_OUTPUT"
+            echo 'run_id=' >> "$GITHUB_OUTPUT"
+            echo 'No exact-head Windows ARM64 Core run appeared; Synthetic will use its standalone fallback build.'
+            exit 0
+          fi
+
+          echo "Found Windows ARM64 Core run $run_id for $TARGET_SHA."
+          while true; do
+            run_json="$(gh api -H 'Accept: application/vnd.github+json' \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+            status="$(jq -r '.status' <<<"$run_json")"
+            conclusion="$(jq -r '.conclusion // empty' <<<"$run_json")"
+
+            if [[ "$status" == 'completed' ]]; then
+              if [[ "$conclusion" != 'success' ]]; then
+                echo "Matching Windows ARM64 Core run $run_id completed as $conclusion." >&2
+                exit 1
+              fi
+              break
+            fi
+            sleep 10
+          done
+
+          artifacts_json="$(gh api -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100")"
+          artifact_id="$(jq -r '.artifacts[] | select(.name == "ipasim-ipa-tester" and .expired == false) | .id' <<<"$artifacts_json" | head -n1)"
+          if [[ -z "$artifact_id" ]]; then
+            echo "Successful Core run $run_id did not publish ipasim-ipa-tester." >&2
+            exit 1
+          fi
+
+          echo 'reuse=true' >> "$GITHUB_OUTPUT"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "Reusing tester artifact $artifact_id from Core run $run_id."
+
   run-on-windows:
     name: Run synthetic IPA through ipaSim
-    needs: build-ios-fixtures
+    needs:
+      - build-ios-fixtures
+      - resolve-core-tester
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -213,34 +277,49 @@ jobs:
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
 
     steps:
-      - name: Check out ipaSim
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Fetch modern-core submodules
-        shell: pwsh
-        run: |
-          git submodule sync -- deps/llvm deps/LIEF deps/unicorn deps/Libffi
-          git submodule update --init --depth 1 --jobs 4 deps/llvm deps/LIEF deps/unicorn deps/Libffi
-
-      - name: Enter x64 MSVC environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Enable compiler result cache
-        uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: v0.17.0
-
       - name: Download synthetic IPAs
         uses: actions/download-artifact@v4
         with:
           name: synthetic-ios-ipas
           path: synthetic
 
-      - name: Configure and build ipaSim probe
+      - name: Download exact-head Core tester
+        if: needs.resolve-core-tester.outputs.reuse == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ipasim-ipa-tester
+          path: tester
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-core-tester.outputs.run_id }}
+
+      - name: Check out ipaSim for standalone fallback
+        if: needs.resolve-core-tester.outputs.reuse != 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Fetch modern-core submodules for standalone fallback
+        if: needs.resolve-core-tester.outputs.reuse != 'true'
+        shell: pwsh
+        run: |
+          git submodule sync -- deps/llvm deps/LIEF deps/unicorn deps/Libffi
+          git submodule update --init --depth 1 --jobs 4 deps/llvm deps/LIEF deps/unicorn deps/Libffi
+
+      - name: Enter x64 MSVC environment for standalone fallback
+        if: needs.resolve-core-tester.outputs.reuse != 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Enable compiler result cache for standalone fallback
+        if: needs.resolve-core-tester.outputs.reuse != 'true'
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Configure and build standalone fallback probe
+        if: needs.resolve-core-tester.outputs.reuse != 'true'
         id: synthetic_probe_build
         continue-on-error: true
         shell: pwsh
@@ -250,11 +329,9 @@ jobs:
 
           function Invoke-CapturedCmake {
             param([string[]]$CmakeArgs)
-
             $commandLine = 'cmake ' + ($CmakeArgs -join ' ')
             Write-Host "==> $commandLine"
             "==> $commandLine" | Out-File -FilePath $log -Append -Encoding utf8
-
             $lines = @(& cmake @CmakeArgs 2>&1)
             $exitCode = $LASTEXITCODE
             foreach ($line in $lines) {
@@ -262,10 +339,7 @@ jobs:
               Write-Host $text
               $text | Out-File -FilePath $log -Append -Encoding utf8
             }
-
-            if ($exitCode -ne 0) {
-              exit $exitCode
-            }
+            if ($exitCode -ne 0) { exit $exitCode }
           }
 
           Invoke-CapturedCmake @('-S', '.', '-B', 'build', '-G', 'Ninja')
@@ -273,7 +347,7 @@ jobs:
           Invoke-CapturedCmake @('--build', 'build\ipaSim-x64-Release', '--target', 'Arm64Smoke', '--', '-v')
           Invoke-CapturedCmake @('--build', 'build\ipaSim-x64-Release', '--target', 'IpaProbe', '--', '-v')
 
-      - name: Publish synthetic build diagnostic
+      - name: Publish standalone fallback build diagnostic
         if: steps.synthetic_probe_build.outcome == 'failure' && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         env:
@@ -283,23 +357,20 @@ jobs:
             const fs = require('fs');
             const marker = '<!-- ipasim-synthetic-build-diagnostic -->';
             const logPath = process.env.SYNTHETIC_BUILD_LOG;
-
-            let lines = [];
-            if (logPath && fs.existsSync(logPath)) {
-              lines = fs.readFileSync(logPath, 'utf8').split(/\r?\n/);
-            }
-
+            const lines = logPath && fs.existsSync(logPath)
+              ? fs.readFileSync(logPath, 'utf8').split(/\r?\n/)
+              : [];
             const match = /(^FAILED:)|\bFAIL:|missing export:|error:|fatal error|LNK[0-9]+|undefined reference|unresolved external|duplicate symbol|linker command failed|ninja: build stopped|CMake Error/i;
             const highSignal = lines.filter(line => match.test(line)).slice(0, 80);
             const tail = lines.slice(-160);
             if (highSignal.length === 0 && tail.length === 0) {
-              tail.push('Synthetic ipaSim build failed, but the captured log was empty.');
+              tail.push('Standalone Synthetic build failed, but the captured log was empty.');
             }
 
             const headSha = context.payload.pull_request.head.sha;
             const body = [
               marker,
-              '## Synthetic iOS IPA build diagnostic',
+              '## Synthetic iOS IPA standalone build diagnostic',
               '',
               `Commit: \`${headSha}\``,
               '',
@@ -320,29 +391,51 @@ jobs:
             const repo = context.repo.repo;
             const issue_number = context.payload.pull_request.number;
             const comments = await github.paginate(github.rest.issues.listComments, {
-              owner,
-              repo,
-              issue_number,
-              per_page: 100
+              owner, repo, issue_number, per_page: 100
             });
             const existing = comments.find(comment => comment.body && comment.body.includes(marker));
-
             if (existing) {
               await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
             } else {
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
-            console.log(body);
 
-      - name: Stop after failed synthetic probe build
+      - name: Stop after failed standalone fallback build
         if: steps.synthetic_probe_build.outcome == 'failure'
         shell: pwsh
         run: |
-          Write-Error 'Synthetic ipaSim probe build failed. See the PR diagnostic comment above.'
+          Write-Error 'Standalone Synthetic ipaSim probe build failed. See the PR diagnostic comment above.'
           exit 1
 
+      - name: Select ipaSim tester binaries
+        shell: pwsh
+        run: |
+          if ('${{ needs.resolve-core-tester.outputs.reuse }}' -eq 'true') {
+            $bin = (Resolve-Path 'tester').Path
+            $source = 'Windows ARM64 Core artifact'
+          } else {
+            $bin = (Resolve-Path 'build\ipaSim-x64-Release\bin').Path
+            $source = 'standalone fallback build'
+          }
+
+          $required = @(
+            (Join-Path $bin 'Arm64Smoke.exe'),
+            (Join-Path $bin 'IpaProbe.exe'),
+            (Join-Path $bin 'IpaSimDarwinHost.dll')
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) { throw "Expected tester output not found: $path" }
+          }
+
+          "IPASIM_BIN=$bin" | Add-Content $env:GITHUB_ENV
+          '## Synthetic tester source' | Add-Content $env:GITHUB_STEP_SUMMARY
+          $source | Add-Content $env:GITHUB_STEP_SUMMARY
+          if ('${{ needs.resolve-core-tester.outputs.reuse }}' -eq 'true') {
+            'Core run: ${{ needs.resolve-core-tester.outputs.run_id }}' | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
+
       - name: Resolve stale synthetic build diagnostic
-        if: steps.synthetic_probe_build.outcome == 'success' && github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && (needs.resolve-core-tester.outputs.reuse == 'true' || steps.synthetic_probe_build.outcome == 'success')
         uses: actions/github-script@v7
         with:
           script: |
@@ -351,14 +444,10 @@ jobs:
             const repo = context.repo.repo;
             const issue_number = context.payload.pull_request.number;
             const comments = await github.paginate(github.rest.issues.listComments, {
-              owner,
-              repo,
-              issue_number,
-              per_page: 100
+              owner, repo, issue_number, per_page: 100
             });
             const existing = comments.find(comment => comment.body && comment.body.includes(marker));
             if (!existing) return;
-
             const headSha = context.payload.pull_request.head.sha;
             const body = [
               marker,
@@ -366,15 +455,14 @@ jobs:
               '',
               `Resolved by commit \`${headSha}\`.`,
               '',
-              'The configure/probe build now succeeds; there is no current synthetic build diagnostic.'
+              'Synthetic validation now has a usable ipaSim tester; there is no current build diagnostic.'
             ].join('\n');
             await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
-            console.log(body);
 
       - name: Verify raw AArch64 execution
         shell: pwsh
         run: |
-          & 'build\ipaSim-x64-Release\bin\Arm64Smoke.exe'
+          & (Join-Path $env:IPASIM_BIN 'Arm64Smoke.exe')
           if ($LASTEXITCODE -ne 0) { throw "Raw AArch64 execution failed: $LASTEXITCODE" }
 
       - name: Execute bootstrap IPA on Windows
@@ -388,7 +476,7 @@ jobs:
           Copy-Item $ipa.FullName $zip -Force
           Expand-Archive $zip $expanded -Force
           $image = Join-Path $expanded 'Payload\HelloBootstrap.app\HelloBootstrap'
-          $probe = 'build\ipaSim-x64-Release\bin\IpaProbe.exe'
+          $probe = Join-Path $env:IPASIM_BIN 'IpaProbe.exe'
           $log = Join-Path $env:RUNNER_TEMP 'bootstrap-ipasim.log'
           $lines = @(& $probe --execute $image 2>&1)
           $code = $LASTEXITCODE
@@ -404,12 +492,13 @@ jobs:
         shell: pwsh
         run: |
           $ipa = Get-ChildItem synthetic -Recurse -Filter HelloNative.ipa | Select-Object -First 1
+          if (-not $ipa) { throw 'HelloNative.ipa was not found.' }
           $zip = Join-Path $env:RUNNER_TEMP 'HelloNative.zip'
           $expanded = Join-Path $env:RUNNER_TEMP 'HelloNative-expanded'
           Copy-Item $ipa.FullName $zip -Force
           Expand-Archive $zip $expanded -Force
           $image = Join-Path $expanded 'Payload\HelloNative.app\HelloNative'
-          $probe = 'build\ipaSim-x64-Release\bin\IpaProbe.exe'
+          $probe = Join-Path $env:IPASIM_BIN 'IpaProbe.exe'
           $log = Join-Path $env:RUNNER_TEMP 'native-ipasim.log'
           $lines = @(& $probe $image 2>&1)
           $code = $LASTEXITCODE
@@ -423,12 +512,13 @@ jobs:
         shell: pwsh
         run: |
           $ipa = Get-ChildItem synthetic -Recurse -Filter HelloUIKit.ipa | Select-Object -First 1
+          if (-not $ipa) { throw 'HelloUIKit.ipa was not found.' }
           $zip = Join-Path $env:RUNNER_TEMP 'HelloUIKit.zip'
           $expanded = Join-Path $env:RUNNER_TEMP 'HelloUIKit-expanded'
           Copy-Item $ipa.FullName $zip -Force
           Expand-Archive $zip $expanded -Force
           $image = Join-Path $expanded 'Payload\HelloUIKit.app\HelloUIKit'
-          $probe = 'build\ipaSim-x64-Release\bin\IpaProbe.exe'
+          $probe = Join-Path $env:IPASIM_BIN 'IpaProbe.exe'
           $log = Join-Path $env:RUNNER_TEMP 'uikit-ipasim.log'
           $lines = @(& $probe $image 2>&1)
           $code = $LASTEXITCODE
