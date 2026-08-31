@@ -25,4 +25,11 @@ IPASIM_API int ipaSim_probeImage(const char *Path);
 // actually executed rather than merely parsed successfully.
 IPASIM_API int ipaSim_executeImage(const char *Path, uint64_t *ReturnValue);
 
+// Load a Mach-O, create an independent ARM64 execution context sharing the
+// loaded guest-process pages, and execute the image entry point on a separate
+// Windows thread. The call joins that worker only for deterministic validation;
+// normal workqueue delivery uses the asynchronous threaded callback export.
+IPASIM_API int ipaSim_executeImageThreaded(const char *Path,
+                                           uint64_t *ReturnValue);
+
 #endif // IPASIM_PROBE_HPP
