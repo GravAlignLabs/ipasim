@@ -1,5 +1,6 @@
 import json
 import pathlib
+import re
 import unittest
 
 import runtime_adapter_table
@@ -10,6 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 PRODUCTION_ADAPTERS = (
     ROOT / "src" / "IpaSimulator" / "GeneratedSemanticProviderAdapters.inc"
 )
+SYS_TRANSLATOR = ROOT / "src" / "IpaSimulator" / "SysTranslator.cpp"
 
 
 class SemanticProviderFixtureTests(unittest.TestCase):
@@ -49,6 +51,22 @@ class SemanticProviderFixtureTests(unittest.TestCase):
             PRODUCTION_ADAPTERS.read_text(encoding="utf-8"),
             rendered,
             "production semantic adapter drifted from runtime_adapter_table.py",
+        )
+
+    def test_getpid_is_not_duplicated_in_handwritten_darwin_abi_table(self):
+        table = self._generated_table()
+        self.assertEqual(table["adapters"][0]["symbol"], "_getpid")
+
+        translator = SYS_TRANSLATOR.read_text(encoding="utf-8")
+        handwritten_getpid = re.compile(r'\{\s*"getpid"\s*,\s*\d+\s*,')
+        self.assertIsNone(
+            handwritten_getpid.search(translator),
+            "_getpid is generated and must not also exist in the handwritten Darwin ABI table",
+        )
+        self.assertIn(
+            "isSelectedGeneratedSemanticImport(Addr)",
+            translator,
+            "SysTranslator no longer checks the loader-selected generated route",
         )
 
 
