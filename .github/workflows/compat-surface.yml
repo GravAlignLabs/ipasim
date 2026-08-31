@@ -1,0 +1,151 @@
+name: Compatibility Surface Analyzer
+
+on:
+  pull_request:
+    paths:
+      - 'tools/compat_surface/**'
+      - '.github/workflows/compat-surface.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: compat-surface-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out ipaSim
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run compatibility surface tests
+        id: compat_tests
+        shell: bash
+        run: |
+          set +e
+          python -m unittest discover -s tools/compat_surface -p 'test_*.py' -v 2>&1 | tee compat-surface.log
+          code=${PIPESTATUS[0]}
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Publish compatibility surface diagnostic
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          COMPAT_EXIT_CODE: ${{ steps.compat_tests.outputs.exit_code }}
+          COMPAT_LOG: compat-surface.log
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ipasim-compat-surface-diagnostic -->';
+            const exitCode = process.env.COMPAT_EXIT_CODE || 'unknown';
+            const logPath = process.env.COMPAT_LOG;
+            const lines = fs.existsSync(logPath)
+              ? fs.readFileSync(logPath, 'utf8').split(/\r?\n/)
+              : ['Compatibility surface test log was not produced.'];
+            const failed = exitCode !== '0';
+            const headSha = context.payload.pull_request.head.sha;
+
+            const highSignalPattern = /(^\[compat-surface\] ERROR:)|\bFAIL\b|\bFAILED\b|\bERROR\b|Traceback|AssertionError|ParseError/i;
+            const highSignal = lines.filter(line => highSignalPattern.test(line)).slice(0, 80);
+            const tail = lines.slice(-120);
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+            const existing = comments.find(
+              comment => comment.body && comment.body.includes(marker)
+            );
+
+            if (!failed && !existing) {
+              console.log(`Compatibility surface tests passed for ${headSha}; no diagnostic comment needed.`);
+              return;
+            }
+
+            const body = failed
+              ? [
+                  marker,
+                  '## Compatibility surface diagnostic',
+                  '',
+                  `Commit: \`${headSha}\``,
+                  '',
+                  ...(highSignal.length > 0 ? [
+                    '### High-signal diagnostics',
+                    '```text',
+                    ...highSignal,
+                    '```',
+                    ''
+                  ] : []),
+                  '### Test log tail',
+                  '```text',
+                  ...tail,
+                  '```'
+                ].join('\n').slice(0, 60000)
+              : [
+                  marker,
+                  '## Compatibility surface diagnostic',
+                  '',
+                  `Commit: \`${headSha}\``,
+                  '',
+                  '✅ Compatibility surface analyzer tests now pass.'
+                ].join('\n');
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+            }
+
+            console.log(body);
+
+      - name: Write compatibility surface summary
+        if: always()
+        shell: bash
+        env:
+          COMPAT_EXIT_CODE: ${{ steps.compat_tests.outputs.exit_code }}
+        run: |
+          if [[ "$COMPAT_EXIT_CODE" == "0" ]]; then
+            echo "## Compatibility surface analyzer: passed" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Compatibility surface analyzer: failed" >> "$GITHUB_STEP_SUMMARY"
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 120 compat-surface.log >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fail after publishing diagnostic
+        if: always() && steps.compat_tests.outputs.exit_code != '0'
+        shell: bash
+        run: |
+          echo "::error::Compatibility surface analyzer tests failed. The actionable diagnostic was published above."
+          exit 1
