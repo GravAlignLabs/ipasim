@@ -16,12 +16,12 @@ scope:
 
 branch: compat-table-driven-import-routing
 started_utc: 2026-08-31T18:57:00Z
-updated_utc: 2026-08-31T18:59:00Z
+updated_utc: 2026-08-31T19:13:00Z
 base_sha: 043a20c082d815119e46ad927b2c9304080389db
-expected_pr: tbd
+expected_pr: "#53"
 
 next_checkpoint: >-
-  Replace _getpid-specific router selection logic with an explicit approved-route table, extend focused smoke coverage, then run public validation workflows.
+  Validate the explicit approved-route table, exact provider-address checks, and unchanged _getpid execution through public CI.
 
 notes: >-
   Keep _getpid as the only production route in this increment. Preserve exact provider identity/address validation and fail-closed behavior. Keep semantic approval data separate from generator-owned ABI metadata. Do not touch active pthread scope or add new Darwin symbols.
