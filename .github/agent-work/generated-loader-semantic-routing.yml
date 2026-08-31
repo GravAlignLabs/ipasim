@@ -16,22 +16,24 @@ scope:
   - src/IpaSimulator/GeneratedSemanticImportRouterSmoke.cpp
   - src/IpaSimulator/GeneratedSemanticProviderAdapters.inc
   - tools/compat_surface/test_semantic_provider_fixture.py
+  - .github/workflows/windows-arm64-core.yml
   - .github/agent-work/generated-loader-semantic-routing.yml
 
 branch: compat-generated-loader-routing
 started_utc: 2026-08-31T18:04:39Z
-updated_utc: 2026-08-31T18:15:42Z
+updated_utc: 2026-08-31T18:23:30Z
 base_sha: 0fdd57dcc1685f46331406b1c3390d6241c1bf67
 expected_pr: 52
 
 next_checkpoint: >-
   Make the loader PE symbol lookup select _getpid only when its generated adapter
-  and approved IpaSimDarwinHost.dll provider are both valid, then execute that
-  selected route through GeneratedBridgeAdapter instead of the handwritten
-  SysTranslator signature.
+  and approved IpaSimDarwinHost.dll provider are both valid, execute that selected
+  route through GeneratedBridgeAdapter, and make early configure/smoke failures
+  update the same actionable Windows core PR diagnostic before CI fails normally.
 
 notes: >-
   Keep all non-migrated Darwin host symbols on their existing path. _getpid is the
   only production migration in this increment. Fail closed on provider/route
-  validation errors, do not touch active pthread implementation files, and keep
-  the production adapter generator-derived with a no-drift test.
+  validation errors, do not modify active pthread implementation files, keep the
+  production adapter generator-derived with a no-drift test, and do not hide or
+  suppress CI failures.
