@@ -65,6 +65,7 @@ class TbdInterface:
     reexports: tuple[TbdReexport, ...]
     sources: tuple[str, ...]
     source_format_versions: tuple[int, ...] = ()
+    source_current_versions: tuple[str, ...] = ()
 
 
 def _require_yaml() -> None:
@@ -254,17 +255,19 @@ def _parse_document(
         for name, targets in sorted(reexport_targets.items())
     )
     format_version = _format_version(document)
+    current_version = _as_string(document.get("current-version"))
 
     return TbdInterface(
         install_name=install_name,
         format_version=format_version,
-        current_version=_as_string(document.get("current-version")),
+        current_version=current_version,
         compatibility_version=_as_string(document.get("compatibility-version")),
         targets=tuple(document_targets),
         exports=exports,
         reexports=reexports,
         sources=(source.replace("\\", "/"),),
         source_format_versions=(format_version,),
+        source_current_versions=((current_version,) if current_version else ()),
     )
 
 
@@ -370,6 +373,16 @@ def _validate_mixed_format_evidence(group: Sequence[TbdInterface]) -> None:
                     )
 
 
+def _current_versions_by_format(
+    group: Sequence[TbdInterface],
+) -> dict[int, set[str]]:
+    versions: dict[int, set[str]] = {}
+    for item in group:
+        if item.current_version:
+            versions.setdefault(item.format_version, set()).add(item.current_version)
+    return versions
+
+
 def _merge_interface_group(group: Sequence[TbdInterface]) -> TbdInterface:
     first = group[0]
     versions = {
@@ -377,12 +390,26 @@ def _merge_interface_group(group: Sequence[TbdInterface]) -> TbdInterface:
         for item in group
         for version in (item.source_format_versions or (item.format_version,))
     }
-    current_versions = {item.current_version for item in group if item.current_version}
+    current_versions = {
+        version
+        for item in group
+        for version in (
+            item.source_current_versions
+            or ((item.current_version,) if item.current_version else ())
+        )
+    }
     compatibility_versions = {
         item.compatibility_version for item in group if item.compatibility_version
     }
     _validate_mixed_format_evidence(group)
-    if len(current_versions) > 1:
+
+    for format_version, values in sorted(_current_versions_by_format(group).items()):
+        if len(values) > 1:
+            raise TbdParseError(
+                f"{first.install_name}: conflicting current-version values "
+                f"{sorted(values)} within TAPI format version {format_version}"
+            )
+    if len(current_versions) > 1 and len(versions) == 1:
         raise TbdParseError(
             f"{first.install_name}: conflicting current-version values "
             f"{sorted(current_versions)}"
@@ -417,16 +444,20 @@ def _merge_interface_group(group: Sequence[TbdInterface]) -> TbdInterface:
         TbdReexport(name, tuple(sorted(targets)))
         for name, targets in sorted(reexport_targets.items())
     )
+    canonical_current_version = (
+        next(iter(current_versions)) if len(current_versions) == 1 else None
+    )
     return TbdInterface(
         install_name=first.install_name,
         format_version=max(versions),
-        current_version=next(iter(current_versions), None),
+        current_version=canonical_current_version,
         compatibility_version=next(iter(compatibility_versions), None),
         targets=tuple(sorted(all_targets)),
         exports=exports,
         reexports=reexports,
         sources=tuple(sorted(sources)),
         source_format_versions=tuple(sorted(versions)),
+        source_current_versions=tuple(sorted(current_versions)),
     )
 
 
@@ -489,6 +520,12 @@ def build_sdk_manifest(interfaces: Iterable[TbdInterface]) -> dict:
         source_versions = interface.source_format_versions or (interface.format_version,)
         if len(source_versions) > 1:
             rendered_interface["source_format_versions"] = list(source_versions)
+        current_versions = (
+            interface.source_current_versions
+            or ((interface.current_version,) if interface.current_version else ())
+        )
+        if len(current_versions) > 1:
+            rendered_interface["source_current_versions"] = list(current_versions)
         rendered.append(rendered_interface)
 
     symbol_index = []
