@@ -1,0 +1,22 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Reuse the Windows ARM64 Core tester artifact in Synthetic iOS IPA validation so ipaSim compiles only once per PR while preserving both public checks.
+
+scope:
+  - .github/workflows/windows-arm64-core.yml
+  - .github/workflows/synthetic-hello-ipa.yml
+
+branch: ci-reuse-core-artifact
+started_utc: 2026-08-31T00:46:00Z
+updated_utc: 2026-08-31T00:46:00Z
+base_sha: d4439fc5f05bb73b4a36b75a6cd92e24800ccd0e
+expected_pr: tbd
+
+next_checkpoint: >-
+  Make Synthetic wait for and download the exact successful Core tester artifact for the same PR head SHA, then run the existing synthetic fixtures without a second Windows compile.
+
+notes: >-
+  Preserve existing workflow names, public fixture behavior, real failure semantics, and publisher compatibility. No runtime or application-specific code changes.
