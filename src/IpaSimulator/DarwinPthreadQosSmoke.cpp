@@ -1,5 +1,5 @@
-// DarwinPthreadQosSmoke.cpp: semantic/export checks for Darwin's pure
-// pthread_priority_t QoS codecs used by libdispatch.
+// DarwinPthreadQosSmoke.cpp: semantic/export checks for Darwin
+// pthread_priority_t QoS codecs and direct explicit override lifecycle.
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -7,6 +7,7 @@
 
 #include <windows.h>
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 
@@ -15,6 +16,7 @@ namespace {
 using DarwinPriority = std::uint64_t;
 using DarwinFlags = std::uint64_t;
 using QosClass = std::uint32_t;
+using MachPort = std::uint32_t;
 
 constexpr QosClass QosUnspecified = 0x00;
 constexpr QosClass QosMaintenance = 0x05;
@@ -59,6 +61,10 @@ int main(int argc, char **argv) {
                                       DarwinFlags *, QosClass *);
   using SchedEncode = DarwinPriority (*)(std::int32_t, DarwinFlags);
   using SchedDecode = std::int32_t (*)(DarwinPriority, DarwinFlags *);
+  using DirectStart = int (*)(MachPort, DarwinPriority, void *);
+  using DirectEnd = int (*)(MachPort, void *);
+  using LegacyStart = int (*)(MachPort, DarwinPriority);
+  using LegacyEnd = int (*)(MachPort);
 
   auto QosEncode = reinterpret_cast<Encode>(
       requireExport(Host, "_pthread_qos_class_encode"));
@@ -72,8 +78,17 @@ int main(int argc, char **argv) {
       requireExport(Host, "_pthread_sched_pri_encode"));
   auto PriorityDecode = reinterpret_cast<SchedDecode>(
       requireExport(Host, "_pthread_sched_pri_decode"));
+  auto StartOverride = reinterpret_cast<DirectStart>(
+      requireExport(Host, "_pthread_qos_override_start_direct"));
+  auto EndOverride = reinterpret_cast<DirectEnd>(
+      requireExport(Host, "_pthread_qos_override_end_direct"));
+  auto StartLegacyOverride = reinterpret_cast<LegacyStart>(
+      requireExport(Host, "_pthread_override_qos_class_start_direct"));
+  auto EndLegacyOverride = reinterpret_cast<LegacyEnd>(
+      requireExport(Host, "_pthread_override_qos_class_end_direct"));
   if (!QosEncode || !QosDecode || !QosOverrideEncode || !QosOverrideDecode ||
-      !PriorityEncode || !PriorityDecode) {
+      !PriorityEncode || !PriorityDecode || !StartOverride || !EndOverride ||
+      !StartLegacyOverride || !EndLegacyOverride) {
     FreeLibrary(Host);
     return 1;
   }
@@ -121,7 +136,6 @@ int main(int argc, char **argv) {
 
   // Darwin pthread_priority_t is unsigned long on LP64. Upper bits therefore
   // arrive in the ABI even though Apple's current compact layout uses low 32.
-  // Prove the bridge accepts the 64-bit carrier and ignores unrelated high bits.
   const DarwinPriority WideCarrier = Interactive | 0x1234000000000000ULL;
   Relative = 0;
   Flags = 0;
@@ -131,13 +145,11 @@ int main(int argc, char **argv) {
     return fail("LP64 pthread_priority_t carrier was truncated or misdecoded");
   }
 
-  // Optional output pointers are part of the SPI contract.
   if (QosDecode(Interactive, nullptr, nullptr) != QosUserInteractive) {
     FreeLibrary(Host);
     return fail("QoS decode rejected null optional outputs");
   }
 
-  // Event-manager/scheduler encodings intentionally do not report a QoS class.
   Relative = 99;
   Flags = 0;
   if (QosDecode(EventManagerFlag, &Relative, &Flags) != QosUnspecified ||
@@ -146,7 +158,6 @@ int main(int argc, char **argv) {
     return fail("event-manager priority was incorrectly decoded as QoS");
   }
 
-  // Cover every class mapping, including the private maintenance class.
   const QosClass Classes[] = {QosMaintenance, QosBackground, QosUtility,
                               QosDefault, QosUserInitiated,
                               QosUserInteractive};
@@ -161,7 +172,6 @@ int main(int argc, char **argv) {
     }
   }
 
-  // Unknown classes map to THREAD_QOS_UNSPECIFIED exactly as libpthread does.
   if (QosEncode(0xffffffffu, -7, OvercommitFlag) != OvercommitFlag) {
     FreeLibrary(Host);
     return fail("unknown QoS class did not encode as unspecified");
@@ -206,7 +216,53 @@ int main(int argc, char **argv) {
     return fail("non-scheduler priority was misdecoded as scheduler priority");
   }
 
-  std::printf("[darwin-pthread-qos-smoke] priority codec semantics passed\n");
+  // XNU explicit QoS overrides are keyed by target Mach thread and resource.
+  // Repeated starts for one resource are reference-counted; removal of a
+  // missing/underflowed resource reports EFAULT.
+  constexpr MachPort Thread = 0x1234;
+  int ResourceA = 0;
+  int ResourceB = 0;
+  const DarwinPriority DirectPriority = QosEncode(QosUtility, -3, 0);
+  const DarwinPriority HigherPriority = QosEncode(QosUserInteractive, 0, 0);
+  if (StartOverride(Thread, DirectPriority, &ResourceA) != 0 ||
+      StartOverride(Thread, HigherPriority, &ResourceA) != 0) {
+    FreeLibrary(Host);
+    return fail("direct QoS override did not accept paired repeated starts");
+  }
+  if (EndOverride(Thread, &ResourceB) != EFAULT) {
+    FreeLibrary(Host);
+    return fail("direct QoS override did not reject a mismatched resource");
+  }
+  if (EndOverride(Thread, &ResourceA) != 0 ||
+      EndOverride(Thread, &ResourceA) != 0) {
+    FreeLibrary(Host);
+    return fail("direct QoS override reference count did not drain cleanly");
+  }
+  if (EndOverride(Thread, &ResourceA) != EFAULT) {
+    FreeLibrary(Host);
+    return fail("direct QoS override underflow did not report EFAULT");
+  }
+  if (StartOverride(0, DirectPriority, &ResourceA) != ESRCH ||
+      EndOverride(0, &ResourceA) != ESRCH) {
+    FreeLibrary(Host);
+    return fail("null Mach thread target did not report ESRCH");
+  }
+  if (StartOverride(Thread, Sched, &ResourceA) != EINVAL ||
+      StartOverride(Thread, EventManagerFlag, &ResourceA) != EINVAL) {
+    FreeLibrary(Host);
+    return fail("non-QoS priority was accepted as an explicit QoS override");
+  }
+
+  // The deprecated wrappers use an implicit per-calling-thread resource. Their
+  // start/end pair must therefore have the same lifecycle and underflow shape.
+  if (StartLegacyOverride(Thread, DirectPriority) != 0 ||
+      EndLegacyOverride(Thread) != 0 ||
+      EndLegacyOverride(Thread) != EFAULT) {
+    FreeLibrary(Host);
+    return fail("legacy direct override wrapper did not preserve pairing");
+  }
+
+  std::printf("[darwin-pthread-qos-smoke] codec/override semantics passed\n");
   FreeLibrary(Host);
   return 0;
 }
