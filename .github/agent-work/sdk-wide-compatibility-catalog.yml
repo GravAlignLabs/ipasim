@@ -12,9 +12,12 @@ scope:
   - tools/compat_surface/test_sdk_catalog.py
   - tools/compat_surface/compat_planner.py
   - tools/compat_surface/test_compat_planner.py
+  - tools/compat_surface/bulk_compatibility.py
+  - tools/compat_surface/test_bulk_compatibility.py
   - tools/compat_surface/semantic_providers.json
   - tools/compat_surface/generate_semantic_routes.py
   - tools/compat_surface/test_generate_semantic_routes.py
+  - tools/compat_surface/test_semantic_provider_fixture.py
   - tools/compat_surface/README.md
   - src/IpaSimulator/ApprovedSemanticImportRoutes.inc
   - .github/workflows/compat-surface.yml
@@ -22,12 +25,12 @@ scope:
 
 branch: compat-sdk-wide-catalog
 started_utc: 2026-08-31T19:32:00Z
-updated_utc: 2026-08-31T19:42:00Z
+updated_utc: 2026-08-31T19:44:00Z
 base_sha: b61e0c4298958ae200074a1b903df5d25e1d6550
 expected_pr: https://github.com/GravAlignLabs/ipasim/pull/54
 
 next_checkpoint: >-
-  Extend PR #54 from catalog-only evidence into a deterministic compatibility planner plus generated production semantic-route table, with the existing _getpid route preserved as the first manifest-backed production record and SDK-wide rows classified before runtime execution.
+  Extend PR #54 from catalog-only evidence into a deterministic one-command SDK-wide mechanical pipeline, compatibility planner, and generated production semantic-route table. Preserve _getpid as the first manifest-backed production record while classifying the rest of the SDK before runtime execution.
 
 notes: >-
-  Keep SDK/compiler evidence separate from semantic approval. The planner may aggressively classify and generate mechanical coverage, but only explicit semantic-provider records may become production routes. Provider addresses remain runtime facts and must continue exact live-address verification in the loader. Non-C metadata, data/TLS exports, callbacks, variadics, no-prototype declarations, unsupported ABI classes, and unresolved semantics must remain explicit and fail closed. Do not touch active pthread/runtime scope.
+  Keep SDK/compiler evidence separate from semantic approval. The planner may aggressively classify and generate mechanical coverage, but only explicit semantic-provider records may become production routes. Provider addresses remain runtime facts and must continue exact live-address verification in the loader. Non-C metadata, data/TLS exports, callbacks, variadics, no-prototype declarations, unsupported ABI classes, and unresolved semantics must remain explicit and fail closed. Do not touch active pthread/runtime scope, SysTranslator.cpp, or guest-thread lifecycle code in this PR.
