@@ -92,6 +92,19 @@ FARPROC requireExport(HMODULE Module, const char *Name) {
   return Proc;
 }
 
+bool descriptorListContains(const DarwinProcFdInfo *Fds, int Bytes,
+                            int Descriptor) {
+  if (Bytes <= 0 ||
+      (Bytes % static_cast<int>(sizeof(DarwinProcFdInfo))) != 0)
+    return false;
+  const int Count = Bytes / static_cast<int>(sizeof(DarwinProcFdInfo));
+  for (int Index = 0; Index < Count; ++Index) {
+    if (Fds[Index].Descriptor == Descriptor)
+      return true;
+  }
+  return false;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -111,10 +124,21 @@ int main(int argc, char **argv) {
       "vm_page_size",
       "NDR_record",
       "open",
+      "open$NOCANCEL",
       "close",
+      "close$NOCANCEL",
+      "fcntl",
+      "fcntl$NOCANCEL",
       "lseek",
+      "pread",
+      "pread$NOCANCEL",
+      "pwrite",
+      "pwrite$NOCANCEL",
       "read",
+      "read$NOCANCEL",
       "write",
+      "write$NOCANCEL",
+      "sigsuspend$NOCANCEL",
       "socket",
       "__interposition_sim_system_csops",
       "__interposition_sim_system_csops_audittoken",
@@ -131,6 +155,35 @@ int main(int argc, char **argv) {
       FreeLibrary(Host);
       return 1;
     }
+  }
+
+  struct AliasPair {
+    const char *Normal;
+    const char *NoCancel;
+  };
+  const AliasPair AliasPairs[] = {
+      {"open", "open$NOCANCEL"},
+      {"close", "close$NOCANCEL"},
+      {"fcntl", "fcntl$NOCANCEL"},
+      {"pread", "pread$NOCANCEL"},
+      {"pwrite", "pwrite$NOCANCEL"},
+      {"read", "read$NOCANCEL"},
+      {"write", "write$NOCANCEL"},
+  };
+  for (const AliasPair &Pair : AliasPairs) {
+    if (GetProcAddress(Host, Pair.Normal) != GetProcAddress(Host, Pair.NoCancel)) {
+      FreeLibrary(Host);
+      return fail("a no-cancel file syscall is not an alias of its base operation");
+    }
+  }
+
+  using DarwinError = int *(*)();
+  auto ErrorPointer =
+      reinterpret_cast<DarwinError>(GetProcAddress(Host, "__error"));
+  int *HostErrno = ErrorPointer();
+  if (!HostErrno) {
+    FreeLibrary(Host);
+    return fail("Darwin __error did not return thread-local errno storage");
   }
 
   using ContinuousTime = std::uint64_t (*)();
@@ -212,62 +265,107 @@ int main(int argc, char **argv) {
   using DarwinSeek = std::int64_t (*)(int, std::int64_t, int);
   using DarwinRead = std::intptr_t (*)(int, void *, std::size_t);
   using DarwinWrite = std::intptr_t (*)(int, const void *, std::size_t);
-  auto Open = reinterpret_cast<DarwinOpen>(GetProcAddress(Host, "open"));
-  auto Close = reinterpret_cast<DarwinClose>(GetProcAddress(Host, "close"));
+  using DarwinPread =
+      std::intptr_t (*)(int, void *, std::size_t, std::int64_t);
+  using DarwinPwrite =
+      std::intptr_t (*)(int, const void *, std::size_t, std::int64_t);
+  auto Open = reinterpret_cast<DarwinOpen>(GetProcAddress(Host, "open$NOCANCEL"));
+  auto Close =
+      reinterpret_cast<DarwinClose>(GetProcAddress(Host, "close$NOCANCEL"));
   auto Seek = reinterpret_cast<DarwinSeek>(GetProcAddress(Host, "lseek"));
-  auto Read = reinterpret_cast<DarwinRead>(GetProcAddress(Host, "read"));
-  auto Write = reinterpret_cast<DarwinWrite>(GetProcAddress(Host, "write"));
+  auto Read =
+      reinterpret_cast<DarwinRead>(GetProcAddress(Host, "read$NOCANCEL"));
+  auto Write =
+      reinterpret_cast<DarwinWrite>(GetProcAddress(Host, "write$NOCANCEL"));
+  auto Pread =
+      reinterpret_cast<DarwinPread>(GetProcAddress(Host, "pread$NOCANCEL"));
+  auto Pwrite =
+      reinterpret_cast<DarwinPwrite>(GetProcAddress(Host, "pwrite$NOCANCEL"));
 
   constexpr int DarwinOpenReadWrite = 0x00000002;
   constexpr int DarwinOpenCreate = 0x00000200;
   constexpr int DarwinOpenTruncate = 0x00000400;
   constexpr int DarwinSeekSet = 0;
+  constexpr int DarwinSeekCurrent = 1;
   const int GuestFd = Open("/darwin-kernel-smoke", DarwinOpenReadWrite |
                                                         DarwinOpenCreate |
                                                         DarwinOpenTruncate,
                            0600);
   if (GuestFd < 0) {
     FreeLibrary(Host);
-    return fail("Darwin open did not create a bridge-owned descriptor");
+    return fail("Darwin no-cancel open did not create a bridge-owned descriptor");
   }
 
   DarwinProcFdInfo Fds[64]{};
   const int FdBytes = ProcInfo(_getpid(), 1, 0, Fds, sizeof(Fds));
-  if (FdBytes <= 0 ||
-      (FdBytes % static_cast<int>(sizeof(DarwinProcFdInfo))) != 0) {
-    Close(GuestFd);
-    FreeLibrary(Host);
-    return fail("PROC_PIDLISTFDS did not return bridge-owned descriptors");
-  }
-  bool FoundGuestFd = false;
-  const int FdCount = FdBytes / static_cast<int>(sizeof(DarwinProcFdInfo));
-  for (int Index = 0; Index < FdCount; ++Index) {
-    if (Fds[Index].Descriptor == GuestFd) {
-      FoundGuestFd = true;
-      break;
-    }
-  }
-  if (!FoundGuestFd) {
+  if (FdBytes <= 0 || !descriptorListContains(Fds, FdBytes, GuestFd)) {
     Close(GuestFd);
     FreeLibrary(Host);
     return fail("PROC_PIDLISTFDS omitted the descriptor created by Darwin open");
   }
 
-  const char Payload[] = "ok";
-  if (Write(GuestFd, Payload, 2) != 2 || Seek(GuestFd, 0, DarwinSeekSet) != 0) {
+  const char Payload[] = "abcdef";
+  if (Write(GuestFd, Payload, 6) != 6 || Seek(GuestFd, 4, DarwinSeekSet) != 4) {
     Close(GuestFd);
     FreeLibrary(Host);
-    return fail("Darwin write/lseek did not preserve bridge descriptor semantics");
+    return fail("Darwin no-cancel write/lseek did not preserve descriptor semantics");
   }
-  char Readback[2] = {};
-  const std::intptr_t ReadCount = Read(GuestFd, Readback, 2);
+
+  char PositionedRead[2] = {};
+  if (Pread(GuestFd, PositionedRead, sizeof(PositionedRead), 1) != 2 ||
+      std::memcmp(PositionedRead, "bc", 2) != 0 ||
+      Seek(GuestFd, 0, DarwinSeekCurrent) != 4) {
+    Close(GuestFd);
+    FreeLibrary(Host);
+    return fail("pread did not read from its explicit offset without moving fd position");
+  }
+
+  const char Replacement[] = "XY";
+  if (Pwrite(GuestFd, Replacement, 2, 2) != 2 ||
+      Seek(GuestFd, 0, DarwinSeekCurrent) != 4) {
+    Close(GuestFd);
+    FreeLibrary(Host);
+    return fail("pwrite did not write at its explicit offset without moving fd position");
+  }
+
+  *HostErrno = 0;
+  if (Pread(GuestFd, PositionedRead, 1, -1) != -1 || *HostErrno != EINVAL) {
+    Close(GuestFd);
+    FreeLibrary(Host);
+    return fail("pread negative offset did not report EINVAL");
+  }
+
+  if (Seek(GuestFd, 0, DarwinSeekSet) != 0) {
+    Close(GuestFd);
+    FreeLibrary(Host);
+    return fail("Darwin lseek could not rewind positional-I/O test file");
+  }
+  char Readback[6] = {};
+  const std::intptr_t ReadCount = Read(GuestFd, Readback, sizeof(Readback));
+  if (ReadCount != 6 || std::memcmp(Readback, "abXYef", 6) != 0) {
+    Close(GuestFd);
+    FreeLibrary(Host);
+    return fail("pread/pwrite test payload did not persist at the expected offsets");
+  }
+
   if (Close(GuestFd) != 0) {
     FreeLibrary(Host);
-    return fail("Darwin close did not release the bridge-owned descriptor");
+    return fail("Darwin no-cancel close did not release the bridge-owned descriptor");
   }
-  if (ReadCount != 2 || std::memcmp(Readback, Payload, 2) != 0) {
+  std::memset(Fds, 0, sizeof(Fds));
+  const int AfterCloseBytes = ProcInfo(_getpid(), 1, 0, Fds, sizeof(Fds));
+  if (descriptorListContains(Fds, AfterCloseBytes, GuestFd)) {
     FreeLibrary(Host);
-    return fail("Darwin descriptor readback payload mismatch");
+    return fail("closed descriptor remained visible in PROC_PIDLISTFDS");
+  }
+
+  using SigSuspendNoCancel = int (*)(std::uint32_t);
+  auto SigSuspend = reinterpret_cast<SigSuspendNoCancel>(
+      GetProcAddress(Host, "sigsuspend$NOCANCEL"));
+  *HostErrno = 0;
+  if (SigSuspend(0) != -1 || *HostErrno != ENOTSUP) {
+    FreeLibrary(Host);
+    return fail("sigsuspend no-cancel must report ENOTSUP until signal masks exist");
   }
 
   using MemcmpZero = int (*)(const void *, std::size_t);
@@ -282,14 +380,6 @@ int main(int argc, char **argv) {
   if (CompareZero(ZeroWords, sizeof(ZeroWords)) == 0) {
     FreeLibrary(Host);
     return fail("memcmp_zero missed non-zero storage");
-  }
-
-  using DarwinError = int *(*)();
-  auto ErrorPointer = reinterpret_cast<DarwinError>(GetProcAddress(Host, "__error"));
-  int *HostErrno = ErrorPointer();
-  if (!HostErrno) {
-    FreeLibrary(Host);
-    return fail("Darwin __error did not return thread-local errno storage");
   }
 
   using Csops = int (*)(int, unsigned int, void *, std::size_t);
@@ -309,7 +399,7 @@ int main(int argc, char **argv) {
     return fail("workgroup creation must report ENOTSUP rather than fake success");
   }
 
-  std::printf("[darwin-kernel-smoke] process/time/VM/export semantics passed\n");
+  std::printf("[darwin-kernel-smoke] process/time/VM/no-cancel file semantics passed\n");
   FreeLibrary(Host);
   return 0;
 }
