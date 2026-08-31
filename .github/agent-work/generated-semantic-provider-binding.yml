@@ -11,14 +11,16 @@ scope:
   - src/IpaSimulator/GeneratedSemanticProvider.hpp
   - src/IpaSimulator/GeneratedSemanticProvider.cpp
   - src/IpaSimulator/GeneratedSemanticProviderSmoke.cpp
+  - src/IpaSimulator/GeneratedSemanticProvider.cmake
+  - src/CMakeLists.txt
   - tools/compat_surface/fixtures/semantic_provider_bridge_plan.json
   - tools/compat_surface/fixtures/semantic_provider_fixture.inc
-  - src/IpaSimulator/CMakeLists.txt
+  - tools/compat_surface/test_semantic_provider_fixture.py
   - .github/agent-work/generated-semantic-provider-binding.yml
 
 branch: compat-generated-semantic-provider
 started_utc: 2026-08-31T17:20:00Z
-updated_utc: 2026-08-31T17:20:00Z
+updated_utc: 2026-08-31T17:28:00Z
 base_sha: 7d7393286b160dd731d9d9dcc40cd761eff2063d
 expected_pr: draft-or-tbd
 
@@ -31,4 +33,5 @@ notes: >-
   No SysTranslator production routing in this increment. Do not touch pthread
   implementation files. Generated ABI metadata remains separate from semantic
   approval; the provider allowlist is explicit and the loaded module stays owned
-  for the lifetime of its bound function pointers.
+  for the lifetime of its bound function pointers. Build wiring lives after the
+  IpaSimulator subdirectory so the existing pthread CMake scope is not modified.
