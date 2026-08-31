@@ -1,0 +1,347 @@
+name: Manual full IPA acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: 'Frozen test IPA HTTPS URL (optional when repository variable IPASIM_ACCEPTANCE_IPA_URL is set)'
+        required: false
+        type: string
+      ipa_sha256:
+        description: 'Frozen test IPA SHA256 (optional when repository variable IPASIM_ACCEPTANCE_IPA_SHA256 is set)'
+        required: false
+        type: string
+      runtime_cache_key:
+        description: 'Version label for the encrypted RuntimeRoot archive cache; bump when the RuntimeRoot changes'
+        required: false
+        default: 'runtime-root-v1'
+        type: string
+
+concurrency:
+  group: manual-full-ipa-acceptance
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    name: Run frozen IPA through published ipaSim tester
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      INPUT_IPA_URL: ${{ inputs.ipa_url }}
+      INPUT_IPA_SHA256: ${{ inputs.ipa_sha256 }}
+      DEFAULT_IPA_URL: ${{ vars.IPASIM_ACCEPTANCE_IPA_URL }}
+      DEFAULT_IPA_SHA256: ${{ vars.IPASIM_ACCEPTANCE_IPA_SHA256 }}
+      RUNTIME_ARCHIVE_URL: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_URL }}
+      RUNTIME_ARCHIVE_SHA256: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_SHA256 }}
+      RUNTIME_ARCHIVE_PASSWORD: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_PASSWORD }}
+      RUNTIME_ARCHIVE_AUTH_HEADER: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_AUTH_HEADER }}
+
+    steps:
+      - name: Resolve immutable acceptance inputs
+        id: inputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $ipaUrl = if ($env:INPUT_IPA_URL) { $env:INPUT_IPA_URL.Trim() } else { $env:DEFAULT_IPA_URL.Trim() }
+          $ipaSha = if ($env:INPUT_IPA_SHA256) { $env:INPUT_IPA_SHA256.Trim().ToLowerInvariant() } else { $env:DEFAULT_IPA_SHA256.Trim().ToLowerInvariant() }
+          $runtimeSha = $env:RUNTIME_ARCHIVE_SHA256.Trim().ToLowerInvariant()
+          $runtimeCacheKey = '${{ inputs.runtime_cache_key }}'.Trim()
+
+          if (-not $ipaUrl) {
+            throw 'No frozen IPA URL was supplied. Set workflow input ipa_url or repository variable IPASIM_ACCEPTANCE_IPA_URL.'
+          }
+          if ($ipaSha -notmatch '^[0-9a-f]{64}$') {
+            throw 'Frozen IPA SHA256 must be exactly 64 hexadecimal characters.'
+          }
+          if (-not $env:RUNTIME_ARCHIVE_URL) {
+            throw 'Repository secret IPASIM_RUNTIME_ARCHIVE_URL is not configured.'
+          }
+          if ($runtimeSha -notmatch '^[0-9a-f]{64}$') {
+            throw 'Repository secret IPASIM_RUNTIME_ARCHIVE_SHA256 must be exactly 64 hexadecimal characters.'
+          }
+          if (-not $env:RUNTIME_ARCHIVE_PASSWORD) {
+            throw 'Repository secret IPASIM_RUNTIME_ARCHIVE_PASSWORD is not configured.'
+          }
+          if (-not $runtimeCacheKey) {
+            throw 'runtime_cache_key cannot be empty.'
+          }
+          if ($runtimeCacheKey.Length -gt 100 -or $runtimeCacheKey -notmatch '^[A-Za-z0-9._-]+$') {
+            throw 'runtime_cache_key must be <=100 characters and contain only letters, numbers, dot, underscore, or dash.'
+          }
+
+          "ipa_url=$ipaUrl" >> $env:GITHUB_OUTPUT
+          "ipa_sha256=$ipaSha" >> $env:GITHUB_OUTPUT
+          "runtime_cache_key=$runtimeCacheKey" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Frozen IPA SHA256: $ipaSha"
+          Write-Host "Runtime cache version: $runtimeCacheKey"
+
+      # The frozen synthetic IPA is intentionally public/reproducible test data,
+      # so caching it in this public repository is safe. Its immutable SHA is the
+      # cache key and is re-verified after every restore.
+      - name: Restore frozen IPA cache
+        id: ipa_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}\ipasim-frozen-ipa
+          key: ipasim-frozen-ipa-${{ steps.inputs.outputs.ipa_sha256 }}
+
+      - name: Download frozen IPA on cache miss
+        if: steps.ipa_cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        env:
+          IPA_URL: ${{ steps.inputs.outputs.ipa_url }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'ipasim-frozen-ipa'
+          $path = Join-Path $dir 'FrozenAcceptance.ipa'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          curl.exe -L --fail --silent --show-error $env:IPA_URL -o $path
+          if ($LASTEXITCODE -ne 0) { throw "Frozen IPA download failed with curl exit code $LASTEXITCODE." }
+
+      - name: Verify frozen IPA SHA256
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ steps.inputs.outputs.ipa_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Join-Path $env:RUNNER_TEMP 'ipasim-frozen-ipa\FrozenAcceptance.ipa'
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'FrozenAcceptance.ipa is missing.' }
+          $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Frozen IPA expected: $env:EXPECTED_SHA"
+          Write-Host "Frozen IPA actual:   $actual"
+          if ($actual -ne $env:EXPECTED_SHA) { throw 'Frozen IPA SHA256 verification failed.' }
+
+      - name: Save frozen IPA cache
+        if: steps.ipa_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}\ipasim-frozen-ipa
+          key: ipasim-frozen-ipa-${{ steps.inputs.outputs.ipa_sha256 }}
+
+      # Download BUILD.txt first because its published ZIP hash is the immutable
+      # tester cache identity. This avoids rebuilding ipaSim or trusting a stale
+      # extracted tester after master advances.
+      - name: Resolve published tester SHA
+        id: tester_meta
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $metaDir = Join-Path $env:RUNNER_TEMP 'ipasim-tester-meta'
+          $build = Join-Path $metaDir 'BUILD.txt'
+          New-Item -ItemType Directory -Path $metaDir -Force | Out-Null
+          $url = 'https://raw.githubusercontent.com/GravAlignLabs/ipasim/master/tester/windows/latest/BUILD.txt'
+          curl.exe -L --fail --silent --show-error $url -o $build
+          if ($LASTEXITCODE -ne 0) { throw "BUILD.txt download failed with curl exit code $LASTEXITCODE." }
+          $line = Get-Content -LiteralPath $build | Where-Object { $_ -like 'zip_sha256=*' } | Select-Object -First 1
+          if (-not $line) { throw 'Published BUILD.txt does not contain zip_sha256.' }
+          $sha = ($line -split '=', 2)[1].Trim().ToLowerInvariant()
+          if ($sha -notmatch '^[0-9a-f]{64}$') { throw 'Published tester zip_sha256 is invalid.' }
+          "zip_sha256=$sha" >> $env:GITHUB_OUTPUT
+          Write-Host "Published tester SHA256: $sha"
+
+      - name: Restore published tester cache
+        id: tester_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}\ipasim-published-tester
+          key: ipasim-published-tester-${{ steps.tester_meta.outputs.zip_sha256 }}
+
+      - name: Download and extract published tester on cache miss
+        if: steps.tester_cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ steps.tester_meta.outputs.zip_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'ipasim-published-tester'
+          $zip = Join-Path $root 'ipasim-ipa-tester.zip'
+          $extract = Join-Path $root 'tester'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          $url = 'https://raw.githubusercontent.com/GravAlignLabs/ipasim/master/tester/windows/latest/ipasim-ipa-tester.zip'
+          curl.exe -L --fail --silent --show-error $url -o $zip
+          if ($LASTEXITCODE -ne 0) { throw "Tester ZIP download failed with curl exit code $LASTEXITCODE." }
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:EXPECTED_SHA) { throw "Tester ZIP SHA256 mismatch: expected $env:EXPECTED_SHA, got $actual." }
+          if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
+          Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+
+      - name: Verify cached/published tester
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ steps.tester_meta.outputs.zip_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'ipasim-published-tester'
+          $zip = Join-Path $root 'ipasim-ipa-tester.zip'
+          $tester = Join-Path $root 'tester'
+          $cmd = Join-Path $tester 'Test-Ipa.cmd'
+          $ps1 = Join-Path $tester 'Test-Ipa.ps1'
+          $probe = Join-Path $tester 'IpaProbe.exe'
+          $smoke = Join-Path $tester 'Arm64Smoke.exe'
+          foreach ($path in @($zip, $cmd, $ps1, $probe, $smoke)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Published tester cache is incomplete: $path" }
+          }
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:EXPECTED_SHA) { throw "Cached tester ZIP SHA256 mismatch: expected $env:EXPECTED_SHA, got $actual." }
+
+      - name: Save published tester cache
+        if: steps.tester_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}\ipasim-published-tester
+          key: ipasim-published-tester-${{ steps.tester_meta.outputs.zip_sha256 }}
+
+      # RuntimeRoot is Apple runtime material and must never be persisted as
+      # plaintext in this public repository's Actions cache. Only the encrypted
+      # 7z archive is cached. The plaintext RuntimeRoot exists only in runner.temp
+      # on the ephemeral GitHub-hosted Windows VM and disappears with the job.
+      - name: Restore encrypted RuntimeRoot archive cache
+        id: runtime_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}\ipasim-runtime-archive
+          key: ipasim-encrypted-runtime-${{ steps.inputs.outputs.runtime_cache_key }}
+
+      - name: Download encrypted RuntimeRoot archive on cache miss
+        if: steps.runtime_cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive'
+          $archive = Join-Path $dir 'RuntimeRoot.7z'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+
+          $curlArgs = @('-L', '--fail', '--silent', '--show-error')
+          if ($env:RUNTIME_ARCHIVE_AUTH_HEADER) {
+            $curlArgs += @('-H', $env:RUNTIME_ARCHIVE_AUTH_HEADER)
+          }
+          $curlArgs += @($env:RUNTIME_ARCHIVE_URL, '-o', $archive)
+          & curl.exe @curlArgs
+          if ($LASTEXITCODE -ne 0) { throw "Encrypted RuntimeRoot download failed with curl exit code $LASTEXITCODE." }
+
+      - name: Verify encrypted RuntimeRoot archive SHA256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive\RuntimeRoot.7z'
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw 'RuntimeRoot.7z is missing.' }
+          $expected = $env:RUNTIME_ARCHIVE_SHA256.Trim().ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Encrypted RuntimeRoot SHA256 verified: $actual"
+          if ($actual -ne $expected) { throw 'Encrypted RuntimeRoot archive SHA256 verification failed.' }
+
+      - name: Save encrypted RuntimeRoot archive cache
+        if: steps.runtime_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}\ipasim-runtime-archive
+          key: ipasim-encrypted-runtime-${{ steps.inputs.outputs.runtime_cache_key }}
+
+      - name: Extract ephemeral RuntimeRoot
+        id: runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive\RuntimeRoot.7z'
+          $extract = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-expanded'
+          if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
+          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          if (-not (Test-Path -LiteralPath $sevenZip -PathType Leaf)) {
+            throw '7-Zip is not available on this GitHub-hosted Windows runner.'
+          }
+
+          & $sevenZip x $archive "-o$extract" "-p$env:RUNTIME_ARCHIVE_PASSWORD" -y | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "RuntimeRoot extraction failed with 7-Zip exit code $LASTEXITCODE." }
+
+          $candidates = @(
+            (Join-Path $extract 'RuntimeRoot'),
+            $extract
+          )
+          $runtimeRoot = $null
+          foreach ($candidate in $candidates) {
+            if ((Test-Path -LiteralPath (Join-Path $candidate 'System') -PathType Container) -and
+                (Test-Path -LiteralPath (Join-Path $candidate 'usr') -PathType Container)) {
+              $runtimeRoot = (Resolve-Path -LiteralPath $candidate).Path
+              break
+            }
+          }
+          if (-not $runtimeRoot) {
+            throw 'Extracted RuntimeRoot does not expose System and usr at its top level.'
+          }
+          "runtime_root=$runtimeRoot" >> $env:GITHUB_OUTPUT
+          Write-Host 'RuntimeRoot extracted and validated in ephemeral runner storage.'
+
+      - name: Run exact existing Test-Ipa.cmd acceptance path
+        id: acceptance
+        shell: pwsh
+        env:
+          RUNTIME_ROOT: ${{ steps.runtime.outputs.runtime_root }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tester = Join-Path $env:RUNNER_TEMP 'ipasim-published-tester\tester'
+          $testCmd = Join-Path $tester 'Test-Ipa.cmd'
+          $ipa = Join-Path $env:RUNNER_TEMP 'ipasim-frozen-ipa\FrozenAcceptance.ipa'
+          $log = Join-Path $env:RUNNER_TEMP 'manual-full-ipa-acceptance.log'
+          $wrapper = Join-Path $env:RUNNER_TEMP 'run-exact-test.cmd'
+
+          @"
+          @echo off
+          call "$testCmd" "$ipa" "$env:RUNTIME_ROOT"
+          exit /b %ERRORLEVEL%
+          "@ | Set-Content -LiteralPath $wrapper -Encoding ascii
+
+          Write-Host 'Running the exact public tester command:'
+          Write-Host '  Test-Ipa.cmd "<FrozenAcceptance.ipa>" "<RuntimeRoot>"'
+          Write-Host ''
+
+          # Test-Ipa.cmd intentionally pauses at the end for double-click/local
+          # use. Feed one line of stdin so the unchanged command file can run in
+          # non-interactive CI without altering its behavior or bypassing it.
+          'continue' | & cmd.exe /d /c $wrapper 2>&1 | Tee-Object -FilePath $log
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Publish acceptance summary
+        if: always()
+        shell: pwsh
+        env:
+          TEST_EXIT: ${{ steps.acceptance.outputs.exit_code }}
+          IPA_CACHE_HIT: ${{ steps.ipa_cache.outputs.cache-hit }}
+          TESTER_CACHE_HIT: ${{ steps.tester_cache.outputs.cache-hit }}
+          RUNTIME_CACHE_HIT: ${{ steps.runtime_cache.outputs.cache-hit }}
+          TESTER_SHA: ${{ steps.tester_meta.outputs.zip_sha256 }}
+          IPA_SHA: ${{ steps.inputs.outputs.ipa_sha256 }}
+        run: |
+          $summary = @(
+            '## Manual full IPA acceptance',
+            '',
+            "- Exact test path: `Test-Ipa.cmd <IPA> <RuntimeRoot>`",
+            "- Test exit code: $env:TEST_EXIT",
+            "- Frozen IPA SHA256: $env:IPA_SHA",
+            "- Published tester SHA256: $env:TESTER_SHA",
+            "- Frozen IPA cache hit: $env:IPA_CACHE_HIT",
+            "- Published tester cache hit: $env:TESTER_CACHE_HIT",
+            "- Encrypted RuntimeRoot archive cache hit: $env:RUNTIME_CACHE_HIT",
+            '',
+            'The RuntimeRoot is never cached or uploaded in plaintext.'
+          )
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload complete acceptance console log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-full-ipa-acceptance-log-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}\manual-full-ipa-acceptance.log
+            ${{ runner.temp }}\ipasim-tester-meta\BUILD.txt
