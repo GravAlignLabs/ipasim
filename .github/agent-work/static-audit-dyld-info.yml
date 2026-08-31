@@ -9,12 +9,14 @@ task: >-
 
 scope:
   - src/IpaSimulator/StaticSymbolAudit.hpp
+  - src/IpaSimulator/StaticSymbolAuditLegacyDyldInfo.hpp
   - src/IpaSimulator/StaticSymbolAuditSelfTest.hpp
+  - src/IpaSimulator/IpaProbe.cpp
   - .github/agent-work/static-audit-dyld-info.yml
 
 branch: compat-static-audit-dyld-info
 started_utc: 2026-08-31T01:45:00Z
-updated_utc: 2026-08-31T01:45:00Z
+updated_utc: 2026-08-31T01:49:00Z
 base_sha: a775612f6419844a130541fbb7a67454e213bf51
 expected_pr: tbd
 
