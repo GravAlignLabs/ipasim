@@ -1,0 +1,28 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Add a manual-only GitHub Actions workflow that runs the exact existing
+  Test-Ipa.cmd IPA + RuntimeRoot acceptance path on GitHub-hosted Windows,
+  with aggressive caching for the frozen IPA, RuntimeRoot, and published tester.
+
+scope:
+  - .github/workflows/manual-runtime-acceptance.yml
+  - tester/manual-runtime-acceptance.md
+  - .github/agent-work/manual-runtime-acceptance.yml
+
+branch: ci-manual-runtime-acceptance
+started_utc: 2026-08-31T00:12:00Z
+updated_utc: 2026-08-31T00:12:00Z
+base_sha: bd54ba1cfa8054d1aed59180f152c0effe91351d
+expected_pr: tbd
+
+next_checkpoint: >-
+  Implement workflow_dispatch only, unchanged Test-Ipa.cmd invocation, cache
+  restore/save keyed by immutable SHA values, full console log artifact, and
+  public local reproduction instructions.
+
+notes: >-
+  Workflow must not auto-run after merges. Public repository must not contain
+  Apple RuntimeRoot files or private application data.
