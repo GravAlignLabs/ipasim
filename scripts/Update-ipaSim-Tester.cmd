@@ -128,7 +128,6 @@ for %%F in (
   "libunicorn.dll"
   "Test-Ipa.cmd"
   "Test-Ipa.ps1"
-  "Update-ipaSim-Tester.cmd"
 ) do (
   if not exist "!STAGE!\%%~F" (
     echo ERROR: Expected tester file is missing from the ZIP:
