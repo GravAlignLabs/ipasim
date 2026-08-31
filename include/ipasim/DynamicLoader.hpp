@@ -100,6 +100,8 @@ public:
   static constexpr int PageSize = 4096;
 
 private:
+  friend class Emulator;
+
   struct MachOHandler {
     _dyld_objc_notify_mapped Mapped;
     _dyld_objc_notify_init Init;
@@ -117,8 +119,8 @@ private:
   LoadedLibrary *loadMachO(const std::string &Path);
   LoadedLibrary *loadPE(const std::string &Path);
   void handleMachOs(size_t HdrOffset, size_t HandlerOffset);
-  void mapAndRecordSharedMemory(Emulator &ExecutionEmulator, uint64_t Address,
-                                uint64_t Size, uc_prot Permissions);
+  void recordSharedMemory(uint64_t Address, uint64_t Size,
+                          uc_prot Permissions);
 
   static constexpr int R_SCATTERED = 0x80000000; // From `<mach-o/reloc.h>`
   Emulator &Emu;
