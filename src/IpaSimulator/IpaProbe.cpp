@@ -1,5 +1,6 @@
 #include "HostImportInventoryV2.hpp"
 #include "StaticSymbolAudit.hpp"
+#include "StaticSymbolAuditLegacyDyldInfo.hpp"
 #include "StaticSymbolAuditSelfTest.hpp"
 #include "ipasim/Probe.hpp"
 
@@ -19,11 +20,12 @@ int main(int argc, char **argv) {
         return 64;
     }
 
-    // Keep the audit's namespace rules executable, not merely documented. The
-    // synthetic IPA workflow runs IpaProbe on Windows, so a regression that
-    // accidentally turns two-level imports into a global symbol union fails the
-    // same public path contributors use.
-    if (!ipasim::probe::runStaticSymbolAuditSelfTest())
+    // Keep the audit's namespace and parser rules executable, not merely
+    // documented. Synthetic IPA validation runs IpaProbe on Windows, so both a
+    // two-level namespace regression and loss of legacy LC_DYLD_INFO export
+    // coverage fail the same public path contributors use.
+    if (!ipasim::probe::runStaticSymbolAuditSelfTest() ||
+        !ipasim::probe::runLegacyDyldInfoAuditSelfTest())
         return 70;
 
     const char *imagePath = argv[execute ? 2 : 1];
@@ -36,11 +38,12 @@ int main(int argc, char **argv) {
         // normal dyld-style loader starts. Unlike a global symbol union, this
         // audit preserves Mach-O's two-level namespace: each positive ordinal
         // is checked only against the library named by that ordinal, including
-        // ipaSim's explicit Darwin-host -> native bridge mapping. It is
-        // diagnostic only and never turns a missing runtime binding into
-        // success. The normal loader still supplies the authoritative first
-        // execution boundary below.
-        ipasim::probe::reportStaticClosureSymbolAudit(imagePath, runtimeRoot);
+        // ipaSim's explicit Darwin-host -> native bridge mapping. Both modern
+        // LC_DYLD_EXPORTS_TRIE and legacy LC_DYLD_INFO[_ONLY] export tries are
+        // considered. The audit is diagnostic only and never turns a missing
+        // runtime binding into success.
+        ipasim::probe::reportStaticClosureSymbolAuditComplete(imagePath,
+                                                              runtimeRoot);
 
         // Retain the focused simulator-host inventory as a compact compatibility
         // checkpoint for the three libsystem_sim_* layers. The closure-wide
