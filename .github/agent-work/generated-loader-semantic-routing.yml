@@ -13,13 +13,14 @@ scope:
   - src/IpaSimulator/GeneratedSemanticImportRouter.hpp
   - src/IpaSimulator/GeneratedSemanticImportRouter.cpp
   - src/IpaSimulator/GeneratedSemanticImportRouter.cmake
+  - src/IpaSimulator/GeneratedSemanticImportRouterSmoke.cpp
   - src/IpaSimulator/GeneratedSemanticProviderAdapters.inc
   - tools/compat_surface/test_semantic_provider_fixture.py
   - .github/agent-work/generated-loader-semantic-routing.yml
 
 branch: compat-generated-loader-routing
 started_utc: 2026-08-31T18:04:39Z
-updated_utc: 2026-08-31T18:08:55Z
+updated_utc: 2026-08-31T18:14:00Z
 base_sha: 0fdd57dcc1685f46331406b1c3390d6241c1bf67
 expected_pr: draft-or-tbd
 
