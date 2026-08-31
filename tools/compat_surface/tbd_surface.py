@@ -308,15 +308,16 @@ def parse_tbd_file(
     return parse_tbd_text(text, display_name or path.name, requested_targets)
 
 
-def _export_facts_for_target(
+def _export_facts_by_kind_for_target(
     interface: TbdInterface,
     target: str,
-) -> set[tuple[str, str, bool]]:
-    return {
-        (item.name, item.kind, item.weak)
-        for item in interface.exports
-        if target in item.targets
-    }
+) -> dict[str, set[tuple[str, bool]]]:
+    facts: dict[str, set[tuple[str, bool]]] = {}
+    for item in interface.exports:
+        if target not in item.targets:
+            continue
+        facts.setdefault(item.kind, set()).add((item.name, item.weak))
+    return facts
 
 
 def _reexport_facts_for_target(
@@ -331,24 +332,37 @@ def _reexport_facts_for_target(
 
 
 def _validate_mixed_format_evidence(group: Sequence[TbdInterface]) -> None:
-    """Allow representation-version duplicates only when overlapping facts agree."""
+    """Reconcile format generations while rejecting contradictory shared facts.
+
+    Older standalone stubs can carry export categories that newer umbrella v4
+    documents omit (for example Objective-C class metadata).  Absence of a
+    category in one representation is therefore not negative evidence.  When
+    both representations do describe the same category for the same target,
+    however, their normalized facts must agree exactly.
+    """
     for left_index, left in enumerate(group):
         for right in group[left_index + 1 :]:
             if left.format_version == right.format_version:
                 continue
             overlap = sorted(set(left.targets).intersection(right.targets))
             for target in overlap:
-                left_exports = _export_facts_for_target(left, target)
-                right_exports = _export_facts_for_target(right, target)
-                if left_exports != right_exports:
-                    versions = sorted({left.format_version, right.format_version})
-                    raise TbdParseError(
-                        f"{left.install_name}: conflicting export evidence on {target} "
-                        f"across TAPI format versions {versions}"
-                    )
+                left_exports = _export_facts_by_kind_for_target(left, target)
+                right_exports = _export_facts_by_kind_for_target(right, target)
+                for kind in sorted(set(left_exports).intersection(right_exports)):
+                    if left_exports[kind] != right_exports[kind]:
+                        versions = sorted({left.format_version, right.format_version})
+                        raise TbdParseError(
+                            f"{left.install_name}: conflicting export evidence on {target} "
+                            f"across TAPI format versions {versions} for kind {kind!r}"
+                        )
+
                 left_reexports = _reexport_facts_for_target(left, target)
                 right_reexports = _reexport_facts_for_target(right, target)
-                if left_reexports != right_reexports:
+                if (
+                    left_reexports
+                    and right_reexports
+                    and left_reexports != right_reexports
+                ):
                     versions = sorted({left.format_version, right.format_version})
                     raise TbdParseError(
                         f"{left.install_name}: conflicting re-export evidence on {target} "
