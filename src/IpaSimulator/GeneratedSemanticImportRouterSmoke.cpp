@@ -22,8 +22,8 @@ std::uint64_t addressOf(FARPROC proc) {
     return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(proc));
 }
 
-bool proveUnrelatedLookupStaysOnExistingPath(HMODULE bridge) {
-    std::puts("[generated-semantic-import-router-smoke] unrelated lookup begin");
+bool proveSymbolAbsentFromTableStaysOnExistingPath(HMODULE bridge) {
+    std::puts("[generated-semantic-import-router-smoke] absent table route begin");
 
     FARPROC getuid = GetProcAddress(bridge, "getuid");
     if (!getuid) {
@@ -37,21 +37,46 @@ bool proveUnrelatedLookupStaysOnExistingPath(HMODULE bridge) {
     if (selection != GeneratedSemanticImportSelection::NotCandidate || !error.empty()) {
         std::fprintf(
             stderr,
-            "[generated-semantic-import-router-smoke] unrelated lookup changed routing: %s\n",
+            "[generated-semantic-import-router-smoke] symbol absent from route table changed routing: %s\n",
             error.c_str());
         return false;
     }
     if (isSelectedGeneratedSemanticImport(addressOf(getuid))) {
-        std::fprintf(stderr, "[generated-semantic-import-router-smoke] unrelated address was selected\n");
+        std::fprintf(stderr, "[generated-semantic-import-router-smoke] absent-table address was selected\n");
         return false;
     }
 
-    std::puts("[generated-semantic-import-router-smoke] unrelated lookup passed");
+    std::puts("[generated-semantic-import-router-smoke] absent table route passed");
+    return true;
+}
+
+bool proveApprovedSymbolWithoutModuleFailsClosed(HMODULE bridge) {
+    std::puts("[generated-semantic-import-router-smoke] approved route missing module begin");
+
+    FARPROC getpid = GetProcAddress(bridge, "getpid");
+    if (!getpid) {
+        std::fprintf(stderr, "[generated-semantic-import-router-smoke] bridge getpid export is missing\n");
+        return false;
+    }
+
+    std::string error;
+    const auto selection = selectGeneratedSemanticImport(
+        "getpid", nullptr, addressOf(getpid), &error);
+    if (selection != GeneratedSemanticImportSelection::Rejected ||
+        error.find("without a module") == std::string::npos) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] approved route without module did not fail closed: %s\n",
+            error.c_str());
+        return false;
+    }
+
+    std::puts("[generated-semantic-import-router-smoke] approved route missing module passed");
     return true;
 }
 
 bool proveSameSpellingOtherModuleStaysOnExistingPath() {
-    std::puts("[generated-semantic-import-router-smoke] non-provider spelling begin");
+    std::puts("[generated-semantic-import-router-smoke] non-provider module begin");
 
     HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
     FARPROC unrelated = kernel32 ? GetProcAddress(kernel32, "GetCurrentProcessId") : nullptr;
@@ -71,12 +96,12 @@ bool proveSameSpellingOtherModuleStaysOnExistingPath() {
         return false;
     }
 
-    std::puts("[generated-semantic-import-router-smoke] non-provider spelling passed");
+    std::puts("[generated-semantic-import-router-smoke] non-provider module passed");
     return true;
 }
 
 bool proveApprovedProviderMismatchFailsClosed(HMODULE bridge) {
-    std::puts("[generated-semantic-import-router-smoke] provider mismatch rejection begin");
+    std::puts("[generated-semantic-import-router-smoke] provider address mismatch begin");
 
     FARPROC getuid = GetProcAddress(bridge, "getuid");
     if (!getuid) {
@@ -100,12 +125,12 @@ bool proveApprovedProviderMismatchFailsClosed(HMODULE bridge) {
         return false;
     }
 
-    std::puts("[generated-semantic-import-router-smoke] provider mismatch rejection passed");
+    std::puts("[generated-semantic-import-router-smoke] provider address mismatch passed");
     return true;
 }
 
 bool proveGeneratedGetpidRoute(HMODULE bridge) {
-    std::puts("[generated-semantic-import-router-smoke] generated getpid route begin");
+    std::puts("[generated-semantic-import-router-smoke] table-driven getpid route begin");
 
     FARPROC getpid = GetProcAddress(bridge, "getpid");
     if (!getpid) {
@@ -120,7 +145,7 @@ bool proveGeneratedGetpidRoute(HMODULE bridge) {
     if (selection != GeneratedSemanticImportSelection::Selected || !error.empty()) {
         std::fprintf(
             stderr,
-            "[generated-semantic-import-router-smoke] approved _getpid route was not selected: %s\n",
+            "[generated-semantic-import-router-smoke] approved table-driven _getpid route was not selected: %s\n",
             error.c_str());
         return false;
     }
@@ -148,14 +173,14 @@ bool proveGeneratedGetpidRoute(HMODULE bridge) {
         return false;
     }
 
-    std::puts("[generated-semantic-import-router-smoke] generated getpid route passed");
+    std::puts("[generated-semantic-import-router-smoke] table-driven getpid route passed");
     return true;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    std::puts("[generated-semantic-import-router-smoke] loader route proof begin");
+    std::puts("[generated-semantic-import-router-smoke] table-driven loader route proof begin");
 
     if (argc != 2 || !argv[1] || !*argv[1]) {
         std::fprintf(
@@ -185,7 +210,8 @@ int main(int argc, char** argv) {
     }
 
     const bool passed =
-        proveUnrelatedLookupStaysOnExistingPath(bridge) &&
+        proveSymbolAbsentFromTableStaysOnExistingPath(bridge) &&
+        proveApprovedSymbolWithoutModuleFailsClosed(bridge) &&
         proveSameSpellingOtherModuleStaysOnExistingPath() &&
         proveApprovedProviderMismatchFailsClosed(bridge) &&
         proveGeneratedGetpidRoute(bridge);
@@ -195,6 +221,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::puts("[generated-semantic-import-router-smoke] all loader route proofs passed");
+    std::puts("[generated-semantic-import-router-smoke] all table-driven loader route proofs passed");
     return 0;
 }
