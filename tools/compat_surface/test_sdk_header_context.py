@@ -157,6 +157,89 @@ class SdkHeaderContextTests(unittest.TestCase):
                 ["_inner_value"],
             )
 
+    def test_modular_usr_include_leaf_uses_declared_umbrella_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Synthetic.sdk"
+            package = "usr/include/PacketKit"
+            leaf = self.write(
+                root,
+                f"{package}/PacketLeaf.h",
+                "#pragma once\n"
+                "#ifndef PACKETKIT_CONTEXT\n"
+                "#error Include PacketKit.h instead of this file\n"
+                "#endif\n"
+                "extern int packet_leaf_value(int value);\n",
+            )
+            self.write(
+                root,
+                f"{package}/PacketKit.h",
+                "#pragma once\n"
+                "#define PACKETKIT_CONTEXT 1\n"
+                "#include \"PacketLeaf.h\"\n"
+                "extern int packet_umbrella_value(void);\n",
+            )
+            self.write(
+                root,
+                f"{package}/module.modulemap",
+                'module PacketKit [system] {\n'
+                '  umbrella header "PacketKit.h"\n'
+                '  export *\n'
+                '}\n',
+            )
+            display = f"{package}/PacketLeaf.h"
+
+            with self.assertRaises(header_surface.HeaderParseError):
+                header_surface.analyze_header(
+                    leaf,
+                    display,
+                    sdk_root=root,
+                )
+
+            manifest = sdk_header_surface.build_parallel_manifest(
+                [(leaf, display)],
+                jobs=1,
+                sdk_root=root,
+            )
+            self.assertEqual(
+                [item["symbol"] for item in manifest["signatures"]],
+                ["_packet_leaf_value"],
+            )
+            self.assertNotIn("_packet_umbrella_value", json.dumps(manifest))
+
+    def test_libcxx_leaf_uses_sdk_v1_root_and_objective_cxx_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Synthetic.sdk"
+            libcxx = "usr/include/c++/v1"
+            self.write(
+                root,
+                f"{libcxx}/__config",
+                "#pragma once\n#define LIBCPP_CONTEXT 1\n",
+            )
+            leaf = self.write(
+                root,
+                f"{libcxx}/__algorithm/probe.h",
+                "#pragma once\n"
+                "#include <__config>\n"
+                "#ifndef LIBCPP_CONTEXT\n#error missing sdk libcxx root\n#endif\n"
+                "namespace demo { template <class T> T ignored_template(T value); }\n"
+                "extern \"C\" int libcxx_probe(int value);\n",
+            )
+            display = f"{libcxx}/__algorithm/probe.h"
+
+            manifest = sdk_header_surface.build_parallel_manifest(
+                [(leaf, display)],
+                jobs=1,
+                sdk_root=root,
+            )
+            self.assertEqual(
+                [item["symbol"] for item in manifest["signatures"]],
+                ["_libcxx_probe"],
+            )
+            self.assertGreaterEqual(
+                manifest["summary"]["skipped_cxx_declaration_count"],
+                1,
+            )
+
     def test_target_unavailable_declaration_is_recorded_not_silently_dropped(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "Synthetic.sdk"
