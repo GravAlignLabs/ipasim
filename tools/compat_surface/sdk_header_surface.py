@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""Parallel and shardable SDK-scale Clang header signature analysis.
+"""Parallel, contextual, and shardable SDK-scale header signature analysis.
 
-``header_surface.analyze_header`` remains the authoritative per-header parser.
-Sharding only partitions the deterministic sorted header inventory. Every shard
-still runs the same parser for every header it owns, and merged manifests are
-accepted only when their coverage exactly reconstructs the requested SDK
-inventory without gaps, overlaps, or target drift.
+``header_surface`` remains authoritative for Clang AST/type canonicalization.
+This SDK layer adds the compilation context that real Apple framework headers
+expect: a framework header is parsed after its own umbrella header, framework
+search paths are reconstructed from the SDK layout, and declarations that
+Clang proves are unavailable for the selected target are recorded explicitly
+rather than being silently discarded or allowed to poison type recovery.
+
+Sharding only partitions the deterministic sorted physical-header inventory.
+Every header remains owned exactly once, and merged manifests are accepted only
+when coverage exactly reconstructs that inventory without gaps, overlaps, or
+target drift.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -26,6 +34,10 @@ DEFAULT_HEADER_JOBS = min(8, max(1, os.cpu_count() or 1))
 MAX_HEADER_JOBS = 64
 SHARD_COVERAGE_SCHEMA_VERSION = 1
 SHARD_STRATEGY = "sorted-round-robin"
+_UNAVAILABLE_DIAGNOSTIC = re.compile(
+    r"error:\s+'([^']+)'\s+is unavailable(?:\s*:\s*(.*))?$",
+    re.IGNORECASE,
+)
 
 
 class SdkHeaderSurfaceError(ValueError):
@@ -91,6 +103,518 @@ def _progress_line(
     )
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _framework_root(path: Path, sdk_root: Path) -> Path | None:
+    """Return the innermost containing .framework directory, if any."""
+    resolved = path.resolve()
+    root = sdk_root.resolve()
+    if not _is_within(resolved, root):
+        return None
+    for parent in resolved.parents:
+        if parent.name.endswith(".framework"):
+            return parent
+        if parent == root:
+            break
+    return None
+
+
+def _framework_context_header(path: Path, sdk_root: Path) -> Path | None:
+    framework = _framework_root(path, sdk_root)
+    if framework is None:
+        return None
+    name = framework.name[: -len(".framework")]
+    candidates = [
+        framework / "Headers" / f"{name}.h",
+        framework / "PrivateHeaders" / f"{name}.h",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return path.resolve()
+
+
+def _framework_search_paths(path: Path, sdk_root: Path) -> list[Path]:
+    """Return framework search roots in context-first precedence order."""
+    resolved = path.resolve()
+    root = sdk_root.resolve()
+    candidates: list[Path] = []
+
+    # The nearest Frameworks directory must win. This matters for nested
+    # frameworks (Accelerate/vecLib), Developer frameworks, and Cryptex
+    # overlays that can share a framework name with the ordinary SDK tree.
+    for parent in resolved.parents:
+        if parent.name in ("Frameworks", "PrivateFrameworks") and _is_within(
+            parent, root
+        ):
+            candidates.append(parent)
+        if parent == root:
+            break
+
+    candidates.extend(
+        [
+            root / "Developer" / "Library" / "Frameworks",
+            root / "System" / "Cryptexes" / "OS" / "System" / "Library" / "Frameworks",
+            root / "System" / "Cryptexes" / "OS" / "System" / "Library" / "PrivateFrameworks",
+            root / "System" / "Library" / "Frameworks",
+            root / "System" / "Library" / "PrivateFrameworks",
+        ]
+    )
+
+    result: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        key = os.path.normcase(str(candidate.resolve()))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate.resolve())
+    return result
+
+
+def _sdk_clang_base(
+    clang: str,
+    target: str,
+    language: str,
+    sdk_root: Path,
+    header_path: Path,
+    extra_args: Sequence[str],
+) -> list[str]:
+    """Build the same Clang baseline with SDK-context framework precedence."""
+    root = sdk_root.resolve()
+    args = [
+        clang,
+        "-target",
+        target,
+        "-x",
+        language,
+        "-fsyntax-only",
+        "-fno-builtin",
+        "-fblocks",
+        "-Wno-everything",
+        "-ferror-limit=50",
+        "-isysroot",
+        str(root),
+    ]
+    usr_include = root / "usr" / "include"
+    if usr_include.is_dir():
+        args += ["-isystem", str(usr_include)]
+    for framework_path in _framework_search_paths(header_path, root):
+        args += ["-F", str(framework_path)]
+    args += list(extra_args)
+    return args
+
+
+def _quote_import(path: Path) -> str:
+    return str(path.resolve()).replace("\\", "/").replace('"', '\\"')
+
+
+def _context_source(context_header: Path, target_header: Path) -> str:
+    lines = [f'#import "{_quote_import(context_header)}"']
+    if context_header.resolve() != target_header.resolve():
+        lines.append(f'#import "{_quote_import(target_header)}"')
+    return "\n".join(lines) + "\n"
+
+
+def _location_file(loc: dict) -> str | None:
+    for candidate in (
+        loc,
+        loc.get("expansionLoc") or {},
+        loc.get("spellingLoc") or {},
+    ):
+        value = candidate.get("file")
+        if isinstance(value, str) and value:
+            return os.path.normcase(os.path.abspath(value))
+    return None
+
+
+def _discover_raw_functions_for_source(
+    ast: dict,
+    *,
+    header: str,
+    source_path: Path,
+) -> tuple[list[header_surface.RawFunction], int, int]:
+    """Discover only declarations whose source location belongs to one header."""
+    functions: list[header_surface.RawFunction] = []
+    skipped_cxx = 0
+    skipped_static = 0
+    expected_file = os.path.normcase(os.path.abspath(str(source_path.resolve())))
+
+    for node, ancestors in header_surface._walk(ast):
+        if node.get("kind") != "FunctionDecl" or node.get("isImplicit"):
+            continue
+        loc = node.get("loc") or {}
+        if _location_file(loc) != expected_file:
+            continue
+        if any(kind in header_surface.SCOPE_BLOCKERS for kind in ancestors):
+            skipped_cxx += 1
+            continue
+        if node.get("storageClass") == "static":
+            skipped_static += 1
+            continue
+
+        name = node.get("name")
+        mangled = node.get("mangledName")
+        function_type = (node.get("type") or {}).get("qualType")
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(mangled, str)
+            or not mangled
+        ):
+            continue
+        if mangled.startswith("__Z"):
+            skipped_cxx += 1
+            continue
+        if not isinstance(function_type, str) or not function_type:
+            raise header_surface.HeaderParseError(
+                f"{header}: function {name} has no Clang type spelling"
+            )
+
+        params = []
+        for child in node.get("inner") or []:
+            if not isinstance(child, dict) or child.get("kind") != "ParmVarDecl":
+                continue
+            spelling = (child.get("type") or {}).get("qualType")
+            if not isinstance(spelling, str) or not spelling:
+                raise header_surface.HeaderParseError(
+                    f"{header}: parameter of {name} has no type spelling"
+                )
+            params.append(header_surface.RawParam(child.get("name"), spelling))
+        line, column = header_surface._source_position(loc)
+        functions.append(
+            header_surface.RawFunction(
+                header=header,
+                name=name,
+                symbol=mangled,
+                function_type=function_type,
+                params=tuple(params),
+                variadic=bool(node.get("variadic", False)),
+                line=line,
+                column=column,
+            )
+        )
+    return functions, skipped_cxx, skipped_static
+
+
+def _context_helper_source(
+    context_header: Path,
+    target_header: Path,
+    functions: Sequence[header_surface.RawFunction],
+) -> tuple[str, dict[str, header_surface.RawFunction]]:
+    helper_text, mapping = header_surface._helper_source(target_header, functions)
+    helper_lines = helper_text.splitlines()
+    imports = _context_source(context_header, target_header).rstrip("\n").splitlines()
+    # _helper_source always starts by including target_header. Replace that
+    # single include with the legitimate framework context imports.
+    return "\n".join(imports + helper_lines[1:]) + "\n", mapping
+
+
+def _target_unavailable_diagnostics(message: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in message.splitlines():
+        match = _UNAVAILABLE_DIAGNOSTIC.search(line.strip())
+        if not match:
+            continue
+        name = match.group(1)
+        reason = (match.group(2) or "unavailable for selected target").strip()
+        result.setdefault(name, reason)
+    return result
+
+
+def _unavailable_record(
+    function: header_surface.RawFunction,
+    reason: str,
+) -> dict:
+    return {
+        "symbol": function.symbol,
+        "name": function.name,
+        "function_type_spelling": function.function_type,
+        "reason": reason,
+        "source": {
+            "header": function.header,
+            "line": function.line,
+            "column": function.column,
+        },
+    }
+
+
+def _recover_contextual_signatures(
+    *,
+    raw: Sequence[header_surface.RawFunction],
+    context_header: Path,
+    target_header: Path,
+    display: str,
+    clang: str,
+    target: str,
+    sdk_root: Path,
+    extra_args: Sequence[str],
+    replacements: Sequence[tuple[str, str]],
+    timeout_seconds: int,
+) -> tuple[list[header_surface.HeaderSignature], list[dict]]:
+    remaining = list(raw)
+    unavailable: list[dict] = []
+    second_output = ""
+    helper_map: dict[str, header_surface.RawFunction] = {}
+
+    with tempfile.TemporaryDirectory(prefix="ipasim-sdk-header-surface-") as directory:
+        helper_path = Path(directory) / "signature_probe.m"
+        helper_replacements = list(replacements) + [(directory, "<TMP>")]
+
+        while remaining:
+            helper_text, helper_map = _context_helper_source(
+                context_header,
+                target_header,
+                remaining,
+            )
+            helper_path.write_text(helper_text, encoding="utf-8")
+            second_args = _sdk_clang_base(
+                clang,
+                target,
+                "objective-c",
+                sdk_root,
+                target_header,
+                extra_args,
+            )
+            second_args += [
+                "-Xclang",
+                "-ast-dump-all=json",
+                "-Xclang",
+                "-ast-dump-filter",
+                "-Xclang",
+                "__ipasim_signature_",
+                str(helper_path),
+            ]
+            try:
+                second_output = header_surface._run_clang(
+                    second_args,
+                    helper_replacements,
+                    timeout_seconds,
+                )
+            except header_surface.HeaderParseError as exc:
+                diagnostics = _target_unavailable_diagnostics(str(exc))
+                remaining_names = {function.name for function in remaining}
+                matched_names = remaining_names.intersection(diagnostics)
+                if not matched_names:
+                    raise
+                for function in remaining:
+                    if function.name in matched_names:
+                        unavailable.append(
+                            _unavailable_record(
+                                function,
+                                diagnostics[function.name],
+                            )
+                        )
+                remaining = [
+                    function
+                    for function in remaining
+                    if function.name not in matched_names
+                ]
+                helper_map = {}
+                second_output = ""
+                continue
+            break
+
+    if not remaining:
+        return [], unavailable
+
+    typedefs = {}
+    for obj in header_surface._json_objects(second_output):
+        if obj.get("kind") == "TypedefDecl" and obj.get("name") in helper_map:
+            typedefs[obj["name"]] = obj
+    missing = sorted(set(helper_map) - set(typedefs))
+    if missing:
+        raise header_surface.HeaderParseError(
+            f"{display}: Clang did not emit helper type metadata for {missing[:5]}"
+        )
+
+    recovered_by_name: dict[
+        str, tuple[dict, str, bool, bool, tuple[dict, ...]]
+    ] = {}
+    for helper, function in helper_map.items():
+        fn_type = header_surface._find_function_type(typedefs[helper])
+        if fn_type is None:
+            raise header_surface.HeaderParseError(
+                f"{display}: helper for {function.name} has no function type"
+            )
+        children = header_surface._type_children(fn_type)
+        if not children:
+            raise header_surface.HeaderParseError(
+                f"{display}: helper for {function.name} has no return type"
+            )
+        prototype = fn_type.get("kind") == "FunctionProtoType"
+        variadic = bool(fn_type.get("variadic", False))
+        param_types = tuple(
+            header_surface._type_descriptor(item) for item in children[1:]
+        )
+        if prototype and len(param_types) != len(function.params):
+            raise header_surface.HeaderParseError(
+                f"{display}: Clang type tree for {function.name} has "
+                f"{len(param_types)} parameters but declaration has "
+                f"{len(function.params)}"
+            )
+        recovered_by_name[function.name] = (
+            header_surface._type_descriptor(children[0]),
+            str(fn_type.get("cc", "cdecl")),
+            variadic,
+            prototype,
+            param_types,
+        )
+
+    signatures: list[header_surface.HeaderSignature] = []
+    for function in remaining:
+        return_type, cc, variadic, prototype, param_types = recovered_by_name[
+            function.name
+        ]
+        if variadic != function.variadic:
+            raise header_surface.HeaderParseError(
+                f"{display}: inconsistent variadic metadata for {function.name}"
+            )
+        signatures.append(
+            header_surface.HeaderSignature(
+                header=display,
+                name=function.name,
+                symbol=function.symbol,
+                function_type=function.function_type,
+                calling_convention=cc,
+                variadic=variadic,
+                prototype=prototype,
+                return_type=return_type,
+                parameter_types=param_types,
+                params=function.params,
+                line=function.line,
+                column=function.column,
+            )
+        )
+    return signatures, unavailable
+
+
+def _analyze_sdk_header(
+    path: Path,
+    display: str,
+    *,
+    clang: str,
+    target: str,
+    sdk_root: Path | None,
+    extra_args: Sequence[str],
+    timeout_seconds: int,
+) -> tuple[list[header_surface.HeaderSignature], dict]:
+    # Preserve the original parser byte-for-byte for ordinary headers. SDK
+    # context reconstruction is only needed inside Apple .framework bundles.
+    if sdk_root is None:
+        return header_surface.analyze_header(
+            path,
+            display,
+            clang=clang,
+            target=target,
+            sdk_root=sdk_root,
+            extra_args=extra_args,
+            timeout_seconds=timeout_seconds,
+        )
+
+    resolved = path.resolve()
+    root = sdk_root.resolve()
+    framework = _framework_root(resolved, root)
+    if framework is None:
+        return header_surface.analyze_header(
+            resolved,
+            display,
+            clang=clang,
+            target=target,
+            sdk_root=root,
+            extra_args=extra_args,
+            timeout_seconds=timeout_seconds,
+        )
+    if not resolved.is_file():
+        raise header_surface.HeaderParseError(f"header does not exist: {display}")
+
+    context_header = _framework_context_header(resolved, root) or resolved
+    replacements = [(str(resolved), display), (str(root), "<SDKROOT>")]
+    if context_header != resolved:
+        replacements.append((str(context_header), "<FRAMEWORK-CONTEXT>"))
+
+    with tempfile.TemporaryDirectory(prefix="ipasim-sdk-header-context-") as directory:
+        source_path = Path(directory) / "header_context.m"
+        source_path.write_text(
+            _context_source(context_header, resolved),
+            encoding="utf-8",
+        )
+        first_replacements = replacements + [(directory, "<TMP>")]
+        first_args = _sdk_clang_base(
+            clang,
+            target,
+            "objective-c",
+            root,
+            resolved,
+            extra_args,
+        )
+        first_args += ["-Xclang", "-ast-dump=json", str(source_path)]
+        first_output = header_surface._run_clang(
+            first_args,
+            first_replacements,
+            timeout_seconds,
+        )
+
+    objects = header_surface._json_objects(first_output)
+    if len(objects) != 1:
+        raise header_surface.HeaderParseError(
+            f"{display}: expected one Clang translation-unit AST, got {len(objects)}"
+        )
+    raw, skipped_cxx, skipped_static = _discover_raw_functions_for_source(
+        objects[0],
+        header=display,
+        source_path=resolved,
+    )
+    if not raw:
+        return [], {
+            "skipped_cxx": skipped_cxx,
+            "skipped_static": skipped_static,
+            "declarations": 0,
+        }
+
+    signatures, unavailable = _recover_contextual_signatures(
+        raw=raw,
+        context_header=context_header,
+        target_header=resolved,
+        display=display,
+        clang=clang,
+        target=target,
+        sdk_root=root,
+        extra_args=extra_args,
+        replacements=replacements,
+        timeout_seconds=timeout_seconds,
+    )
+    stats = {
+        "skipped_cxx": skipped_cxx,
+        "skipped_static": skipped_static,
+        "declarations": len(raw),
+    }
+    if unavailable:
+        stats["target_unavailable"] = unavailable
+    return signatures, stats
+
+
+def _sorted_unavailable(records: Sequence[dict]) -> list[dict]:
+    return sorted(
+        records,
+        key=lambda item: (
+            (item.get("source") or {}).get("header") or "",
+            (item.get("source") or {}).get("line") or 0,
+            (item.get("source") or {}).get("column") or 0,
+            item.get("symbol") or "",
+            item.get("name") or "",
+        ),
+    )
+
+
 def build_parallel_manifest(
     inputs: Sequence[tuple[Path, str]],
     *,
@@ -118,7 +642,7 @@ def build_parallel_manifest(
 
     def analyze(index: int) -> tuple[int, list, dict]:
         path, display = ordered[index]
-        signatures, stats = header_surface.analyze_header(
+        signatures, stats = _analyze_sdk_header(
             path,
             display,
             clang=clang,
@@ -193,6 +717,7 @@ def build_parallel_manifest(
 
     all_signatures = []
     all_stats = []
+    unavailable = []
     for index in range(len(ordered)):
         signatures = signatures_by_index[index]
         stats = stats_by_index[index]
@@ -202,13 +727,21 @@ def build_parallel_manifest(
             )
         all_signatures.extend(signatures)
         all_stats.append(stats)
+        unavailable.extend(stats.get("target_unavailable") or [])
 
-    return header_surface.build_manifest(
+    manifest = header_surface.build_manifest(
         all_signatures,
         target=target,
         headers=[display for _, display in ordered],
         stats=all_stats,
     )
+    if unavailable:
+        rendered_unavailable = _sorted_unavailable(unavailable)
+        manifest["summary"]["target_unavailable_declaration_count"] = len(
+            rendered_unavailable
+        )
+        manifest["target_unavailable"] = rendered_unavailable
+    return manifest
 
 
 def attach_shard_coverage(
@@ -336,6 +869,36 @@ def _merge_signature_group(symbol: str, group: Sequence[dict]) -> dict:
     }
 
 
+def _validate_unavailable_record(
+    item: dict,
+    *,
+    shard_index: int,
+    shard_headers: set[str],
+) -> None:
+    if not isinstance(item, dict):
+        raise SdkHeaderSurfaceError(
+            f"header shard {shard_index} contains a non-object unavailable record"
+        )
+    if not isinstance(item.get("symbol"), str) or not item.get("symbol"):
+        raise SdkHeaderSurfaceError(
+            f"header shard {shard_index} contains an invalid unavailable symbol"
+        )
+    if not isinstance(item.get("name"), str) or not item.get("name"):
+        raise SdkHeaderSurfaceError(
+            f"header shard {shard_index} contains an invalid unavailable name"
+        )
+    source = item.get("source")
+    if not isinstance(source, dict) or source.get("header") not in shard_headers:
+        raise SdkHeaderSurfaceError(
+            f"header shard {shard_index} unavailable declaration cites "
+            "a header outside its ownership"
+        )
+    if not isinstance(item.get("reason"), str) or not item.get("reason"):
+        raise SdkHeaderSurfaceError(
+            f"header shard {shard_index} unavailable declaration has no reason"
+        )
+
+
 def merge_shard_manifests(
     manifests: Sequence[dict],
     *,
@@ -354,7 +917,10 @@ def merge_shard_manifests(
     for manifest in manifests:
         if not isinstance(manifest, dict):
             raise SdkHeaderSurfaceError("header shard manifest must be an object")
-        if manifest.get("schema_version") != 1 or manifest.get("kind") != "header-signature-surface":
+        if (
+            manifest.get("schema_version") != 1
+            or manifest.get("kind") != "header-signature-surface"
+        ):
             raise SdkHeaderSurfaceError("unsupported header shard manifest schema")
         if manifest.get("target") != target:
             raise SdkHeaderSurfaceError(
@@ -392,6 +958,7 @@ def merge_shard_manifests(
     declaration_count = 0
     skipped_cxx = 0
     skipped_static = 0
+    unavailable_records: list[dict] = []
     owned_headers: set[str] = set()
 
     for shard_index in range(declared_shard_count):
@@ -463,6 +1030,26 @@ def merge_shard_manifests(
                 )
             signature_groups.setdefault(symbol, []).append(item)
 
+        shard_unavailable = manifest.get("target_unavailable") or []
+        if not isinstance(shard_unavailable, list):
+            raise SdkHeaderSurfaceError(
+                f"header shard {shard_index} unavailable payload is invalid"
+            )
+        declared_unavailable = int(
+            summary.get("target_unavailable_declaration_count", 0)
+        )
+        if declared_unavailable != len(shard_unavailable):
+            raise SdkHeaderSurfaceError(
+                f"header shard {shard_index} unavailable count is inconsistent"
+            )
+        for item in shard_unavailable:
+            _validate_unavailable_record(
+                item,
+                shard_index=shard_index,
+                shard_headers=shard_header_set,
+            )
+            unavailable_records.append(item)
+
     if owned_headers != set(expected):
         missing = sorted(set(expected) - owned_headers)
         extra = sorted(owned_headers - set(expected))
@@ -474,7 +1061,7 @@ def merge_shard_manifests(
         _merge_signature_group(symbol, signature_groups[symbol])
         for symbol in sorted(signature_groups)
     ]
-    return {
+    result = {
         "schema_version": 1,
         "kind": "header-signature-surface",
         "target": target,
@@ -493,6 +1080,13 @@ def merge_shard_manifests(
         },
         "signatures": signatures,
     }
+    if unavailable_records:
+        rendered_unavailable = _sorted_unavailable(unavailable_records)
+        result["summary"]["target_unavailable_declaration_count"] = len(
+            rendered_unavailable
+        )
+        result["target_unavailable"] = rendered_unavailable
+    return result
 
 
 def main(argv: Sequence[str] | None = None) -> int:
