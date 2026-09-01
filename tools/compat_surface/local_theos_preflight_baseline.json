@@ -7,13 +7,24 @@
   "source_branch": "compat-theos-sdk-full-preflight",
   "source_head_sha": "ca4a2e71b997b55d0176acb21ebdda55fd928fbd",
   "ci_workflow_path": ".github/workflows/theos-sdk-preflight.yml",
-  "ci_workflow_blob_sha": "0ec88734c8b7ca85935488e031c19635021d639e",
+  "ci_workflow_blob_sha": "813832e81e5223b68fffd95d8eb4b887448853a1",
   "theos_preflight": {
     "run_number": 37,
     "run_id": 33534466454,
     "head_sha": "ca4a2e71b997b55d0176acb21ebdda55fd928fbd",
-    "status_at_sync": "queued",
-    "conclusion_at_sync": null
+    "status_at_sync": "completed",
+    "conclusion_at_sync": "failure",
+    "last_completed_stage": "32/32 exhaustive header shards merged; 5118 headers and 13795 typed symbols verified",
+    "first_downstream_blocker": "AAPCS64 batch 1 AppleArchive umbrella include context"
+  },
+  "github_header_cache_seed": {
+    "schema_version": 1,
+    "source_run_number": 37,
+    "source_run_id": 33534466454,
+    "source_head_sha": "ca4a2e71b997b55d0176acb21ebdda55fd928fbd",
+    "policy": "exact-key-only; no restore-prefix fallback; seed accepted only when analyzer blobs plus Clang and Python identities exactly match run 37",
+    "sdk_header_count": 5118,
+    "shard_count": 32
   },
   "compatibility_surface_analyzer": {
     "run_number": 85,
