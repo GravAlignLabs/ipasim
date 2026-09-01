@@ -38,6 +38,33 @@ class BulkCompatibilityError(ValueError):
     """Raised when the SDK-wide pipeline cannot be completed safely."""
 
 
+_GUEST_ABI_OPTIMIZATION_FLAGS = {
+    "-O0",
+    "-O1",
+    "-O2",
+    "-O3",
+    "-Os",
+    "-Oz",
+    "-Og",
+    "-Ofast",
+}
+
+
+def _guest_abi_clang_args(clang_args: Sequence[str]) -> tuple[str, ...]:
+    """Use a declaration-canonicalizing Clang pass unless the caller chose one."""
+    args = tuple(clang_args)
+    if any(argument in _GUEST_ABI_OPTIMIZATION_FLAGS for argument in args):
+        return args
+
+    # At -O0 Clang intentionally retains externally linked header-inline bodies as
+    # ``available_externally`` LLVM definitions when their address is observed.
+    # The SDK ABI probe needs the externally callable function type, not the body.
+    # A minimal optimization pass canonicalizes those bodies back to declarations
+    # without changing the target ABI lowering. Caller-supplied optimization flags
+    # remain authoritative when present.
+    return ("-O1", *args)
+
+
 def _write_json(path: Path, value: dict) -> None:
     path.write_text(
         json.dumps(value, indent=2, sort_keys=False) + "\n",
@@ -99,7 +126,7 @@ def run_pipeline(
         header_root=header_root,
         clang=clang,
         sdk_root=sdk_root,
-        extra_args=clang_args,
+        extra_args=_guest_abi_clang_args(clang_args),
         timeout_seconds=timeout_seconds,
         batch_size=compiler_batch_size,
     )
