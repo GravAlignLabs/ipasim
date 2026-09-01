@@ -10,12 +10,13 @@ an origin leaf and losing the context Clang already proved during header indexin
 This module builds a temporary header-root of tiny wrappers. Each wrapper keeps the
 original physical source path stable for the existing ABI machinery, but prepends
 only public/prelude headers derived from the SDK itself. That includes headers
-explicitly recommended by a leaf and a framework's canonical umbrella when that
-umbrella directly includes the physical declaration owner. It also removes any
-source-level macro alias that shadows a selected exported C identifier after the
-declaration owner has been entered, so the address probe binds to the TAPI-backed
-declaration rather than an inline convenience implementation. No application names,
-semantic-provider approvals, or header-specific exceptions are introduced here.
+explicitly recommended by a leaf and a framework's canonical umbrella when the
+SDK's own include/import graph proves that umbrella reaches the declaration owner.
+It also removes any source-level macro alias that shadows a selected exported C
+identifier after the declaration owner has been entered, so the address probe binds
+to the TAPI-backed declaration rather than an inline convenience implementation.
+No application names, semantic-provider approvals, or header-specific exceptions
+are introduced here.
 """
 from __future__ import annotations
 
@@ -56,49 +57,126 @@ def _source_path(header_root: Path, relative: str) -> Path:
         raise SdkAbiContextError(str(exc)) from exc
 
 
-def _direct_framework_umbrella(source: Path, *, sdk_root: Path) -> Path | None:
-    """Return a canonical framework umbrella that directly includes ``source``.
-
-    Framework leaves such as GSS/gssapi_apple.h may not carry their own include
-    recommendation even though their public framework umbrella supplies prerequisite
-    types before entering them. We only accept the conventional ``<Framework>.h``
-    umbrella when the installed SDK itself proves direct ownership with an include
-    or import of this exact leaf. That keeps ABI context SDK-derived and fail-closed.
-    """
-    root = sdk_root.resolve()
-    resolved = source.resolve()
-    frameworks_root = root / "System" / "Library" / "Frameworks"
+def _framework_layout(
+    source: Path,
+    *,
+    sdk_root: Path,
+) -> tuple[Path, str] | None:
+    """Return the innermost framework Headers root and framework name."""
+    frameworks_root = (
+        sdk_root.resolve() / "System" / "Library" / "Frameworks"
+    )
     try:
-        relative = resolved.relative_to(frameworks_root)
+        relative = source.resolve().relative_to(frameworks_root)
     except ValueError:
         return None
+
     parts = relative.parts
-    if len(parts) < 3 or not parts[0].endswith(".framework") or parts[1] != "Headers":
+    candidates = [
+        index
+        for index, part in enumerate(parts[:-1])
+        if part.endswith(".framework")
+        and index + 1 < len(parts)
+        and parts[index + 1] == "Headers"
+    ]
+    if not candidates:
+        return None
+    index = candidates[-1]
+    framework_dir = frameworks_root.joinpath(*parts[: index + 1])
+    headers_root = framework_dir / "Headers"
+    if not headers_root.is_dir():
+        return None
+    framework_name = parts[index][: -len(".framework")]
+    return headers_root.resolve(), framework_name
+
+
+def _resolve_framework_include(
+    *,
+    owner: Path,
+    opener: str,
+    spec: str,
+    headers_root: Path,
+    framework_name: str,
+) -> Path | None:
+    """Resolve one include only when it stays in the same framework Headers tree."""
+    candidates: list[Path] = []
+    if opener == '"':
+        candidates.append(owner.resolve().parent / spec)
+
+    prefix = framework_name + "/"
+    if spec.startswith(prefix):
+        candidates.append(headers_root / spec[len(prefix) :])
+    else:
+        candidates.append(headers_root / spec)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            resolved.relative_to(headers_root)
+        except ValueError:
+            continue
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def _framework_umbrella(source: Path, *, sdk_root: Path) -> Path | None:
+    """Return a canonical framework umbrella that reaches ``source``.
+
+    Apple SDK frameworks frequently put implementation leaves one or more include
+    levels below their public master header. The leaf may simply say "do not include
+    directly" without naming that owner. We accept the conventional
+    ``Headers/<Framework>.h`` entrypoint only when a deterministic traversal of the
+    installed SDK's own include/import directives reaches the exact physical source.
+    This supports nested frameworks as well as direct umbrella-to-leaf relationships
+    without inventing prerequisites or framework-specific policy.
+    """
+    resolved = source.resolve()
+    layout = _framework_layout(resolved, sdk_root=sdk_root)
+    if layout is None:
+        return None
+    headers_root, framework_name = layout
+    umbrella = (headers_root / f"{framework_name}.h").resolve()
+    if not umbrella.is_file() or umbrella == resolved:
         return None
 
-    framework_name = parts[0][: -len(".framework")]
-    header_relative = Path(*parts[2:]).as_posix()
-    umbrella = frameworks_root / parts[0] / "Headers" / f"{framework_name}.h"
-    if not umbrella.is_file() or umbrella.resolve() == resolved:
-        return None
-    try:
-        text = umbrella.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise SdkAbiContextError(
-            f"could not read SDK framework umbrella {umbrella.name}: {exc}"
-        ) from exc
-
-    accepted_specs = {
-        header_relative,
-        f"{framework_name}/{header_relative}",
-    }
-    for match in _INCLUDE_DIRECTIVE.finditer(text):
-        opener = match.group(1)
-        spec = match.group(2).strip()
-        if spec in accepted_specs:
-            return umbrella.resolve()
-        if opener == '"' and spec == Path(header_relative).name:
-            return umbrella.resolve()
+    queue = [umbrella]
+    seen: set[str] = set()
+    while queue:
+        owner = queue.pop(0).resolve()
+        key = str(owner)
+        if key in seen:
+            continue
+        seen.add(key)
+        if owner == resolved:
+            return umbrella
+        try:
+            text = owner.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise SdkAbiContextError(
+                f"could not read SDK framework header {owner.name}: {exc}"
+            ) from exc
+        children: list[Path] = []
+        for match in _INCLUDE_DIRECTIVE.finditer(text):
+            child = _resolve_framework_include(
+                owner=owner,
+                opener=match.group(1),
+                spec=match.group(2).strip(),
+                headers_root=headers_root,
+                framework_name=framework_name,
+            )
+            if child is None:
+                continue
+            if child == resolved:
+                return umbrella
+            if str(child) not in seen:
+                children.append(child)
+        queue.extend(sorted(set(children), key=lambda path: path.as_posix()))
     return None
 
 
@@ -127,7 +205,7 @@ def recommended_preludes(
         sdk_root=root,
         libcxx_root=_libcxx_root(root),
     )
-    framework_umbrella = _direct_framework_umbrella(resolved, sdk_root=root)
+    framework_umbrella = _framework_umbrella(resolved, sdk_root=root)
     if framework_umbrella is not None:
         candidates.append(framework_umbrella)
 
