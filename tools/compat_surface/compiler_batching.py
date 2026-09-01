@@ -107,6 +107,7 @@ def build_aapcs64_manifest(
 
     batches = _chunks(typed, batch_size)
     rendered: list[dict] = []
+    failures: list[str] = []
     target = None
     for batch_index, batch in enumerate(batches):
         partial_inventory = deepcopy(inventory)
@@ -114,10 +115,11 @@ def build_aapcs64_manifest(
         try:
             partial = abi_surface.build_abi_manifest(partial_inventory, **kwargs)
         except abi_surface.AbiSurfaceError as exc:
-            raise CompilerBatchError(
+            failures.append(
                 f"{_batch_label('AAPCS64', batch_index, len(batches), batch)} "
                 f"failed: {exc}"
-            ) from exc
+            )
+            continue
         if (
             partial.get("kind") != "aapcs64-abi-surface"
             or partial.get("schema_version") != 1
@@ -133,6 +135,12 @@ def build_aapcs64_manifest(
         if not isinstance(symbols, list):
             raise CompilerBatchError("AAPCS64 batch symbols must be an array")
         rendered.extend(deepcopy(symbols))
+
+    if failures:
+        raise CompilerBatchError(
+            f"AAPCS64 completed all {len(batches)} batches with "
+            f"{len(failures)} failure(s):\n" + "\n".join(failures)
+        )
 
     rendered.sort(key=lambda item: item["symbol"])
     return {
