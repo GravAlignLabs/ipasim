@@ -43,7 +43,7 @@ if errorlevel 1 (
 
 echo ========================================
 echo   ipaSim Local Theos Resume
-necho ========================================
+echo ========================================
 echo.
 echo Source: GitHub Theos SDK Preflight run #%RUN_NUMBER%
 echo Run ID: %RUN_ID%
