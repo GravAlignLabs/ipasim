@@ -29,6 +29,7 @@ import compat_planner
 import compiler_batching
 import generate_semantic_routes
 import runtime_adapter_table
+import sdk_abi_context
 import sdk_catalog
 import win64_abi_surface
 
@@ -93,7 +94,7 @@ def run_pipeline(
     """Run all mechanical stages over the SDK and return their in-memory outputs."""
     catalog = sdk_catalog.build_sdk_catalog(tapi_manifest, header_manifest)
     inventory = sdk_catalog.build_abi_inventory(catalog)
-    guest_abi = compiler_batching.build_aapcs64_manifest(
+    guest_abi = sdk_abi_context.build_aapcs64_manifest(
         inventory,
         header_root=header_root,
         clang=clang,
