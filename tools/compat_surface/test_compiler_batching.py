@@ -53,6 +53,66 @@ class CompilerBatchingTests(unittest.TestCase):
                     )
                     self.assertEqual(self.compact(batched), self.compact(baseline))
 
+    def test_win64_sparse_visible_carriers_preserve_full_namespace_offsets(self):
+        symbols = [
+            {
+                "symbol": "_aggregate",
+                "host_llvm_ir_name": "__ipasim_host_adapter_000000",
+                "host_llvm_ir_declaration": (
+                    "declare void @__ipasim_host_adapter_000000("
+                    "ptr sret(%struct.__ipasim_carrier_000002_s0_ret) %0)"
+                ),
+                "parameters": [
+                    {
+                        "host_lowered_ir_type": (
+                            "%struct.__ipasim_carrier_000001_s0_p0"
+                        )
+                    }
+                ],
+            }
+        ]
+
+        rewritten, adapter_offset, carrier_offset = (
+            compiler_batching._canonicalize_win64_batch(
+                symbols,
+                adapter_offset=4,
+                carrier_offset=10,
+                expected_adapter_count=1,
+                carrier_count=3,
+            )
+        )
+
+        rendered = self.compact(rewritten)
+        self.assertIn("__ipasim_host_adapter_000004", rendered)
+        self.assertIn("__ipasim_carrier_000011_s4_p0", rendered)
+        self.assertIn("__ipasim_carrier_000012_s4_ret", rendered)
+        self.assertNotIn("__ipasim_carrier_000010_", rendered)
+        self.assertEqual(adapter_offset, 5)
+        self.assertEqual(carrier_offset, 13)
+
+    def test_win64_visible_carrier_outside_generated_namespace_fails_closed(self):
+        symbols = [
+            {
+                "symbol": "_bad",
+                "host_llvm_ir_name": "__ipasim_host_adapter_000000",
+                "host_llvm_ir_declaration": (
+                    "declare void @__ipasim_host_adapter_000000("
+                    "ptr sret(%struct.__ipasim_carrier_000003_s0_ret) %0)"
+                ),
+            }
+        ]
+        with self.assertRaisesRegex(
+            compiler_batching.CompilerBatchError,
+            r"carrier index 3 outside generated namespace size 3",
+        ):
+            compiler_batching._canonicalize_win64_batch(
+                symbols,
+                adapter_offset=0,
+                carrier_offset=0,
+                expected_adapter_count=1,
+                carrier_count=3,
+            )
+
     def test_aapcs64_failure_logs_every_batch_before_failing_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
