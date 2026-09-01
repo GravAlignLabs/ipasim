@@ -80,6 +80,55 @@ class SdkAbiNestedFrameworkContextTests(unittest.TestCase):
                 [],
             )
 
+    def test_wrapper_does_not_reenter_unguarded_transitive_leaf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sdk_root = Path(directory) / "sdk"
+            headers = self._headers(sdk_root)
+            umbrella = headers / "Inner.h"
+            owner = headers / "Sparse" / "Solve.h"
+            leaf = headers / "Sparse" / "SolveImplementation.h"
+
+            # Use quoted SDK-authored edges here so the generated wrapper itself can
+            # represent a completely self-contained synthetic translation unit. The
+            # implementation leaf intentionally has no include guard, matching the
+            # class of SDK headers that exposed the duplicate-entry regression.
+            umbrella.write_text(
+                '#include "Sparse/Solve.h"\n',
+                encoding="utf-8",
+            )
+            owner.write_text(
+                "#ifndef INNER_SOLVE_OWNER\n"
+                "#define INNER_SOLVE_OWNER\n"
+                "#define INNER_SOLVE_CONTEXT 1\n"
+                '#include "SolveImplementation.h"\n'
+                "#endif\n",
+                encoding="utf-8",
+            )
+            leaf.write_text(
+                "#ifndef INNER_SOLVE_CONTEXT\n"
+                "#error Do not include this header directly.\n"
+                "#endif\n"
+                "enum InnerSolveMethod { InnerSolveDefault = 0 };\n"
+                "int InnerSolve(void);\n",
+                encoding="utf-8",
+            )
+
+            relative = leaf.resolve().relative_to(sdk_root.resolve()).as_posix()
+            wrapper_root = Path(directory) / "wrappers"
+            sdk_abi_context._write_wrapper(
+                wrapper_root,
+                relative=relative,
+                source=leaf,
+                sdk_root=sdk_root,
+            )
+
+            wrapper = wrapper_root / relative
+            text = wrapper.read_text(encoding="utf-8")
+            umbrella_include = f'#include "{umbrella.resolve().as_posix()}"'
+            leaf_include = f'#include "{leaf.resolve().as_posix()}"'
+            self.assertIn(umbrella_include, text)
+            self.assertNotIn(leaf_include, text)
+
 
 if __name__ == "__main__":
     unittest.main()
