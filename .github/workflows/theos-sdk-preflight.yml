@@ -9,7 +9,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: theos-sdk-preflight-${{ github.event.pull_request.number || github.ref }}
+  # Include the PR head SHA so a zombie run from an obsolete commit cannot
+  # hold the current head behind GitHub's repository-wide concurrency lock.
+  group: theos-sdk-preflight-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
 
 permissions:
