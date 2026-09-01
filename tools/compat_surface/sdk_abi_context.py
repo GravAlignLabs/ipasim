@@ -9,12 +9,13 @@ an origin leaf and losing the context Clang already proved during header indexin
 
 This module builds a temporary header-root of tiny wrappers. Each wrapper keeps the
 original physical source path stable for the existing ABI machinery, but prepends
-only public/prelude headers explicitly recommended by the SDK's own header text.
-It also removes any source-level macro alias that shadows a selected exported C
-identifier after the declaration owner has been entered, so the address probe binds
-to the TAPI-backed declaration rather than an inline convenience implementation.
-No application names, semantic-provider approvals, or header-specific exceptions
-are introduced here.
+only public/prelude headers derived from the SDK itself. That includes headers
+explicitly recommended by a leaf and a framework's canonical umbrella when that
+umbrella directly includes the physical declaration owner. It also removes any
+source-level macro alias that shadows a selected exported C identifier after the
+declaration owner has been entered, so the address probe binds to the TAPI-backed
+declaration rather than an inline convenience implementation. No application names,
+semantic-provider approvals, or header-specific exceptions are introduced here.
 """
 from __future__ import annotations
 
@@ -33,6 +34,10 @@ class SdkAbiContextError(compiler_batching.CompilerBatchError):
 
 
 _C_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_INCLUDE_DIRECTIVE = re.compile(
+    r'^[ \t]*#[ \t]*(?:include|import)[ \t]*([<"])([^>"]+)[>"]',
+    re.MULTILINE,
+)
 
 
 def _libcxx_root(sdk_root: Path) -> Path | None:
@@ -51,12 +56,58 @@ def _source_path(header_root: Path, relative: str) -> Path:
         raise SdkAbiContextError(str(exc)) from exc
 
 
+def _direct_framework_umbrella(source: Path, *, sdk_root: Path) -> Path | None:
+    """Return a canonical framework umbrella that directly includes ``source``.
+
+    Framework leaves such as GSS/gssapi_apple.h may not carry their own include
+    recommendation even though their public framework umbrella supplies prerequisite
+    types before entering them. We only accept the conventional ``<Framework>.h``
+    umbrella when the installed SDK itself proves direct ownership with an include
+    or import of this exact leaf. That keeps ABI context SDK-derived and fail-closed.
+    """
+    root = sdk_root.resolve()
+    resolved = source.resolve()
+    frameworks_root = root / "System" / "Library" / "Frameworks"
+    try:
+        relative = resolved.relative_to(frameworks_root)
+    except ValueError:
+        return None
+    parts = relative.parts
+    if len(parts) < 3 or not parts[0].endswith(".framework") or parts[1] != "Headers":
+        return None
+
+    framework_name = parts[0][: -len(".framework")]
+    header_relative = Path(*parts[2:]).as_posix()
+    umbrella = frameworks_root / parts[0] / "Headers" / f"{framework_name}.h"
+    if not umbrella.is_file() or umbrella.resolve() == resolved:
+        return None
+    try:
+        text = umbrella.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise SdkAbiContextError(
+            f"could not read SDK framework umbrella {umbrella.name}: {exc}"
+        ) from exc
+
+    accepted_specs = {
+        header_relative,
+        f"{framework_name}/{header_relative}",
+    }
+    for match in _INCLUDE_DIRECTIVE.finditer(text):
+        opener = match.group(1)
+        spec = match.group(2).strip()
+        if spec in accepted_specs:
+            return umbrella.resolve()
+        if opener == '"' and spec == Path(header_relative).name:
+            return umbrella.resolve()
+    return None
+
+
 def recommended_preludes(
     source: Path,
     *,
     sdk_root: Path,
 ) -> list[Path]:
-    """Return SDK headers the physical source explicitly says to include first."""
+    """Return SDK-proven headers that must precede the physical declaration owner."""
     root = sdk_root.resolve()
     resolved = source.resolve()
     try:
@@ -69,12 +120,27 @@ def recommended_preludes(
         raise SdkAbiContextError(
             f"could not read SDK source header {resolved.name}: {exc}"
         ) from exc
-    return sdk_header_context.recommended_context_headers(
+
+    candidates = sdk_header_context.recommended_context_headers(
         text,
         target_header=resolved,
         sdk_root=root,
         libcxx_root=_libcxx_root(root),
     )
+    framework_umbrella = _direct_framework_umbrella(resolved, sdk_root=root)
+    if framework_umbrella is not None:
+        candidates.append(framework_umbrella)
+
+    result: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        key = str(candidate)
+        if candidate == resolved or key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate)
+    return result
 
 
 def _validate_c_name(name: str) -> str:
@@ -108,7 +174,8 @@ def _write_wrapper(
         lines.append(f'#include "{_escaped_include(context)}"')
     # Always include the physical declaration owner after its SDK-authored
     # prelude. If the public owner already entered the leaf, its normal include
-    # guard makes this a no-op; otherwise this preserves prerequisite semantics.
+    # guard/pragma-once handling makes this a no-op; otherwise this preserves
+    # prerequisite semantics.
     lines.append(f'#include "{_escaped_include(source)}"')
 
     # Some public SDK headers declare a real exported function and then replace
