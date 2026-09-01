@@ -24,7 +24,7 @@ import compiler_batching
 import sdk_header_context
 
 
-class SdkAbiContextError(ValueError):
+class SdkAbiContextError(compiler_batching.CompilerBatchError):
     """Raised when SDK-backed ABI include context cannot be constructed safely."""
 
 
