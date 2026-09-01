@@ -103,7 +103,7 @@ class SdkAbiContextTests(unittest.TestCase):
                 [],
             )
 
-    def test_aapcs64_wrapper_does_not_reenter_leaf_reached_by_umbrella(self):
+    def test_aapcs64_wrapper_reincludes_guarded_leaf_after_umbrella(self):
         with tempfile.TemporaryDirectory() as directory:
             sdk_root = Path(directory) / "sdk"
             umbrella, leaf = self._write_apple_archive_fixture(sdk_root)
@@ -150,11 +150,12 @@ class SdkAbiContextTests(unittest.TestCase):
             umbrella_include = f'#include "{umbrella.resolve().as_posix()}"'
             leaf_include = f'#include "{leaf.resolve().as_posix()}"'
             self.assertIn(umbrella_include, text)
-            self.assertNotIn(leaf_include, text)
+            self.assertIn(leaf_include, text)
+            self.assertLess(text.index(umbrella_include), text.index(leaf_include))
             self.assertIn("#ifdef AAArchiveStreamCancel", text)
             self.assertIn("#undef AAArchiveStreamCancel", text)
             self.assertLess(
-                text.index(umbrella_include),
+                text.index(leaf_include),
                 text.index("#undef AAArchiveStreamCancel"),
             )
             build.assert_called_once()
@@ -163,6 +164,51 @@ class SdkAbiContextTests(unittest.TestCase):
             self.assertEqual(kwargs["batch_size"], 23)
             self.assertEqual(kwargs["extra_args"], ("-DTEST",))
             self.assertEqual(kwargs["timeout_seconds"], 17)
+
+    def test_target_conditional_umbrella_cannot_hide_guarded_leaf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sdk_root = Path(directory) / "sdk"
+            headers = (
+                sdk_root
+                / "System"
+                / "Library"
+                / "Frameworks"
+                / "CoreLike.framework"
+                / "Headers"
+            )
+            headers.mkdir(parents=True)
+            umbrella = headers / "CoreLike.h"
+            leaf = headers / "HostTime.h"
+            umbrella.write_text(
+                "#define CORELIKE_SUPPORTS_HOST_TIME 0\n"
+                "#if CORELIKE_SUPPORTS_HOST_TIME\n"
+                "#include <CoreLike/HostTime.h>\n"
+                "#endif\n",
+                encoding="utf-8",
+            )
+            leaf.write_text(
+                "#if !defined(__CORELIKE_HOST_TIME_H__)\n"
+                "#define __CORELIKE_HOST_TIME_H__ 1\n"
+                "int CoreLikeGetCurrentHostTime(void);\n"
+                "#endif\n",
+                encoding="utf-8",
+            )
+            relative = leaf.resolve().relative_to(sdk_root.resolve()).as_posix()
+            wrapper_root = Path(directory) / "wrappers"
+
+            sdk_abi_context._write_wrapper(
+                wrapper_root,
+                relative=relative,
+                source=leaf,
+                sdk_root=sdk_root,
+            )
+
+            text = (wrapper_root / relative).read_text(encoding="utf-8")
+            umbrella_include = f'#include "{umbrella.resolve().as_posix()}"'
+            leaf_include = f'#include "{leaf.resolve().as_posix()}"'
+            self.assertIn(umbrella_include, text)
+            self.assertIn(leaf_include, text)
+            self.assertLess(text.index(umbrella_include), text.index(leaf_include))
 
     def test_wrapper_still_includes_source_when_prelude_does_not_reach_it(self):
         with tempfile.TemporaryDirectory() as directory:
