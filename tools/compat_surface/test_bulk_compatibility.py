@@ -48,7 +48,7 @@ class BulkCompatibilityTests(unittest.TestCase):
                 return_value=inventory,
             ) as build_inventory,
             mock.patch.object(
-                bulk_compatibility.sdk_abi_context,
+                bulk_compatibility.sdk_abi_recovery,
                 "build_aapcs64_manifest",
                 return_value=guest,
             ) as build_guest,
