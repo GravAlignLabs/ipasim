@@ -154,6 +154,7 @@ def build_aapcs64_manifest(
 
 _HOST_ADAPTER = re.compile(r"__ipasim_host_adapter_(\d{6})")
 _CARRIER = re.compile(r"__ipasim_carrier_(\d{6})_s(\d+)_")
+_CARRIER_ANY = re.compile(r"__ipasim_carrier_(\d{6})_")
 
 
 def _rewrite_strings(value, rewrite: Callable[[str], str]):
@@ -166,11 +167,51 @@ def _rewrite_strings(value, rewrite: Callable[[str], str]):
     return value
 
 
+def _win64_batch_synthetic_counts(symbols: list[dict]) -> tuple[int, int]:
+    """Return the complete batch-local adapter/carrier namespace sizes.
+
+    The public Win64 manifest only contains synthetic carrier names that survive
+    Clang lowering into declarations or attributes. CarrierRenderer can also
+    create intermediate/nested carrier typedefs whose names disappear from the
+    emitted declaration surface. Those invisible names still consume numbering
+    in a monolithic probe and therefore must count toward the next batch offset.
+    """
+    renderable: list[dict] = []
+    for item in symbols:
+        if item.get("bridge_status") != "generated-bridge-candidate":
+            continue
+        try:
+            win64_abi_surface._build_probe([item])
+        except win64_abi_surface.CarrierTypeError:
+            continue
+        renderable.append(item)
+
+    if not renderable:
+        return 0, 0
+
+    source, helper_map, _ = win64_abi_surface._build_probe(renderable)
+    if len(helper_map) != len(renderable):
+        raise CompilerBatchError(
+            "Win64 probe helper namespace does not match renderable symbols"
+        )
+
+    carrier_ids = sorted(
+        {int(match.group(1)) for match in _CARRIER_ANY.finditer(source)}
+    )
+    if carrier_ids != list(range(len(carrier_ids))):
+        raise CompilerBatchError(
+            "Win64 generated carrier namespace is not dense"
+        )
+    return len(renderable), len(carrier_ids)
+
+
 def _canonicalize_win64_batch(
     symbols: list[dict],
     *,
     adapter_offset: int,
     carrier_offset: int,
+    expected_adapter_count: int,
+    carrier_count: int,
 ) -> tuple[list[dict], int, int]:
     """Translate batch-local synthetic compiler names to monolithic numbering."""
     compiled = [
@@ -178,8 +219,13 @@ def _canonicalize_win64_batch(
         for item in symbols
         if isinstance(item.get("host_llvm_ir_name"), str)
     ]
+    if len(compiled) != expected_adapter_count:
+        raise CompilerBatchError(
+            "Win64 batch compiled adapter count does not match generated probe"
+        )
+
     adapter_map: dict[int, int] = {}
-    for global_index, item in enumerate(compiled, start=adapter_offset):
+    for item in compiled:
         match = _HOST_ADAPTER.search(item["host_llvm_ir_name"])
         if match is None:
             raise CompilerBatchError(
@@ -191,14 +237,19 @@ def _canonicalize_win64_batch(
             raise CompilerBatchError(
                 f"Win64 batch repeats synthetic adapter index {local_index}"
             )
-        adapter_map[local_index] = global_index
+        adapter_map[local_index] = adapter_offset + local_index
 
-    carrier_ids: set[int] = set()
+    ordered_adapters = sorted(adapter_map)
+    if ordered_adapters != list(range(expected_adapter_count)):
+        raise CompilerBatchError("Win64 batch adapter numbering is not dense")
+
+    carrier_refs: list[tuple[int, int]] = []
 
     def collect(value) -> None:
         if isinstance(value, str):
-            carrier_ids.update(
-                int(match.group(1)) for match in _CARRIER.finditer(value)
+            carrier_refs.extend(
+                (int(match.group(1)), int(match.group(2)))
+                for match in _CARRIER.finditer(value)
             )
         elif isinstance(value, list):
             for item in value:
@@ -208,15 +259,17 @@ def _canonicalize_win64_batch(
                 collect(item)
 
     collect(symbols)
-    ordered_carriers = sorted(carrier_ids)
-    if ordered_carriers and ordered_carriers != list(
-        range(ordered_carriers[-1] + 1)
-    ):
-        raise CompilerBatchError("Win64 batch carrier numbering is not dense")
-    carrier_map = {
-        local: carrier_offset + position
-        for position, local in enumerate(ordered_carriers)
-    }
+    for local_carrier, local_symbol in carrier_refs:
+        if local_carrier < 0 or local_carrier >= carrier_count:
+            raise CompilerBatchError(
+                f"Win64 batch references carrier index {local_carrier} "
+                f"outside generated namespace size {carrier_count}"
+            )
+        if local_symbol not in adapter_map:
+            raise CompilerBatchError(
+                f"Win64 batch carrier {local_carrier} references unknown "
+                f"adapter index {local_symbol}"
+            )
 
     def rewrite(text: str) -> str:
         def adapter_replacement(match: re.Match[str]) -> str:
@@ -230,10 +283,10 @@ def _canonicalize_win64_batch(
         def carrier_replacement(match: re.Match[str]) -> str:
             local_carrier = int(match.group(1))
             local_symbol = int(match.group(2))
-            if local_carrier not in carrier_map or local_symbol not in adapter_map:
+            if local_carrier >= carrier_count or local_symbol not in adapter_map:
                 return match.group(0)
             return (
-                f"__ipasim_carrier_{carrier_map[local_carrier]:06d}_"
+                f"__ipasim_carrier_{carrier_offset + local_carrier:06d}_"
                 f"s{adapter_map[local_symbol]}_"
             )
 
@@ -242,8 +295,8 @@ def _canonicalize_win64_batch(
     rewritten = _rewrite_strings(deepcopy(symbols), rewrite)
     return (
         rewritten,
-        adapter_offset + len(compiled),
-        carrier_offset + len(ordered_carriers),
+        adapter_offset + expected_adapter_count,
+        carrier_offset + carrier_count,
     )
 
 
@@ -291,6 +344,7 @@ def build_win64_manifest(
     for batch_index, batch in enumerate(batches):
         partial_guest = deepcopy(guest_manifest)
         partial_guest["symbols"] = deepcopy(batch)
+        expected_adapter_count, carrier_count = _win64_batch_synthetic_counts(batch)
         try:
             partial = win64_abi_surface.build_win64_manifest(
                 partial_guest, **kwargs
@@ -325,6 +379,8 @@ def build_win64_manifest(
             partial_symbols,
             adapter_offset=adapter_offset,
             carrier_offset=carrier_offset,
+            expected_adapter_count=expected_adapter_count,
+            carrier_count=carrier_count,
         )
         rendered.extend(canonical)
 
