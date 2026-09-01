@@ -3,9 +3,9 @@
 
 ``sdk_header_surface`` remains the authoritative manifest/merge implementation.
 This driver supplies the compilation-context recovery required by a complete
-physical-header pass: SDK-declared umbrellas, C++ modelines, Clang-module-only
-leaves, reverse include owners, lexical prerequisite providers, and explicit
-non-surface evidence for SDK-authored rejection/missing dependencies.
+physical-header pass: SDK-declared umbrellas, source-language fallbacks,
+Swift-importer branches, actual Clang module imports, reverse include owners,
+lexical prerequisite providers, and explicit non-surface evidence.
 
 No header is removed from coverage. A physical header either contributes typed
 C declarations, contributes explicit target-unavailable declarations, is
@@ -37,17 +37,23 @@ attach_shard_coverage = core.attach_shard_coverage
 merge_shard_manifests = core.merge_shard_manifests
 
 
-def _module_args(
+def _context_extra_args(
     target_header: Path,
     context_header: Path,
+    sdk_root: Path,
     extra_args: Sequence[str],
 ) -> tuple[str, ...]:
+    """Return only compilation flags justified by the SDK header context."""
     result = list(extra_args)
     if (
         sdk_header_context.requires_clang_modules(target_header)
         or sdk_header_context.requires_clang_modules(context_header)
     ) and "-fmodules" not in result:
         result.append("-fmodules")
+    for header in (context_header, target_header):
+        for argument in sdk_header_context.swift_importer_args(header, sdk_root):
+            if argument not in result:
+                result.append(argument)
     return tuple(result)
 
 
@@ -64,12 +70,41 @@ def _context_for_header(path: Path, sdk_root: Path) -> tuple[Path | None, str]:
     return None, language
 
 
-def _candidate_language(target_language: str, context_header: Path) -> str:
-    if target_language.endswith("++"):
-        return "objective-c++"
+def _language_attempts(
+    preferred: str,
+    *,
+    target_header: Path,
+    sdk_root: Path,
+) -> tuple[str, ...]:
+    """Try the SDK-declared language first, then a C ABI-compatible fallback.
+
+    Swift overlay shims commonly carry a C++ editor modeline even when their C
+    ABI declarations are intentionally consumable by Clang's C importer. If a
+    non-libc++ header fails only under C++, trying Objective-C is safe because
+    Clang still has to parse the exact physical header and source ownership is
+    unchanged. libc++ leaves never receive this fallback.
+    """
+    result = [preferred]
+    if preferred.endswith("++") and not core._is_libcxx_header(target_header, sdk_root):
+        result.append("objective-c")
+    return tuple(dict.fromkeys(result))
+
+
+def _candidate_languages(
+    target_language: str,
+    context_header: Path,
+    *,
+    target_header: Path,
+    sdk_root: Path,
+) -> tuple[str, ...]:
+    preferred = target_language
     if sdk_header_context.preferred_clang_language(context_header).endswith("++"):
-        return "objective-c++"
-    return target_language
+        preferred = "objective-c++"
+    return _language_attempts(
+        preferred,
+        target_header=target_header,
+        sdk_root=sdk_root,
+    )
 
 
 def _discover_raw_functions_for_source(
@@ -177,7 +212,13 @@ def _analyze_sdk_header(
     context_header, language = _context_for_header(resolved, root)
     original_error: header_surface.HeaderParseError | None = None
     modules_required = sdk_header_context.requires_clang_modules(resolved)
-    if context_header is None and language == "objective-c" and not modules_required:
+    swift_importer_required = bool(sdk_header_context.swift_importer_args(resolved, root))
+    if (
+        context_header is None
+        and language == "objective-c"
+        and not modules_required
+        and not swift_importer_required
+    ):
         try:
             return header_surface.analyze_header(
                 resolved,
@@ -196,36 +237,60 @@ def _analyze_sdk_header(
 
     assert context_header is not None
     replacements = [(str(resolved), display), (str(root), "<SDKROOT>")]
-    active_extra_args = _module_args(resolved, context_header, extra_args)
+    initial_errors: list[header_surface.HeaderParseError] = []
+    ast: dict | None = None
+    target_entered = False
+    active_extra_args: tuple[str, ...] = ()
 
-    try:
-        ast, target_entered = core._parse_context_translation_unit(
-            context_header=context_header,
-            target_header=resolved,
-            include_target=True,
-            display=display,
-            clang=clang,
-            target=target,
-            sdk_root=root,
-            language=language,
-            extra_args=active_extra_args,
-            replacements=replacements,
-            timeout_seconds=timeout_seconds,
+    for attempted_language in _language_attempts(
+        language,
+        target_header=resolved,
+        sdk_root=root,
+    ):
+        attempted_args = _context_extra_args(
+            resolved,
+            context_header,
+            root,
+            extra_args,
         )
-    except header_surface.HeaderParseError as context_error:
+        try:
+            attempted_ast, attempted_entered = core._parse_context_translation_unit(
+                context_header=context_header,
+                target_header=resolved,
+                include_target=True,
+                display=display,
+                clang=clang,
+                target=target,
+                sdk_root=root,
+                language=attempted_language,
+                extra_args=attempted_args,
+                replacements=replacements,
+                timeout_seconds=timeout_seconds,
+            )
+        except header_surface.HeaderParseError as exc:
+            initial_errors.append(exc)
+            continue
+        ast = attempted_ast
+        target_entered = attempted_entered
+        language = attempted_language
+        active_extra_args = attempted_args
+        break
+
+    if ast is None:
+        context_error = initial_errors[0]
         libcxx = core._libcxx_root(root)
         candidates: list[tuple[Path, bool]] = []
-        seen_candidates: set[str] = set()
+        seen_candidates: set[tuple[str, bool]] = set()
 
         def add_candidate(candidate: Path, include_target: bool) -> None:
             candidate = candidate.resolve()
-            key = os.path.normcase(str(candidate))
+            key = (os.path.normcase(str(candidate)), include_target)
             if candidate == resolved or key in seen_candidates:
                 return
             seen_candidates.add(key)
             candidates.append((candidate, include_target))
 
-        diagnostic_messages = [str(context_error)]
+        diagnostic_messages = [str(error) for error in initial_errors]
         if original_error is not None:
             diagnostic_messages.append(str(original_error))
 
@@ -236,6 +301,10 @@ def _analyze_sdk_header(
                 sdk_root=root,
                 libcxx_root=libcxx,
             ):
+                # First honor "include X instead" as a real owner. If X does
+                # not enter the leaf, retain that as explicit inactivity
+                # evidence, then try X as a prerequisite for legacy headers.
+                add_candidate(candidate, False)
                 add_candidate(candidate, True)
 
         for candidate in sdk_header_context.reverse_context_candidates(
@@ -256,38 +325,50 @@ def _analyze_sdk_header(
         selected_ast: dict | None = None
         selected_context: Path | None = None
         selected_language = language
-        selected_extra_args = active_extra_args
+        selected_extra_args: tuple[str, ...] = ()
         inactive_context: Path | None = None
         candidate_errors: list[str] = []
 
         for candidate, include_target in candidates:
-            candidate_language = _candidate_language(language, candidate)
-            candidate_extra_args = _module_args(resolved, candidate, extra_args)
-            try:
-                candidate_ast, candidate_entered = core._parse_context_translation_unit(
-                    context_header=candidate,
-                    target_header=resolved,
-                    include_target=include_target,
-                    display=display,
-                    clang=clang,
-                    target=target,
-                    sdk_root=root,
-                    language=candidate_language,
-                    extra_args=candidate_extra_args,
-                    replacements=replacements,
-                    timeout_seconds=timeout_seconds,
-                )
-            except header_surface.HeaderParseError as exc:
-                candidate_errors.append(str(exc))
-                continue
-            if candidate_entered:
-                selected_ast = candidate_ast
-                selected_context = candidate
-                selected_language = candidate_language
-                selected_extra_args = candidate_extra_args
+            candidate_args = _context_extra_args(
+                resolved,
+                candidate,
+                root,
+                extra_args,
+            )
+            for candidate_language in _candidate_languages(
+                language,
+                candidate,
+                target_header=resolved,
+                sdk_root=root,
+            ):
+                try:
+                    candidate_ast, candidate_entered = core._parse_context_translation_unit(
+                        context_header=candidate,
+                        target_header=resolved,
+                        include_target=include_target,
+                        display=display,
+                        clang=clang,
+                        target=target,
+                        sdk_root=root,
+                        language=candidate_language,
+                        extra_args=candidate_args,
+                        replacements=replacements,
+                        timeout_seconds=timeout_seconds,
+                    )
+                except header_surface.HeaderParseError as exc:
+                    candidate_errors.append(str(exc))
+                    continue
+                if candidate_entered:
+                    selected_ast = candidate_ast
+                    selected_context = candidate
+                    selected_language = candidate_language
+                    selected_extra_args = candidate_args
+                    break
+                if inactive_context is None:
+                    inactive_context = candidate
+            if selected_ast is not None:
                 break
-            if inactive_context is None:
-                inactive_context = candidate
 
         if selected_ast is not None and selected_context is not None:
             ast = selected_ast
@@ -350,6 +431,7 @@ def _analyze_sdk_header(
                 }
             raise context_error
 
+    assert ast is not None
     if not target_entered:
         return [], {
             "skipped_cxx": 0,
