@@ -97,6 +97,22 @@ The project is working on **two connected layers at the same time**:
 
 The important refinement is that the second layer is now intended to operate **SDK-wide**, not only on symbols already encountered by one application.
 
+### Active SDK-wide preflight checkpoint — September 1, 2026
+
+[PR #58](https://github.com/GravAlignLabs/ipasim/pull/58) is exercising the full compatibility pipeline against the pinned public `theos/sdks@0222fd5413cf4b9af096f37b4621afa2688572f7` `iPhoneOS16.5.sdk` rather than relying only on synthetic fixtures. The exact physical SDK header inventory is **5,118 headers**. CI partitions that inventory into 32 deterministic shards and accepts a merged header surface only when every physical header is owned exactly once; there are no bad-header ignore lists or partial-success paths.
+
+The preflight infrastructure has also been hardened after a GitHub-hosted runner died mid-shard: each analyzer shard now has an in-runner wall-clock watchdog and a job-level timeout, progress is emitted frequently, evidence is uploaded before the final failure whenever the runner survives, and the concurrency key includes the PR head SHA so a zombie run from an older commit cannot block a new head indefinitely.
+
+SDK context recovery has advanced in layers. Framework leaves are parsed through their normal umbrella/import graph while declarations are still attributed back to the exact physical target header. The AppleArchive failure family is now resolved generically through its `module.modulemap` umbrella metadata, and libc++ is entered with the SDK's own `usr/include/c++/v1` include root and C++ language context. Those changes cleared the earlier `AVAudioSessionDeprecated.h`, AppleArchive direct-inclusion, missing `__config`, and missing `__concepts/...` failures.
+
+The latest exhaustive run (#18) completed normally and exposed the next real scanner boundaries instead of hanging. Six shards produced complete manifests; the remaining failures cluster into three context classes:
+
+- private or implementation headers that explicitly require an owning public header, such as `os/_workgroup.h` -> `<os/workgroup.h>`, `secure/_strings.h` -> `<strings.h>`, `sys/_posix_availability.h` -> `<sys/cdefs.h>`, and RPC leaves that require their RPC type context;
+- libc++ private/platform-specific leaves whose correct owner is described by libc++ module metadata rather than by treating the leaf as a standalone iOS translation unit; and
+- C declarations that Clang successfully parses but marks unavailable for the selected iOS/ARM64 target, such as legacy dyld, Objective-C runtime, and `gethostuuid` APIs. Framework-context analysis already records this evidence explicitly, but the ordinary-header helper path still needs the same target-unavailable recovery instead of failing on `typedef __typeof__(symbol)`.
+
+The immediate compatibility-engine step is therefore to generalize **SDK header ownership context**: determine each physical leaf's framework/module/public-header entrypoint, compile through that real context, attribute AST declarations back to the exact physical leaf, and record target-unavailable declarations as evidence. This remains mechanical SDK analysis only; it does not approve semantic providers or change loader/runtime semantics.
+
 ### Verified checkpoint — August 31, 2026
 
 The public runtime validation paths currently prove that the ARM64 emulator core, threaded guest execution model, synthetic iOS loader path, generated ABI pipeline, controlled semantic-provider bridge, and real loader-selected generated route work together:
