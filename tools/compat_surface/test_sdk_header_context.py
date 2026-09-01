@@ -240,6 +240,132 @@ class SdkHeaderContextTests(unittest.TestCase):
                 1,
             )
 
+    def test_explicit_public_include_recommendation_supplies_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Synthetic.sdk"
+            leaf = self.write(
+                root,
+                "usr/include/os/_private_probe.h",
+                "#pragma once\n"
+                "#ifndef PUBLIC_PROBE_CONTEXT\n"
+                '#error "Do not include this header directly, please include <os/public_probe.h> instead"\n'
+                "#endif\n"
+                "extern int private_probe_value(int value);\n",
+            )
+            self.write(
+                root,
+                "usr/include/os/public_probe.h",
+                "#pragma once\n#define PUBLIC_PROBE_CONTEXT 1\n",
+            )
+            display = "usr/include/os/_private_probe.h"
+
+            manifest = sdk_header_surface.build_parallel_manifest(
+                [(leaf, display)],
+                jobs=1,
+                sdk_root=root,
+            )
+            self.assertEqual(
+                [item["symbol"] for item in manifest["signatures"]],
+                ["_private_probe_value"],
+            )
+
+    def test_usr_include_leaf_recovers_through_textual_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Synthetic.sdk"
+            self.write(
+                root,
+                "usr/include/rpc/types.h",
+                "#pragma once\ntypedef int rpc_bool_t;\n",
+            )
+            leaf = self.write(
+                root,
+                "usr/include/rpc/auth_probe.h",
+                "#pragma once\n"
+                "extern rpc_bool_t rpc_probe(rpc_bool_t value);\n",
+            )
+            self.write(
+                root,
+                "usr/include/rpc/rpc.h",
+                "#pragma once\n"
+                "#include <rpc/types.h>\n"
+                "#include <rpc/auth_probe.h>\n",
+            )
+            display = "usr/include/rpc/auth_probe.h"
+
+            with self.assertRaises(header_surface.HeaderParseError):
+                header_surface.analyze_header(leaf, display, sdk_root=root)
+
+            manifest = sdk_header_surface.build_parallel_manifest(
+                [(leaf, display)],
+                jobs=1,
+                sdk_root=root,
+            )
+            self.assertEqual(
+                [item["symbol"] for item in manifest["signatures"]],
+                ["_rpc_probe"],
+            )
+
+    def test_libcxx_conditional_owner_records_target_inactive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Synthetic.sdk"
+            libcxx = "usr/include/c++/v1"
+            self.write(root, f"{libcxx}/__config", "#pragma once\n")
+            leaf = self.write(
+                root,
+                f"{libcxx}/__support/vendor/only.h",
+                "#pragma once\nunknown_vendor_type impossible_here;\n",
+            )
+            self.write(
+                root,
+                f"{libcxx}/__owner",
+                "#pragma once\n"
+                "#include <__config>\n"
+                "#ifdef __VENDOR_ONLY__\n"
+                "#include <__support/vendor/only.h>\n"
+                "#endif\n",
+            )
+            display = f"{libcxx}/__support/vendor/only.h"
+
+            manifest = sdk_header_surface.build_parallel_manifest(
+                [(leaf, display)],
+                jobs=1,
+                sdk_root=root,
+            )
+            self.assertEqual(manifest["signatures"], [])
+            self.assertEqual(manifest["summary"]["target_inactive_header_count"], 1)
+            inactive = manifest["target_inactive_headers"]
+            self.assertEqual(inactive[0]["header"], display)
+            self.assertEqual(inactive[0]["context_header"], f"{libcxx}/__owner")
+            self.assertIn("does not activate", inactive[0]["reason"])
+
+    def test_unreferenced_libcxx_support_leaf_is_explicitly_inactive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Synthetic.sdk"
+            libcxx = "usr/include/c++/v1"
+            self.write(root, f"{libcxx}/__config", "#pragma once\n")
+            leaf = self.write(
+                root,
+                f"{libcxx}/__support/orphan/dead.h",
+                "#pragma once\nunknown_orphan_type impossible_here;\n",
+            )
+            display = f"{libcxx}/__support/orphan/dead.h"
+
+            manifest = sdk_header_surface.build_parallel_manifest(
+                [(leaf, display)],
+                jobs=1,
+                sdk_root=root,
+            )
+            self.assertEqual(manifest["signatures"], [])
+            self.assertEqual(manifest["summary"]["target_inactive_header_count"], 1)
+            self.assertNotIn(
+                "context_header",
+                manifest["target_inactive_headers"][0],
+            )
+            self.assertIn(
+                "not reachable",
+                manifest["target_inactive_headers"][0]["reason"],
+            )
+
     def test_target_unavailable_declaration_is_recorded_not_silently_dropped(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "Synthetic.sdk"
@@ -277,6 +403,35 @@ class SdkHeaderContextTests(unittest.TestCase):
             self.assertEqual(unavailable[0]["name"], "desktop_only")
             self.assertEqual(unavailable[0]["source"]["header"], display)
             self.assertIn("not available on iOS", unavailable[0]["reason"])
+
+    def test_ordinary_target_unavailable_declaration_uses_same_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Synthetic.sdk"
+            leaf = self.write(
+                root,
+                "usr/include/legacy_api.h",
+                "__attribute__((availability(ios,unavailable))) "
+                "extern int legacy_only(int value);\n"
+                "extern int current_value(int value);\n",
+            )
+            display = "usr/include/legacy_api.h"
+
+            with self.assertRaises(header_surface.HeaderParseError):
+                header_surface.analyze_header(leaf, display, sdk_root=root)
+
+            manifest = sdk_header_surface.build_parallel_manifest(
+                [(leaf, display)],
+                jobs=1,
+                sdk_root=root,
+            )
+            self.assertEqual(
+                [item["symbol"] for item in manifest["signatures"]],
+                ["_current_value"],
+            )
+            self.assertEqual(
+                [item["symbol"] for item in manifest["target_unavailable"]],
+                ["_legacy_only"],
+            )
 
     def test_unavailable_provenance_survives_exhaustive_shard_merge(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -339,6 +494,75 @@ class SdkHeaderContextTests(unittest.TestCase):
             self.assertEqual(
                 merged["summary"]["target_unavailable_declaration_count"],
                 1,
+            )
+
+    def test_target_inactive_provenance_survives_exhaustive_shard_merge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Synthetic.sdk"
+            libcxx = "usr/include/c++/v1"
+            self.write(root, f"{libcxx}/__config", "#pragma once\n")
+            inactive = self.write(
+                root,
+                f"{libcxx}/__support/vendor/inactive.h",
+                "#pragma once\nunknown_vendor_type impossible_here;\n",
+            )
+            owner = self.write(
+                root,
+                f"{libcxx}/__owner",
+                "#pragma once\n"
+                "#ifdef __VENDOR_ONLY__\n"
+                "#include <__support/vendor/inactive.h>\n"
+                "#endif\n",
+            )
+            active = self.write(
+                root,
+                "usr/include/active.h",
+                "extern int active_value(void);\n",
+            )
+            inputs = sorted(
+                [
+                    (inactive, inactive.relative_to(root).as_posix()),
+                    (owner, owner.relative_to(root).as_posix()),
+                    (active, active.relative_to(root).as_posix()),
+                ],
+                key=lambda item: item[1],
+            )
+            baseline = sdk_header_surface.build_parallel_manifest(
+                inputs,
+                jobs=2,
+                sdk_root=root,
+            )
+
+            shards = []
+            for shard_index in range(2):
+                selected = sdk_header_surface.select_shard(
+                    inputs,
+                    shard_count=2,
+                    shard_index=shard_index,
+                )
+                manifest = sdk_header_surface.build_parallel_manifest(
+                    selected,
+                    jobs=1,
+                    sdk_root=root,
+                )
+                shards.append(
+                    sdk_header_surface.attach_shard_coverage(
+                        manifest,
+                        all_inputs=inputs,
+                        shard_count=2,
+                        shard_index=shard_index,
+                    )
+                )
+
+            merged = sdk_header_surface.merge_shard_manifests(
+                list(reversed(shards)),
+                expected_headers=[display for _, display in inputs],
+            )
+            self.assertEqual(self.compact(merged), self.compact(baseline))
+            self.assertEqual(merged["summary"]["target_inactive_header_count"], 1)
+            self.assertEqual(
+                merged["target_inactive_headers"][0]["header"],
+                f"{libcxx}/__support/vendor/inactive.h",
             )
 
 
