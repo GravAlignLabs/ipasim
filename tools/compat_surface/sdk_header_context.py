@@ -31,14 +31,20 @@ _CXX_MODELINE = re.compile(
     re.IGNORECASE,
 )
 _MODULE_IMPORT = re.compile(
-    r'^[ \t]*@import\s+[A-Za-z_][A-Za-z0-9_.]*\s*;',
+    r'^[ \t]*@import\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;',
     re.MULTILINE,
 )
-_MODULE_FEATURE = re.compile(r'__has_feature\s*\(\s*modules\s*\)')
+_MODULE_DECL = re.compile(
+    r'\b(?:framework\s+)?module\s+([A-Za-z_][A-Za-z0-9_.]*)\b'
+)
 _PP_ERROR = re.compile(r'^[ \t]*#[ \t]*error[ \t]+(.+)$', re.MULTILINE)
 _UNKNOWN_TYPE = re.compile(r"error:\s+unknown type name '([^']+)'", re.IGNORECASE)
 _MISSING_HEADER = re.compile(
     r"fatal error:\s+['<]([^'>]+)[>']\s+file not found",
+    re.IGNORECASE,
+)
+_MISSING_MODULE = re.compile(
+    r"fatal error:\s+module\s+'([^']+)'\s+not found",
     re.IGNORECASE,
 )
 _DEFINE_NAME = re.compile(
@@ -86,13 +92,37 @@ def preferred_clang_language(path: Path) -> str:
 
 
 def requires_clang_modules(path: Path) -> bool:
-    """Return whether the header itself proves that Clang modules are required."""
-    text = _read_text(path)
-    if _MODULE_IMPORT.search(text):
-        return True
-    # Private/module-only SDK leaves commonly guard direct textual inclusion by
-    # checking __has_feature(modules) and raising #error otherwise.
-    return bool(_MODULE_FEATURE.search(text) and _PP_ERROR.search(text))
+    """Return whether the header contains an actual Clang module import.
+
+    A ``__has_feature(modules)`` guard plus ``#error`` does not mean the leaf
+    should be forced through ``-fmodules``. Those private leaves normally tell
+    clients to enter through a public textual owner instead. Enabling modules
+    merely to satisfy the guard can make Clang build unrelated SDK modules in
+    the wrong language mode.
+    """
+    return bool(_MODULE_IMPORT.search(_read_text(path)))
+
+
+def is_swift_shim_header(path: Path, sdk_root: Path) -> bool:
+    """Return whether a physical header belongs to the SDK Swift shim package."""
+    root = sdk_root.resolve() / "usr" / "lib" / "swift" / "shims"
+    return root.is_dir() and _is_within(path.resolve(), root)
+
+
+def swift_importer_args(path: Path, sdk_root: Path) -> tuple[str, ...]:
+    """Return SDK-authored Swift importer mode for shims that expose one.
+
+    Several shipped Swift shims contain an explicit ``__swift__`` branch that
+    is the only self-contained form available in the SDK; their non-Swift C++
+    implementation path depends on Swift compiler/runtime headers that are not
+    part of the iPhone SDK. We only define ``__swift__`` when the target shim
+    itself contains that contract.
+    """
+    if not is_swift_shim_header(path, sdk_root):
+        return ()
+    if "__swift__" not in _read_text(path):
+        return ()
+    return ("-D__swift__=1",)
 
 
 def _resolve_include(
@@ -121,9 +151,10 @@ def _resolve_include(
         seen.add(key)
         if not resolved.is_file():
             continue
-        if not _is_within(resolved, usr_include):
-            continue
-        return resolved
+        if quoted and _is_within(resolved, root):
+            return resolved
+        if _is_within(resolved, usr_include):
+            return resolved
     return None
 
 
@@ -206,6 +237,23 @@ def _definition_provider_index_cached(
 
 def _definition_provider_index(sdk_root: Path) -> dict[str, tuple[Path, ...]]:
     return _definition_provider_index_cached(str(sdk_root.resolve()))
+
+
+@functools.lru_cache(maxsize=8)
+def _sdk_module_names_cached(sdk_root_text: str) -> frozenset[str]:
+    root = Path(sdk_root_text).resolve()
+    names: set[str] = set()
+    for path in sorted(root.rglob("module.modulemap")):
+        for name in _MODULE_DECL.findall(_read_text(path)):
+            names.add(name)
+    for path in sorted(root.rglob("module.map")):
+        for name in _MODULE_DECL.findall(_read_text(path)):
+            names.add(name)
+    return frozenset(names)
+
+
+def _sdk_module_names(sdk_root: Path) -> frozenset[str]:
+    return _sdk_module_names_cached(str(sdk_root.resolve()))
 
 
 def _owner_score(path: Path, sdk_root: Path) -> tuple[int, int, int, str]:
@@ -384,10 +432,11 @@ def explicit_inactive_reason(
 ) -> str | None:
     """Return fail-closed evidence that a failing physical leaf is non-surface.
 
-    This is intentionally narrow. It accepts only an SDK-authored #error that
-    actually fired for the target header, or an include written by the target
-    header whose referenced file is absent from the installed SDK. Ordinary
-    parse/type errors are never converted into inactivity here.
+    This is intentionally narrow. It accepts an SDK-authored ``#error`` that
+    actually fired for the target header, a direct target include whose file is
+    absent from the installed SDK, or an ``@import`` whose module is not
+    declared anywhere in the installed SDK. Ordinary parse/type errors are
+    never converted into inactivity here.
     """
     text = _read_text(target_header)
     relative = relative_sdk_path(target_header, sdk_root)
@@ -425,6 +474,22 @@ def explicit_inactive_reason(
             return (
                 "SDK header references a dependency absent from this SDK installation: "
                 f"{spec}"
+            )
+
+    imported_modules = set(_MODULE_IMPORT.findall(text))
+    if imported_modules:
+        declared_modules = _sdk_module_names(sdk_root)
+        for module in _MISSING_MODULE.findall(message):
+            if module not in imported_modules:
+                continue
+            if module in declared_modules:
+                continue
+            top_level = module.split(".", 1)[0]
+            if top_level in declared_modules:
+                continue
+            return (
+                "SDK header imports a Clang module that is not declared in this SDK "
+                f"installation: {module}"
             )
     return None
 
