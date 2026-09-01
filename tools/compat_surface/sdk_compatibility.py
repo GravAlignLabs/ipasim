@@ -5,6 +5,11 @@ This is orchestration only. Existing analyzers remain authoritative for TAPI,
 header signatures, AAPCS64/Win64 ABI lowering, bridge plans, runtime adapters,
 compatibility planning, and explicit semantic-provider approval.
 
+Header analysis may be performed in deterministic shards and supplied back to
+this command. Sharded input is accepted only after proving that the shard set
+covers the exact requested SDK header inventory once, with no gaps, overlaps,
+or target drift. The downstream compatibility pipeline is otherwise unchanged.
+
 The command intentionally fails closed. A TAPI/header/compiler/semantic-provider
 error aborts the run before the output bundle is materialized.
 """
@@ -52,12 +57,18 @@ def _collect_headers(
     relative_headers: Sequence[str] = (),
 ) -> list[tuple[Path, str]]:
     if relative_headers:
-        relatives = sorted({Path(item) for item in relative_headers})
+        relatives = sorted(
+            {Path(item) for item in relative_headers},
+            key=lambda item: item.as_posix(),
+        )
     else:
         relatives = sorted(
-            path.relative_to(sdk_root)
-            for path in sdk_root.rglob("*.h")
-            if path.is_file()
+            (
+                path.relative_to(sdk_root)
+                for path in sdk_root.rglob("*.h")
+                if path.is_file()
+            ),
+            key=lambda item: item.as_posix(),
         )
 
     inputs: list[tuple[Path, str]] = []
@@ -123,11 +134,58 @@ def _build_header_manifest(
     )
 
 
+def _load_header_shards(paths: Sequence[Path]) -> list[dict]:
+    manifests = []
+    for path in paths:
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise SdkCompatibilityError(
+                f"header shard manifest does not exist: {path.name}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise SdkCompatibilityError(
+                f"header shard manifest is not valid JSON: {path.name}: {exc}"
+            ) from exc
+        if not isinstance(manifest, dict):
+            raise SdkCompatibilityError(
+                f"header shard manifest must contain an object: {path.name}"
+            )
+        manifests.append(manifest)
+    if not manifests:
+        raise SdkCompatibilityError("no header shard manifests were supplied")
+    return manifests
+
+
+def _merge_header_shards(
+    sdk_root: Path,
+    *,
+    relative_headers: Sequence[str],
+    header_manifests: Sequence[Path],
+    target: str,
+) -> dict:
+    inputs = _collect_headers(sdk_root, relative_headers)
+    manifests = _load_header_shards(header_manifests)
+    merged = sdk_header_surface.merge_shard_manifests(
+        manifests,
+        expected_headers=[display for _, display in inputs],
+        target=target,
+    )
+    print(
+        "[sdk-compatibility] verified header shards "
+        f"shards={len(manifests)} headers={merged['summary']['header_count']} "
+        f"symbols={merged['summary']['unique_symbol_count']}",
+        flush=True,
+    )
+    return merged
+
+
 def run_sdk_pipeline(
     *,
     sdk_root: Path,
     semantic_providers: Path = DEFAULT_SEMANTIC_PROVIDERS,
     relative_headers: Sequence[str] = (),
+    header_manifests: Sequence[Path] = (),
     tapi_targets: Sequence[str] | None = None,
     header_target: str = header_surface.DEFAULT_TARGET,
     clang: str = "clang",
@@ -148,15 +206,23 @@ def run_sdk_pipeline(
         raise SdkCompatibilityError(f"Clang executable not found: {clang}")
 
     tapi_manifest = _build_tapi_manifest(sdk_root, tapi_targets)
-    header_manifest = _build_header_manifest(
-        sdk_root,
-        relative_headers=relative_headers,
-        jobs=header_jobs,
-        clang=clang,
-        target=header_target,
-        clang_args=clang_args,
-        timeout_seconds=timeout_seconds,
-    )
+    if header_manifests:
+        header_manifest = _merge_header_shards(
+            sdk_root,
+            relative_headers=relative_headers,
+            header_manifests=header_manifests,
+            target=header_target,
+        )
+    else:
+        header_manifest = _build_header_manifest(
+            sdk_root,
+            relative_headers=relative_headers,
+            jobs=header_jobs,
+            clang=clang,
+            target=header_target,
+            clang_args=clang_args,
+            timeout_seconds=timeout_seconds,
+        )
     semantic_manifest = generate_semantic_routes.load_manifest(
         semantic_providers
     )
@@ -233,6 +299,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="optional SDK-relative header subset; repeat as needed",
     )
     parser.add_argument(
+        "--header-manifest",
+        action="append",
+        default=[],
+        help=(
+            "precomputed exhaustive SDK header shard manifest; repeat for every "
+            "shard. Coverage is verified against --sdk-root before use"
+        ),
+    )
+    parser.add_argument(
         "--tapi-target",
         action="append",
         dest="tapi_targets",
@@ -254,8 +329,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         default=sdk_header_surface.DEFAULT_HEADER_JOBS,
         help=(
-            "maximum SDK headers analyzed concurrently "
-            f"(default {sdk_header_surface.DEFAULT_HEADER_JOBS})"
+            "maximum SDK headers analyzed concurrently when no precomputed "
+            f"shards are supplied (default {sdk_header_surface.DEFAULT_HEADER_JOBS})"
         ),
     )
     parser.add_argument(
@@ -275,6 +350,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sdk_root=Path(args.sdk_root),
             semantic_providers=Path(args.semantic_providers),
             relative_headers=args.relative_header,
+            header_manifests=[Path(item) for item in args.header_manifest],
             tapi_targets=args.tapi_targets,
             header_target=args.header_target,
             clang=args.clang,
