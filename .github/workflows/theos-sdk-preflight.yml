@@ -20,18 +20,20 @@ permissions:
 
 env:
   THEOS_SDK_COMMIT: 0222fd5413cf4b9af096f37b4621afa2688572f7
-  HEADER_SHARD_COUNT: '16'
+  HEADER_SHARD_COUNT: '32'
+  HEADER_SHARD_WALL_TIMEOUT: '10m'
+  FULL_PREFLIGHT_WALL_TIMEOUT: '35m'
 
 jobs:
   header-shards:
     name: header-shard-${{ matrix.shard }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 16
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
 
     steps:
       - name: Check out ipaSim
@@ -66,20 +68,28 @@ jobs:
           manifest="shard-output/header-shard-${shard}.json"
           status="shard-output/header-shard-${shard}.status"
 
-          python tools/compat_surface/sdk_header_surface.py \
-            --sdk-root "$GITHUB_WORKSPACE/theos-sdks/iPhoneOS16.5.sdk" \
-            --shard-count "$HEADER_SHARD_COUNT" \
-            --shard-index "$shard" \
-            --jobs 2 \
-            --progress-every 20 \
-            --timeout 120 \
-            --output "$manifest" \
-            2>&1 | tee "$log"
+          # Materialize a sentinel before starting. If the analyzer is
+          # interrupted but the runner can still execute cleanup, the
+          # aggregator sees explicit incomplete evidence rather than silence.
+          printf 'running\n' > "$status"
+
+          timeout --signal=TERM --kill-after=30s "$HEADER_SHARD_WALL_TIMEOUT" \
+            python tools/compat_surface/sdk_header_surface.py \
+              --sdk-root "$GITHUB_WORKSPACE/theos-sdks/iPhoneOS16.5.sdk" \
+              --shard-count "$HEADER_SHARD_COUNT" \
+              --shard-index "$shard" \
+              --jobs 2 \
+              --progress-every 10 \
+              --timeout 120 \
+              --output "$manifest" \
+              2>&1 | tee "$log"
           code=${PIPESTATUS[0]}
           printf '%s\n' "$code" > "$status"
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
 
-          if [[ "$code" -ne 0 ]]; then
+          if [[ "$code" -eq 124 ]]; then
+            echo "::warning::Header shard ${shard} exceeded the ${HEADER_SHARD_WALL_TIMEOUT} wall-clock watchdog; evidence is retained and the final gate will fail closed."
+          elif [[ "$code" -ne 0 ]]; then
             echo "::warning::Header shard ${shard} failed with exit code ${code}; the exact diagnostic is retained for the final self-reporting gate."
           fi
           exit 0
@@ -96,6 +106,8 @@ jobs:
             echo "### Theos SDK header shard ${{ matrix.shard }}"
             echo
             echo "Captured analyzer exit status: \`$code\`"
+            echo "Job hard limit: **15 minutes**"
+            echo "Analyzer wall-clock watchdog: **${HEADER_SHARD_WALL_TIMEOUT}**"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload shard evidence
@@ -112,7 +124,7 @@ jobs:
     needs: header-shards
     if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
 
     steps:
       - name: Check out ipaSim
@@ -185,8 +197,16 @@ jobs:
                   duplicates.append(index)
                   continue
               try:
-                  statuses[index] = int(path.read_text(encoding='utf-8').strip())
-              except (OSError, ValueError) as exc:
+                  raw_status = path.read_text(encoding='utf-8').strip()
+                  statuses[index] = int(raw_status)
+              except ValueError:
+                  print(
+                      f'[sdk-header-surface] ERROR: shard {index} did not finish '
+                      f'cleanly; captured status={raw_status!r}',
+                      file=sys.stderr,
+                  )
+                  statuses[index] = -1
+              except OSError as exc:
                   print(
                       f'[sdk-header-surface] ERROR: invalid status for shard {index}: {exc}',
                       file=sys.stderr,
@@ -205,9 +225,15 @@ jobs:
           failed = sorted(index for index, code in statuses.items() if code != 0)
           for index in failed:
               code = statuses[index]
+              if code == 124:
+                  detail = ' (wall-clock watchdog expired)'
+              elif code in (137, 143):
+                  detail = ' (terminated by signal)'
+              else:
+                  detail = ''
               print(
                   f'[sdk-header-surface] ERROR: header shard {index}/{expected_count} '
-                  f'exited with code {code}',
+                  f'exited with code {code}{detail}',
                   file=sys.stderr,
               )
               logs = list(root.rglob(f'header-shard-{index}.log'))
@@ -271,15 +297,19 @@ jobs:
               header_args+=(--header-manifest "$manifest")
             done
 
-            python tools/compat_surface/sdk_compatibility.py \
-              --sdk-root "$GITHUB_WORKSPACE/theos-sdks/iPhoneOS16.5.sdk" \
-              --output-dir "$RUNNER_TEMP/ipasim-sdk-plan" \
-              "${header_args[@]}" \
-              --compiler-batch-size 256 \
-              --timeout 120
+            timeout --signal=TERM --kill-after=30s "$FULL_PREFLIGHT_WALL_TIMEOUT" \
+              python tools/compat_surface/sdk_compatibility.py \
+                --sdk-root "$GITHUB_WORKSPACE/theos-sdks/iPhoneOS16.5.sdk" \
+                --output-dir "$RUNNER_TEMP/ipasim-sdk-plan" \
+                "${header_args[@]}" \
+                --compiler-batch-size 256 \
+                --timeout 120
           ) 2>&1 | tee theos-sdk-preflight.log
           code=${PIPESTATUS[0]}
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [[ "$code" -eq 124 ]]; then
+            echo "::warning::Full SDK preflight exceeded the ${FULL_PREFLIGHT_WALL_TIMEOUT} wall-clock watchdog; diagnostic evidence will be published."
+          fi
           exit 0
 
       - name: Summarize successful SDK map
