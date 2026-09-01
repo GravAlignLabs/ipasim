@@ -2,16 +2,17 @@
 """Parallel, contextual, and shardable SDK-scale header signature analysis.
 
 ``header_surface`` remains authoritative for Clang AST/type canonicalization.
-This SDK layer adds the compilation context that real Apple framework headers
-expect: a framework header is parsed after its own umbrella header, framework
-search paths are reconstructed from the SDK layout, and declarations that
-Clang proves are unavailable for the selected target are recorded explicitly
-rather than being silently discarded or allowed to poison type recovery.
+This SDK layer supplies the compilation context that Apple framework headers
+expect while keeping each physical header as the authoritative source being
+measured. Framework leaf headers are compiled as the main Clang input after
+preloading their framework umbrella, so declarations keep exact leaf-header
+provenance instead of being inferred from a wrapper translation unit.
 
-Sharding only partitions the deterministic sorted physical-header inventory.
-Every header remains owned exactly once, and merged manifests are accepted only
-when coverage exactly reconstructs that inventory without gaps, overlaps, or
-target drift.
+Declarations that Clang proves are unavailable for the selected target remain
+explicit evidence in the manifest rather than being silently discarded.
+Sharding only partitions the deterministic sorted physical-header inventory;
+merged manifests are accepted only when coverage exactly reconstructs that
+inventory without gaps, overlaps, or target drift.
 """
 from __future__ import annotations
 
@@ -146,9 +147,9 @@ def _framework_search_paths(path: Path, sdk_root: Path) -> list[Path]:
     root = sdk_root.resolve()
     candidates: list[Path] = []
 
-    # The nearest Frameworks directory must win. This matters for nested
-    # frameworks (Accelerate/vecLib), Developer frameworks, and Cryptex
-    # overlays that can share a framework name with the ordinary SDK tree.
+    # The nearest framework search root must win. This is required for nested
+    # frameworks (for example Accelerate/vecLib), Developer frameworks, and
+    # Cryptex overlays that can share names with ordinary system frameworks.
     for parent in resolved.parents:
         if parent.name in ("Frameworks", "PrivateFrameworks") and _is_within(
             parent, root
@@ -188,7 +189,7 @@ def _sdk_clang_base(
     header_path: Path,
     extra_args: Sequence[str],
 ) -> list[str]:
-    """Build the same Clang baseline with SDK-context framework precedence."""
+    """Build the Clang baseline with SDK-context framework precedence."""
     root = sdk_root.resolve()
     args = [
         clang,
@@ -224,87 +225,6 @@ def _context_source(context_header: Path, target_header: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _location_file(loc: dict) -> str | None:
-    for candidate in (
-        loc,
-        loc.get("expansionLoc") or {},
-        loc.get("spellingLoc") or {},
-    ):
-        value = candidate.get("file")
-        if isinstance(value, str) and value:
-            return os.path.normcase(os.path.abspath(value))
-    return None
-
-
-def _discover_raw_functions_for_source(
-    ast: dict,
-    *,
-    header: str,
-    source_path: Path,
-) -> tuple[list[header_surface.RawFunction], int, int]:
-    """Discover only declarations whose source location belongs to one header."""
-    functions: list[header_surface.RawFunction] = []
-    skipped_cxx = 0
-    skipped_static = 0
-    expected_file = os.path.normcase(os.path.abspath(str(source_path.resolve())))
-
-    for node, ancestors in header_surface._walk(ast):
-        if node.get("kind") != "FunctionDecl" or node.get("isImplicit"):
-            continue
-        loc = node.get("loc") or {}
-        if _location_file(loc) != expected_file:
-            continue
-        if any(kind in header_surface.SCOPE_BLOCKERS for kind in ancestors):
-            skipped_cxx += 1
-            continue
-        if node.get("storageClass") == "static":
-            skipped_static += 1
-            continue
-
-        name = node.get("name")
-        mangled = node.get("mangledName")
-        function_type = (node.get("type") or {}).get("qualType")
-        if (
-            not isinstance(name, str)
-            or not name
-            or not isinstance(mangled, str)
-            or not mangled
-        ):
-            continue
-        if mangled.startswith("__Z"):
-            skipped_cxx += 1
-            continue
-        if not isinstance(function_type, str) or not function_type:
-            raise header_surface.HeaderParseError(
-                f"{header}: function {name} has no Clang type spelling"
-            )
-
-        params = []
-        for child in node.get("inner") or []:
-            if not isinstance(child, dict) or child.get("kind") != "ParmVarDecl":
-                continue
-            spelling = (child.get("type") or {}).get("qualType")
-            if not isinstance(spelling, str) or not spelling:
-                raise header_surface.HeaderParseError(
-                    f"{header}: parameter of {name} has no type spelling"
-                )
-            params.append(header_surface.RawParam(child.get("name"), spelling))
-        line, column = header_surface._source_position(loc)
-        functions.append(
-            header_surface.RawFunction(
-                header=header,
-                name=name,
-                symbol=mangled,
-                function_type=function_type,
-                params=tuple(params),
-                variadic=bool(node.get("variadic", False)),
-                line=line,
-                column=column,
-            )
-        )
-    return functions, skipped_cxx, skipped_static
-
-
 def _context_helper_source(
     context_header: Path,
     target_header: Path,
@@ -313,8 +233,8 @@ def _context_helper_source(
     helper_text, mapping = header_surface._helper_source(target_header, functions)
     helper_lines = helper_text.splitlines()
     imports = _context_source(context_header, target_header).rstrip("\n").splitlines()
-    # _helper_source always starts by including target_header. Replace that
-    # single include with the legitimate framework context imports.
+    # _helper_source begins by including target_header. Replace that one include
+    # with the context imports while retaining its authoritative typedef probes.
     return "\n".join(imports + helper_lines[1:]) + "\n", mapping
 
 
@@ -507,8 +427,8 @@ def _analyze_sdk_header(
     extra_args: Sequence[str],
     timeout_seconds: int,
 ) -> tuple[list[header_surface.HeaderSignature], dict]:
-    # Preserve the original parser byte-for-byte for ordinary headers. SDK
-    # context reconstruction is only needed inside Apple .framework bundles.
+    # Preserve the original parser byte-for-byte for ordinary non-framework
+    # headers. SDK context reconstruction is applied only to .framework leaves.
     if sdk_root is None:
         return header_surface.analyze_header(
             path,
@@ -541,37 +461,35 @@ def _analyze_sdk_header(
     if context_header != resolved:
         replacements.append((str(context_header), "<FRAMEWORK-CONTEXT>"))
 
-    with tempfile.TemporaryDirectory(prefix="ipasim-sdk-header-context-") as directory:
-        source_path = Path(directory) / "header_context.m"
-        source_path.write_text(
-            _context_source(context_header, resolved),
-            encoding="utf-8",
-        )
-        first_replacements = replacements + [(directory, "<TMP>")]
-        first_args = _sdk_clang_base(
-            clang,
-            target,
-            "objective-c",
-            root,
-            resolved,
-            extra_args,
-        )
-        first_args += ["-Xclang", "-ast-dump=json", str(source_path)]
-        first_output = header_surface._run_clang(
-            first_args,
-            first_replacements,
-            timeout_seconds,
-        )
+    # Keep the leaf itself as Clang's main source file. Preloading the umbrella
+    # supplies dependent declarations/macros, but main-file source ownership is
+    # still unambiguous and the existing authoritative raw-declaration walker
+    # can continue to reject declarations that arrived only from dependencies.
+    first_args = _sdk_clang_base(
+        clang,
+        target,
+        "objective-c-header",
+        root,
+        resolved,
+        extra_args,
+    )
+    if context_header != resolved:
+        first_args += ["-include", str(context_header)]
+    first_args += ["-Xclang", "-ast-dump=json", str(resolved)]
+    first_output = header_surface._run_clang(
+        first_args,
+        replacements,
+        timeout_seconds,
+    )
 
     objects = header_surface._json_objects(first_output)
     if len(objects) != 1:
         raise header_surface.HeaderParseError(
             f"{display}: expected one Clang translation-unit AST, got {len(objects)}"
         )
-    raw, skipped_cxx, skipped_static = _discover_raw_functions_for_source(
+    raw, skipped_cxx, skipped_static = header_surface._discover_raw_functions(
         objects[0],
-        header=display,
-        source_path=resolved,
+        display,
     )
     if not raw:
         return [], {
