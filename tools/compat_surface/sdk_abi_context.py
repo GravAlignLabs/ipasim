@@ -10,8 +10,9 @@ an origin leaf and losing the context Clang already proved during header indexin
 This module builds a temporary header-root of tiny wrappers. Each wrapper keeps the
 original physical source path stable for the existing ABI machinery, but prepends
 only public/prelude headers derived from the SDK itself. That includes headers
-explicitly recommended by a leaf and a framework's canonical umbrella when the
-SDK's own include/import graph proves that umbrella reaches the declaration owner.
+explicitly recommended by a leaf, conventional SDK package/framework umbrellas when
+the SDK's own include/import graph proves they reach the declaration owner, and
+source-local Swift importer definitions already justified by SDK header context.
 Guarded declaration headers are always included directly after their preludes so a
 conditional umbrella edge cannot hide a declaration from the active target. Only
 unguarded headers are suppressed when a proven prelude already enters them, because
@@ -63,6 +64,14 @@ def _libcxx_root(sdk_root: Path) -> Path | None:
     return candidate if candidate.is_dir() else None
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
 def _escaped_include(path: Path) -> str:
     return str(path.resolve()).replace("\\", "/").replace('"', '\\"')
 
@@ -85,10 +94,6 @@ def _source_has_reinclude_guard(source: Path) -> bool:
     if _PRAGMA_ONCE.search(text):
         return True
 
-    # Keep guard inference conservative. A normal file guard is established near
-    # the top of a header, after comments/license text, and immediately defines the
-    # same identifier. Restricting the search window avoids mistaking an unrelated
-    # feature conditional deeper in the file for a whole-header reinclude guard.
     prefix = "\n".join(text.splitlines()[:96])
     matches: list[tuple[int, str]] = []
     for pattern in (_IFNDEF_GUARD, _IF_NOT_DEFINED_GUARD):
@@ -223,16 +228,7 @@ def _framework_header_reaches(
 
 
 def _framework_umbrella(source: Path, *, sdk_root: Path) -> Path | None:
-    """Return a canonical framework umbrella that reaches ``source``.
-
-    Apple SDK frameworks frequently put implementation leaves one or more include
-    levels below their public master header. The leaf may simply say "do not include
-    directly" without naming that owner. We accept the conventional
-    ``Headers/<Framework>.h`` entrypoint only when a deterministic traversal of the
-    installed SDK's own include/import directives reaches the exact physical source.
-    This supports nested frameworks as well as direct umbrella-to-leaf relationships
-    without inventing prerequisites or framework-specific policy.
-    """
+    """Return a canonical framework umbrella that reaches ``source``."""
     resolved = source.resolve()
     layout = _framework_layout(resolved, sdk_root=sdk_root)
     if layout is None:
@@ -331,6 +327,52 @@ def _usr_header_reaches(entry: Path, target: Path, *, sdk_root: Path) -> bool:
     return False
 
 
+def _usr_package_umbrella(source: Path, *, sdk_root: Path) -> Path | None:
+    """Return ``usr/include/<pkg>/<pkg>.h`` only when it reaches ``source``."""
+    root = sdk_root.resolve()
+    usr_include = (root / "usr" / "include").resolve()
+    resolved = source.resolve()
+    try:
+        relative = resolved.relative_to(usr_include)
+    except ValueError:
+        return None
+    if len(relative.parts) < 2 or relative.parts[0] == "c++":
+        return None
+
+    package = relative.parts[0]
+    umbrella = (usr_include / package / f"{package}.h").resolve()
+    if not umbrella.is_file() or umbrella == resolved:
+        return None
+    if _usr_header_reaches(umbrella, resolved, sdk_root=root):
+        return umbrella
+    return None
+
+
+def _prefer_usr_owner_for_non_libcxx(
+    candidate: Path,
+    *,
+    source: Path,
+    sdk_root: Path,
+) -> Path:
+    """Prefer the ordinary SDK C header when a non-libc++ leaf names one."""
+    root = sdk_root.resolve()
+    libcxx = _libcxx_root(root)
+    if libcxx is None:
+        return candidate.resolve()
+    resolved_source = source.resolve()
+    resolved_candidate = candidate.resolve()
+    if _is_within(resolved_source, libcxx):
+        return resolved_candidate
+    try:
+        relative = resolved_candidate.relative_to(libcxx.resolve())
+    except ValueError:
+        return resolved_candidate
+    ordinary = (root / "usr" / "include" / relative).resolve()
+    if ordinary.is_file():
+        return ordinary
+    return resolved_candidate
+
+
 def _prelude_reaches_source(
     prelude: Path,
     source: Path,
@@ -386,6 +428,17 @@ def recommended_preludes(
         sdk_root=root,
         libcxx_root=_libcxx_root(root),
     )
+    candidates = [
+        _prefer_usr_owner_for_non_libcxx(
+            candidate,
+            source=resolved,
+            sdk_root=root,
+        )
+        for candidate in candidates
+    ]
+    package_umbrella = _usr_package_umbrella(resolved, sdk_root=root)
+    if package_umbrella is not None:
+        candidates.append(package_umbrella)
     framework_umbrella = _framework_umbrella(resolved, sdk_root=root)
     if framework_umbrella is not None:
         candidates.append(framework_umbrella)
@@ -410,6 +463,34 @@ def _validate_c_name(name: str) -> str:
     return name
 
 
+def _scoped_sdk_defines(
+    source: Path,
+    *,
+    sdk_root: Path,
+) -> list[tuple[str, str]]:
+    """Return wrapper-scoped defines already justified by SDK importer context."""
+    result: list[tuple[str, str]] = []
+    for argument in sdk_header_context.swift_importer_args(source, sdk_root):
+        if not argument.startswith("-D") or len(argument) <= 2:
+            raise SdkAbiContextError(
+                f"unsupported SDK importer argument for ABI wrapper: {argument!r}"
+            )
+        payload = argument[2:]
+        name, separator, value = payload.partition("=")
+        if not _C_IDENTIFIER.fullmatch(name):
+            raise SdkAbiContextError(
+                f"SDK importer define has unsafe identifier: {argument!r}"
+            )
+        if not separator:
+            value = "1"
+        if not value or "\n" in value or "\r" in value:
+            raise SdkAbiContextError(
+                f"SDK importer define has unsafe value: {argument!r}"
+            )
+        result.append((name, value))
+    return result
+
+
 def _write_wrapper(
     wrapper_root: Path,
     *,
@@ -429,6 +510,20 @@ def _write_wrapper(
     lines = [
         "/* Generated locally for SDK ABI probing; not compatibility policy. */"
     ]
+    scoped_defines = _scoped_sdk_defines(source, sdk_root=sdk_root)
+    markers: list[tuple[str, str]] = []
+    for index, (name, value) in enumerate(scoped_defines):
+        marker = f"__IPASIM_ABI_CONTEXT_DEFINED_{index}_{name}"
+        lines.extend(
+            [
+                f"#ifndef {name}",
+                f"#define {name} {value}",
+                f"#define {marker} 1",
+                "#endif",
+            ]
+        )
+        markers.append((marker, name))
+
     preludes = recommended_preludes(source, sdk_root=sdk_root)
     reinclude_safe = _source_has_reinclude_guard(source)
     source_entered = False
@@ -445,20 +540,19 @@ def _write_wrapper(
         ):
             source_entered = True
 
-    # Textual SDK reachability may cross a target-inactive #if branch. Guarded
-    # declaration headers are therefore always included directly after their
-    # preludes: if a prelude already entered the source the guard makes this a
-    # no-op, and if it did not, the declaration is still present for the ABI probe.
-    # Unguarded implementation leaves remain single-entry to avoid redeclarations.
     if reinclude_safe or not source_entered:
         lines.append(f'#include "{_escaped_include(source)}"')
 
-    # Some public SDK headers declare a real exported function and then replace
-    # that spelling with an object-like macro to a static inline implementation.
-    # The ABI inventory is keyed to the TAPI export and the original FunctionDecl,
-    # so allowing that later macro to rewrite ``&name`` would make Clang lower the
-    # convenience helper instead of the exported symbol. Undefine only C names
-    # selected from this physical declaration owner, after the owner has compiled.
+    for marker, name in reversed(markers):
+        lines.extend(
+            [
+                f"#ifdef {marker}",
+                f"#undef {name}",
+                f"#undef {marker}",
+                "#endif",
+            ]
+        )
+
     for name in sorted({_validate_c_name(item) for item in selected_c_names}):
         lines.extend(
             [
@@ -468,6 +562,21 @@ def _write_wrapper(
             ]
         )
     wrapper.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _aapcs64_extra_args(
+    extra_args: Sequence[str],
+    *,
+    sdk_root: Path,
+) -> tuple[str, ...]:
+    """Add SDK include roots needed by compiler-backed ABI wrapper translation."""
+    result = list(extra_args)
+    libcxx = _libcxx_root(sdk_root)
+    if libcxx is not None:
+        path = str(libcxx.resolve())
+        if path not in result:
+            result.extend(["-I", path])
+    return tuple(result)
 
 
 def build_aapcs64_manifest(
@@ -499,6 +608,7 @@ def build_aapcs64_manifest(
     if not root.is_dir():
         raise SdkAbiContextError(f"SDK root does not exist: {root.name}")
 
+    probe_extra_args = _aapcs64_extra_args(extra_args, sdk_root=root)
     _, selected = abi_surface._validate_inventory(inventory)
     source_headers = sorted({item.source_header for item in selected})
     if not source_headers:
@@ -508,7 +618,7 @@ def build_aapcs64_manifest(
             sdk_root=root,
             batch_size=batch_size,
             clang=clang,
-            extra_args=extra_args,
+            extra_args=probe_extra_args,
             timeout_seconds=timeout_seconds,
         )
 
@@ -536,7 +646,7 @@ def build_aapcs64_manifest(
                 sdk_root=root,
                 batch_size=batch_size,
                 clang=clang,
-                extra_args=extra_args,
+                extra_args=probe_extra_args,
                 timeout_seconds=timeout_seconds,
             )
         except abi_surface.AbiSurfaceError as exc:
