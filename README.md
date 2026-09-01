@@ -88,7 +88,7 @@ There is also a parallel active **Darwin pthread core** work claim. Before chang
 
 ## Current ARM64 work
 
-The modern ARM64 foundation began with [PR #3: ARM64 + modern dyld foundation for iOS compatibility](https://github.com/GravAlignLabs/ipasim/pull/3). Development has now advanced through [PR #53: Generalize generated semantic import routing table](https://github.com/GravAlignLabs/ipasim/pull/53).
+The modern ARM64 foundation began with [PR #3: ARM64 + modern dyld foundation for iOS compatibility](https://github.com/GravAlignLabs/ipasim/pull/3). Merged compatibility-engine development has advanced through [PR #53: Generalize generated semantic import routing table](https://github.com/GravAlignLabs/ipasim/pull/53), while active [PR #58](https://github.com/GravAlignLabs/ipasim/pull/58) is now validating the complete SDK-wide path against a real pinned iOS SDK.
 
 The project is working on **two connected layers at the same time**:
 
@@ -101,17 +101,22 @@ The important refinement is that the second layer is now intended to operate **S
 
 [PR #58](https://github.com/GravAlignLabs/ipasim/pull/58) is exercising the full compatibility pipeline against the pinned public `theos/sdks@0222fd5413cf4b9af096f37b4621afa2688572f7` `iPhoneOS16.5.sdk` rather than relying only on synthetic fixtures. The exact physical SDK header inventory is **5,118 headers**. CI partitions that inventory into 32 deterministic shards and accepts a merged header surface only when every physical header is owned exactly once; there are no bad-header ignore lists or partial-success paths.
 
-The preflight infrastructure has also been hardened after a GitHub-hosted runner died mid-shard: each analyzer shard now has an in-runner wall-clock watchdog and a job-level timeout, progress is emitted frequently, evidence is uploaded before the final failure whenever the runner survives, and the concurrency key includes the PR head SHA so a zombie run from an older commit cannot block a new head indefinitely.
+The preflight infrastructure has been hardened after GitHub-hosted runner failures exposed control-plane and observability weaknesses. Each analyzer shard has an in-runner wall-clock watchdog plus a job-level timeout, progress is emitted frequently, evidence is uploaded before the final failure whenever the runner survives, and the concurrency key includes the PR head SHA so a zombie run from an obsolete commit cannot indefinitely block the current head.
 
-SDK context recovery has advanced in layers. Framework leaves are parsed through their normal umbrella/import graph while declarations are still attributed back to the exact physical target header. The AppleArchive failure family is now resolved generically through its `module.modulemap` umbrella metadata, and libc++ is entered with the SDK's own `usr/include/c++/v1` include root and C++ language context. Those changes cleared the earlier `AVAudioSessionDeprecated.h`, AppleArchive direct-inclusion, missing `__config`, and missing `__concepts/...` failures.
+SDK context recovery is now substantially broader than the first exhaustive attempts. Framework leaves are compiled through SDK-derived ownership/context while declarations remain attributed to the exact physical target header. The analyzer now reconstructs framework search roots, honors module-map umbrella ownership, enters libc++ through the SDK's own `usr/include/c++/v1` root, follows explicit public-header recommendations and reverse include owners, derives prerequisite providers from Clang's unresolved-type evidence, records target-unavailable declarations without converting them into success, and records physically present but target-inactive headers only when the SDK itself supplies evidence for that state.
 
-The latest exhaustive run (#18) completed normally and exposed the next real scanner boundaries instead of hanging. Six shards produced complete manifests; the remaining failures cluster into three context classes:
+The latest context work also closes four classes that remained after those earlier passes:
 
-- private or implementation headers that explicitly require an owning public header, such as `os/_workgroup.h` -> `<os/workgroup.h>`, `secure/_strings.h` -> `<strings.h>`, `sys/_posix_availability.h` -> `<sys/cdefs.h>`, and RPC leaves that require their RPC type context;
-- libc++ private/platform-specific leaves whose correct owner is described by libc++ module metadata rather than by treating the leaf as a standalone iOS translation unit; and
-- C declarations that Clang successfully parses but marks unavailable for the selected iOS/ARM64 target, such as legacy dyld, Objective-C runtime, and `gethostuuid` APIs. Framework-context analysis already records this evidence explicitly, but the ordinary-header helper path still needs the same target-unavailable recovery instead of failing on `typedef __typeof__(symbol)`.
+- **module guards are distinguished from real module imports**: a private header that says to enter through a public owner no longer gets `-fmodules` merely to satisfy `__has_feature(modules)`, while genuinely module-only headers still retain module support;
+- **actual `@import` failures are checked against the SDK's module maps** before a missing module can be recorded as target-inactive evidence;
+- **Swift shim headers can use their SDK-authored `__swift__` importer branch** when the non-Swift implementation path depends on Swift compiler/runtime headers that are not shipped inside the iPhone SDK; and
+- **non-libc++ C++-modeline overlay headers may fall back to Objective-C for their C ABI surface** when Clang proves the C++ spelling itself is the only blocker.
 
-The immediate compatibility-engine step is therefore to generalize **SDK header ownership context**: determine each physical leaf's framework/module/public-header entrypoint, compile through that real context, attribute AST declarations back to the exact physical leaf, and record target-unavailable declarations as evidence. This remains mechanical SDK analysis only; it does not approve semantic providers or change loader/runtime semantics.
+The fast **Compatibility Surface Analyzer now passes 141 tests** covering the importer, TAPI surface, contextual header scanner, sharding/merge invariants, SDK catalog, AAPCS64 lowering, Win64 carrier lowering, bridge planning, runtime adapter generation, semantic-route generation, and the new module/Swift/context regressions. In particular, the regression suite proves that genuine module-only headers still work, public-owner guards do not incorrectly force unrelated module construction, missing explicit module imports fail closed, Swift importer branches remain source-derived, and C ABI extraction stays limited to the target physical header.
+
+The authoritative gate remains the complete **5,118-header** preflight. Every new PR head reruns all 32 deterministic shards; if it fails, the next change should address the first genuine generic SDK-context or compatibility-engine boundary rather than introduce a header-specific ignore list. If the header surface completes, the same preflight continues through TAPI, the SDK-wide typed catalog, AAPCS64 lowering, Win64 lowering, libffi bridge plans, runtime adapters, the compatibility planner, and explicitly approved semantic routes.
+
+This work remains mechanical SDK analysis only. It does not grant semantic-provider approval, alter loader policy, or claim that an exported SDK function is correctly implemented on Windows merely because its ABI is mechanically describable.
 
 ### Verified checkpoint — August 31, 2026
 
@@ -311,7 +316,7 @@ These are selected checkpoints rather than a complete changelog. Earlier merged 
 
 The project should still be treated as an active emulator bring-up effort, not a finished modern iOS compatibility layer. Important remaining areas include:
 
-- run the existing AAPCS64 -> Win64 -> libffi generation chain over the SDK-wide typed catalog in deterministic batches and publish mechanical coverage metrics
+- finish a clean pinned **5,118-header** exhaustive SDK preflight with exact coverage, then publish SDK-wide typed/ABI/adapter coverage metrics from the complete TAPI -> catalog -> AAPCS64 -> Win64 -> libffi -> runtime-adapter pipeline
 - build a machine-readable semantic-provider inventory so SDK-wide rows can report approved, candidate, missing, complex, or unsupported semantic status without conflating that status with ABI evidence
 - progressively generate production route data from that semantic inventory while preserving explicit approval and fail-closed module/export/address verification
 - avoid turning `LiveGuestProfile` or another runtime table into a second handwritten ABI database; generated adapter records should drive general execution as their proven runtime capabilities expand
