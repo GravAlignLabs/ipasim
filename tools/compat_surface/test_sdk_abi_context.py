@@ -103,7 +103,7 @@ class SdkAbiContextTests(unittest.TestCase):
                 [],
             )
 
-    def test_aapcs64_wrapper_includes_umbrella_before_physical_leaf(self):
+    def test_aapcs64_wrapper_does_not_reenter_leaf_reached_by_umbrella(self):
         with tempfile.TemporaryDirectory() as directory:
             sdk_root = Path(directory) / "sdk"
             umbrella, leaf = self._write_apple_archive_fixture(sdk_root)
@@ -150,12 +150,11 @@ class SdkAbiContextTests(unittest.TestCase):
             umbrella_include = f'#include "{umbrella.resolve().as_posix()}"'
             leaf_include = f'#include "{leaf.resolve().as_posix()}"'
             self.assertIn(umbrella_include, text)
-            self.assertIn(leaf_include, text)
-            self.assertLess(text.index(umbrella_include), text.index(leaf_include))
+            self.assertNotIn(leaf_include, text)
             self.assertIn("#ifdef AAArchiveStreamCancel", text)
             self.assertIn("#undef AAArchiveStreamCancel", text)
             self.assertLess(
-                text.index(leaf_include),
+                text.index(umbrella_include),
                 text.index("#undef AAArchiveStreamCancel"),
             )
             build.assert_called_once()
@@ -164,6 +163,41 @@ class SdkAbiContextTests(unittest.TestCase):
             self.assertEqual(kwargs["batch_size"], 23)
             self.assertEqual(kwargs["extra_args"], ("-DTEST",))
             self.assertEqual(kwargs["timeout_seconds"], 17)
+
+    def test_wrapper_still_includes_source_when_prelude_does_not_reach_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sdk_root = Path(directory) / "sdk"
+            include_root = sdk_root / "usr" / "include"
+            include_root.mkdir(parents=True)
+            prelude = include_root / "Prelude.h"
+            source = include_root / "Leaf.h"
+            prelude.write_text("typedef int PreludeType;\n", encoding="utf-8")
+            source.write_text("int LeafThing(void);\n", encoding="utf-8")
+            wrapper_root = Path(directory) / "wrappers"
+
+            with mock.patch.object(
+                sdk_abi_context,
+                "recommended_preludes",
+                return_value=[prelude.resolve()],
+            ):
+                sdk_abi_context._write_wrapper(
+                    wrapper_root,
+                    relative="usr/include/Leaf.h",
+                    source=source,
+                    sdk_root=sdk_root,
+                )
+
+            text = (wrapper_root / "usr/include/Leaf.h").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(
+                f'#include "{prelude.resolve().as_posix()}"',
+                text,
+            )
+            self.assertIn(
+                f'#include "{source.resolve().as_posix()}"',
+                text,
+            )
 
     @unittest.skipUnless(shutil.which("clang"), "clang is required")
     def test_exported_function_macro_alias_does_not_replace_abi_probe_target(self):
