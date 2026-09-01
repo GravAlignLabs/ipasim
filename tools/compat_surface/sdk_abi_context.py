@@ -12,13 +12,15 @@ original physical source path stable for the existing ABI machinery, but prepend
 only public/prelude headers derived from the SDK itself. That includes headers
 explicitly recommended by a leaf and a framework's canonical umbrella when the
 SDK's own include/import graph proves that umbrella reaches the declaration owner.
-When a proven prelude already enters the declaration owner, the wrapper does not
-include that physical header a second time; this matters for SDK implementation
-headers that are intentionally unguarded. It also removes any source-level macro
-alias that shadows a selected exported C identifier after the declaration owner has
-been entered, so the address probe binds to the TAPI-backed declaration rather than
-an inline convenience implementation. No application names, semantic-provider
-approvals, or header-specific exceptions are introduced here.
+Guarded declaration headers are always included directly after their preludes so a
+conditional umbrella edge cannot hide a declaration from the active target. Only
+unguarded headers are suppressed when a proven prelude already enters them, because
+re-entering those implementation leaves can redeclare enums/functions. It also
+removes any source-level macro alias that shadows a selected exported C identifier
+after the declaration owner has been entered, so the address probe binds to the
+TAPI-backed declaration rather than an inline convenience implementation. No
+application names, semantic-provider approvals, or header-specific exceptions are
+introduced here.
 """
 from __future__ import annotations
 
@@ -41,6 +43,19 @@ _INCLUDE_DIRECTIVE = re.compile(
     r'^[ \t]*#[ \t]*(?:include|import)[ \t]*([<"])([^>"]+)[>"]',
     re.MULTILINE,
 )
+_PRAGMA_ONCE = re.compile(
+    r"^[ \t]*#[ \t]*pragma[ \t]+once\b",
+    re.MULTILINE,
+)
+_IFNDEF_GUARD = re.compile(
+    r"^[ \t]*#[ \t]*ifndef[ \t]+([A-Za-z_][A-Za-z0-9_]*)\b",
+    re.MULTILINE,
+)
+_IF_NOT_DEFINED_GUARD = re.compile(
+    r"^[ \t]*#[ \t]*if[ \t]+![ \t]*defined[ \t]*(?:\([ \t]*)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)[ \t]*\)?",
+    re.MULTILINE,
+)
 
 
 def _libcxx_root(sdk_root: Path) -> Path | None:
@@ -57,6 +72,37 @@ def _source_path(header_root: Path, relative: str) -> Path:
         return abi_surface._resolve_header(header_root.resolve(), relative)
     except abi_surface.AbiSurfaceError as exc:
         raise SdkAbiContextError(str(exc)) from exc
+
+
+def _source_has_reinclude_guard(source: Path) -> bool:
+    """Return whether SDK text proves that entering ``source`` twice is idempotent."""
+    try:
+        text = source.resolve().read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise SdkAbiContextError(
+            f"could not read SDK source header {source.name}: {exc}"
+        ) from exc
+    if _PRAGMA_ONCE.search(text):
+        return True
+
+    # Keep guard inference conservative. A normal file guard is established near
+    # the top of a header, after comments/license text, and immediately defines the
+    # same identifier. Restricting the search window avoids mistaking an unrelated
+    # feature conditional deeper in the file for a whole-header reinclude guard.
+    prefix = "\n".join(text.splitlines()[:96])
+    matches: list[tuple[int, str]] = []
+    for pattern in (_IFNDEF_GUARD, _IF_NOT_DEFINED_GUARD):
+        match = pattern.search(prefix)
+        if match is not None:
+            matches.append((match.start(), match.group(1)))
+    if not matches:
+        return False
+    _, name = min(matches, key=lambda item: item[0])
+    define = re.compile(
+        rf"^[ \t]*#[ \t]*define[ \t]+{re.escape(name)}(?:\b|[ \t])",
+        re.MULTILINE,
+    )
+    return define.search(prefix) is not None
 
 
 def _framework_layout(
@@ -384,21 +430,27 @@ def _write_wrapper(
         "/* Generated locally for SDK ABI probing; not compatibility policy. */"
     ]
     preludes = recommended_preludes(source, sdk_root=sdk_root)
+    reinclude_safe = _source_has_reinclude_guard(source)
     source_entered = False
     for context in preludes:
         lines.append(f'#include "{_escaped_include(context)}"')
-        if not source_entered and _prelude_reaches_source(
-            context,
-            source,
-            sdk_root=sdk_root,
+        if (
+            not reinclude_safe
+            and not source_entered
+            and _prelude_reaches_source(
+                context,
+                source,
+                sdk_root=sdk_root,
+            )
         ):
             source_entered = True
 
-    # Some SDK leaves are intentionally unguarded implementation headers. A public
-    # prelude that already entered such a leaf is the complete declaration context;
-    # including the physical source again would redeclare its enums/functions. Only
-    # add the source directly when the SDK include graph did not already reach it.
-    if not source_entered:
+    # Textual SDK reachability may cross a target-inactive #if branch. Guarded
+    # declaration headers are therefore always included directly after their
+    # preludes: if a prelude already entered the source the guard makes this a
+    # no-op, and if it did not, the declaration is still present for the ABI probe.
+    # Unguarded implementation leaves remain single-entry to avoid redeclarations.
+    if reinclude_safe or not source_entered:
         lines.append(f'#include "{_escaped_include(source)}"')
 
     # Some public SDK headers declare a real exported function and then replace
