@@ -10,11 +10,15 @@ an origin leaf and losing the context Clang already proved during header indexin
 This module builds a temporary header-root of tiny wrappers. Each wrapper keeps the
 original physical source path stable for the existing ABI machinery, but prepends
 only public/prelude headers explicitly recommended by the SDK's own header text.
+It also removes any source-level macro alias that shadows a selected exported C
+identifier after the declaration owner has been entered, so the address probe binds
+to the TAPI-backed declaration rather than an inline convenience implementation.
 No application names, semantic-provider approvals, or header-specific exceptions
 are introduced here.
 """
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path
 from typing import Sequence
@@ -24,8 +28,11 @@ import compiler_batching
 import sdk_header_context
 
 
-class SdkAbiContextError(compiler_batching.CompilerBatchError):
+class SdkAbiContextError(ValueError):
     """Raised when SDK-backed ABI include context cannot be constructed safely."""
+
+
+_C_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _libcxx_root(sdk_root: Path) -> Path | None:
@@ -70,12 +77,21 @@ def recommended_preludes(
     )
 
 
+def _validate_c_name(name: str) -> str:
+    if not isinstance(name, str) or not _C_IDENTIFIER.fullmatch(name):
+        raise SdkAbiContextError(
+            f"selected SDK C identifier cannot be represented safely: {name!r}"
+        )
+    return name
+
+
 def _write_wrapper(
     wrapper_root: Path,
     *,
     relative: str,
     source: Path,
     sdk_root: Path,
+    selected_c_names: Sequence[str] = (),
 ) -> None:
     rel = Path(relative)
     if rel.is_absolute() or ".." in rel.parts:
@@ -94,6 +110,23 @@ def _write_wrapper(
     # prelude. If the public owner already entered the leaf, its normal include
     # guard makes this a no-op; otherwise this preserves prerequisite semantics.
     lines.append(f'#include "{_escaped_include(source)}"')
+
+    # Some public SDK headers declare a real exported function and then replace
+    # that spelling with an object-like macro to a static inline implementation.
+    # The ABI inventory is keyed to the TAPI export and the original FunctionDecl,
+    # so allowing that later macro to rewrite ``&name`` would make Clang lower the
+    # convenience helper instead of the exported symbol. Undefine only C names
+    # selected from this physical declaration owner, after the owner has compiled.
+    # Header guards ensure later indirect includes cannot replay this owner's macro
+    # definitions in the same ABI probe translation unit.
+    for name in sorted({_validate_c_name(item) for item in selected_c_names}):
+        lines.extend(
+            [
+                f"#ifdef {name}",
+                f"#undef {name}",
+                "#endif",
+            ]
+        )
     wrapper.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -139,6 +172,12 @@ def build_aapcs64_manifest(
             timeout_seconds=timeout_seconds,
         )
 
+    names_by_header: dict[str, set[str]] = {}
+    for item in selected:
+        names_by_header.setdefault(item.source_header, set()).add(
+            _validate_c_name(item.c_name)
+        )
+
     with tempfile.TemporaryDirectory(prefix="ipasim-sdk-abi-context-") as directory:
         wrapper_root = Path(directory) / "headers"
         for relative in source_headers:
@@ -148,13 +187,17 @@ def build_aapcs64_manifest(
                 relative=relative,
                 source=source,
                 sdk_root=root,
+                selected_c_names=sorted(names_by_header.get(relative, ())),
             )
-        return compiler_batching.build_aapcs64_manifest(
-            inventory,
-            header_root=wrapper_root,
-            sdk_root=root,
-            batch_size=batch_size,
-            clang=clang,
-            extra_args=extra_args,
-            timeout_seconds=timeout_seconds,
-        )
+        try:
+            return compiler_batching.build_aapcs64_manifest(
+                inventory,
+                header_root=wrapper_root,
+                sdk_root=root,
+                batch_size=batch_size,
+                clang=clang,
+                extra_args=extra_args,
+                timeout_seconds=timeout_seconds,
+            )
+        except abi_surface.AbiSurfaceError as exc:
+            raise compiler_batching.CompilerBatchError(str(exc)) from exc
