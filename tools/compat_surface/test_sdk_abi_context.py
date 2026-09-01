@@ -35,6 +35,38 @@ class SdkAbiContextTests(unittest.TestCase):
         )
         return umbrella, leaf
 
+    def _write_framework_fixture(
+        self,
+        root: Path,
+        framework_name: str,
+        leaf_name: str,
+        *,
+        umbrella_includes_leaf: bool = True,
+    ) -> tuple[Path, Path]:
+        headers = (
+            root
+            / "System"
+            / "Library"
+            / "Frameworks"
+            / f"{framework_name}.framework"
+            / "Headers"
+        )
+        headers.mkdir(parents=True)
+        umbrella = headers / f"{framework_name}.h"
+        leaf = headers / leaf_name
+        include = (
+            f"#import <{framework_name}/{leaf_name}>\n"
+            if umbrella_includes_leaf
+            else "#import <Foundation/Foundation.h>\n"
+        )
+        umbrella.write_text(include, encoding="utf-8")
+        leaf.write_text(
+            "#pragma once\n"
+            f"int {framework_name}Thing(void);\n",
+            encoding="utf-8",
+        )
+        return umbrella, leaf
+
     def test_recommended_preludes_resolves_sdk_named_sibling_umbrella(self):
         with tempfile.TemporaryDirectory() as directory:
             sdk_root = Path(directory) / "sdk"
@@ -42,6 +74,33 @@ class SdkAbiContextTests(unittest.TestCase):
             self.assertEqual(
                 sdk_abi_context.recommended_preludes(leaf, sdk_root=sdk_root),
                 [umbrella.resolve()],
+            )
+
+    def test_framework_umbrella_is_derived_from_direct_sdk_include(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sdk_root = Path(directory) / "sdk"
+            umbrella, leaf = self._write_framework_fixture(
+                sdk_root,
+                "GSS",
+                "gssapi_apple.h",
+            )
+            self.assertEqual(
+                sdk_abi_context.recommended_preludes(leaf, sdk_root=sdk_root),
+                [umbrella.resolve()],
+            )
+
+    def test_unrelated_framework_umbrella_is_not_injected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sdk_root = Path(directory) / "sdk"
+            _, leaf = self._write_framework_fixture(
+                sdk_root,
+                "ExampleKit",
+                "ExampleLeaf.h",
+                umbrella_includes_leaf=False,
+            )
+            self.assertEqual(
+                sdk_abi_context.recommended_preludes(leaf, sdk_root=sdk_root),
+                [],
             )
 
     def test_aapcs64_wrapper_includes_umbrella_before_physical_leaf(self):
