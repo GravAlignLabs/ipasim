@@ -2,11 +2,11 @@
 """Parallel, contextual, and shardable SDK-scale header signature analysis.
 
 ``header_surface`` remains authoritative for Clang AST/type canonicalization.
-This SDK layer supplies the compilation context that Apple framework headers
-expect while keeping each physical header as the authoritative source being
-measured. Framework leaves are parsed through a wrapper translation unit that
-loads the framework umbrella before the target leaf, then Clang declarations
-are attributed back to the physical target header by source location.
+This SDK layer reconstructs the compilation environment expected by Apple SDK
+headers while keeping every physical header as the authoritative source being
+measured. Frameworks, modular ``usr/include`` packages, and libc++ headers are
+parsed through context translation units, then Clang declarations are strictly
+attributed back to the exact physical target header by source location.
 
 Declarations that Clang proves are unavailable for the selected target remain
 explicit evidence in the manifest rather than being silently discarded.
@@ -37,6 +37,10 @@ SHARD_COVERAGE_SCHEMA_VERSION = 1
 SHARD_STRATEGY = "sorted-round-robin"
 _UNAVAILABLE_DIAGNOSTIC = re.compile(
     r"error:\s+'([^']+)'\s+is unavailable(?:\s*:\s*(.*))?$",
+    re.IGNORECASE,
+)
+_MODULE_UMBRELLA_HEADER = re.compile(
+    r'\bumbrella\s+header\s+"([^"]+)"',
     re.IGNORECASE,
 )
 
@@ -141,6 +145,58 @@ def _framework_context_header(path: Path, sdk_root: Path) -> Path | None:
     return path.resolve()
 
 
+def _libcxx_root(sdk_root: Path) -> Path | None:
+    candidate = sdk_root.resolve() / "usr" / "include" / "c++" / "v1"
+    return candidate.resolve() if candidate.is_dir() else None
+
+
+def _is_libcxx_header(path: Path, sdk_root: Path) -> bool:
+    root = _libcxx_root(sdk_root)
+    return root is not None and _is_within(path.resolve(), root)
+
+
+def _module_umbrella_context_header(path: Path, sdk_root: Path) -> Path | None:
+    """Resolve the nearest explicit umbrella header for a modular usr/include leaf.
+
+    Apple ships some SDK header families outside ``.framework`` bundles but
+    still gives them module-map ownership and an umbrella contract. Leaves in
+    those packages can intentionally reject direct inclusion (AppleArchive is a
+    concrete example), so the scanner must enter them through the SDK-declared
+    umbrella rather than inventing package-specific prerequisites.
+    """
+    resolved = path.resolve()
+    usr_include = sdk_root.resolve() / "usr" / "include"
+    if not usr_include.is_dir() or not _is_within(resolved, usr_include):
+        return None
+
+    parent = resolved.parent
+    while parent != usr_include and _is_within(parent, usr_include):
+        for map_name in ("module.modulemap", "module.map"):
+            module_map = parent / map_name
+            if not module_map.is_file():
+                continue
+            text = module_map.read_text(encoding="utf-8", errors="replace")
+            match = _MODULE_UMBRELLA_HEADER.search(text)
+            if match is None:
+                continue
+            umbrella = (module_map.parent / match.group(1)).resolve()
+            if not _is_within(umbrella, module_map.parent):
+                raise SdkHeaderSurfaceError(
+                    f"module umbrella escapes its package: {module_map}"
+                )
+            if not _is_within(umbrella, usr_include):
+                raise SdkHeaderSurfaceError(
+                    f"module umbrella escapes SDK usr/include: {module_map}"
+                )
+            if not umbrella.is_file():
+                raise SdkHeaderSurfaceError(
+                    f"module umbrella header does not exist: {umbrella}"
+                )
+            return umbrella
+        parent = parent.parent
+    return None
+
+
 def _framework_search_paths(path: Path, sdk_root: Path) -> list[Path]:
     """Return framework search roots in context-first precedence order."""
     resolved = path.resolve()
@@ -189,7 +245,7 @@ def _sdk_clang_base(
     header_path: Path,
     extra_args: Sequence[str],
 ) -> list[str]:
-    """Build the Clang baseline with SDK-context framework precedence."""
+    """Build Clang arguments with the SDK-owned include/search environment."""
     root = sdk_root.resolve()
     args = [
         clang,
@@ -205,6 +261,12 @@ def _sdk_clang_base(
         "-isysroot",
         str(root),
     ]
+    # libc++ internal headers include siblings with paths such as <__config>
+    # and <__concepts/convertible_to.h>. The SDK's own v1 directory is the
+    # authoritative include root for those names and must precede usr/include.
+    libcxx = _libcxx_root(root)
+    if libcxx is not None:
+        args += ["-isystem", str(libcxx)]
     usr_include = root / "usr" / "include"
     if usr_include.is_dir():
         args += ["-isystem", str(usr_include)]
@@ -383,9 +445,7 @@ def _discover_raw_functions_for_source(
                 raise header_surface.HeaderParseError(
                     f"{header}: parameter of {name} has no type spelling"
                 )
-            params.append(
-                header_surface.RawParam(child.get("name"), spelling)
-            )
+            params.append(header_surface.RawParam(child.get("name"), spelling))
         line, column = header_surface._source_position(node.get("loc") or {})
         functions.append(
             header_surface.RawFunction(
@@ -411,7 +471,7 @@ def _context_helper_source(
     helper_lines = helper_text.splitlines()
     imports = _context_source(context_header, target_header).rstrip("\n").splitlines()
     # _helper_source begins by including target_header. Replace that one include
-    # with the context imports while retaining its authoritative typedef probes.
+    # with the SDK context imports while retaining its authoritative typedef probes.
     return "\n".join(imports + helper_lines[1:]) + "\n", mapping
 
 
@@ -453,6 +513,7 @@ def _recover_contextual_signatures(
     clang: str,
     target: str,
     sdk_root: Path,
+    language: str,
     extra_args: Sequence[str],
     replacements: Sequence[tuple[str, str]],
     timeout_seconds: int,
@@ -463,7 +524,8 @@ def _recover_contextual_signatures(
     helper_map: dict[str, header_surface.RawFunction] = {}
 
     with tempfile.TemporaryDirectory(prefix="ipasim-sdk-header-surface-") as directory:
-        helper_path = Path(directory) / "signature_probe.m"
+        suffix = ".mm" if language.endswith("++") else ".m"
+        helper_path = Path(directory) / f"signature_probe{suffix}"
         helper_replacements = list(replacements) + [(directory, "<TMP>")]
 
         while remaining:
@@ -476,7 +538,7 @@ def _recover_contextual_signatures(
             second_args = _sdk_clang_base(
                 clang,
                 target,
-                "objective-c",
+                language,
                 sdk_root,
                 target_header,
                 extra_args,
@@ -594,6 +656,19 @@ def _recover_contextual_signatures(
     return signatures, unavailable
 
 
+def _context_for_header(path: Path, sdk_root: Path) -> tuple[Path | None, str]:
+    """Return the SDK-owned context header and Clang language for one leaf."""
+    framework_context = _framework_context_header(path, sdk_root)
+    if framework_context is not None:
+        return framework_context, "objective-c"
+    if _is_libcxx_header(path, sdk_root):
+        return path.resolve(), "objective-c++"
+    module_context = _module_umbrella_context_header(path, sdk_root)
+    if module_context is not None:
+        return module_context, "objective-c"
+    return None, "objective-c"
+
+
 def _analyze_sdk_header(
     path: Path,
     display: str,
@@ -604,8 +679,6 @@ def _analyze_sdk_header(
     extra_args: Sequence[str],
     timeout_seconds: int,
 ) -> tuple[list[header_surface.HeaderSignature], dict]:
-    # Preserve the original parser byte-for-byte for ordinary non-framework
-    # headers. SDK context reconstruction is applied only to .framework leaves.
     if sdk_root is None:
         return header_surface.analyze_header(
             path,
@@ -619,8 +692,13 @@ def _analyze_sdk_header(
 
     resolved = path.resolve()
     root = sdk_root.resolve()
-    framework = _framework_root(resolved, root)
-    if framework is None:
+    if not resolved.is_file():
+        raise header_surface.HeaderParseError(f"header does not exist: {display}")
+
+    context_header, language = _context_for_header(resolved, root)
+    if context_header is None:
+        # Preserve the original parser byte-for-byte for ordinary headers that
+        # have no SDK-declared contextual ownership.
         return header_surface.analyze_header(
             resolved,
             display,
@@ -630,24 +708,19 @@ def _analyze_sdk_header(
             extra_args=extra_args,
             timeout_seconds=timeout_seconds,
         )
-    if not resolved.is_file():
-        raise header_surface.HeaderParseError(f"header does not exist: {display}")
 
-    context_header = _framework_context_header(resolved, root) or resolved
     replacements = [(str(resolved), display), (str(root), "<SDKROOT>")]
     if context_header != resolved:
-        replacements.append((str(context_header), "<FRAMEWORK-CONTEXT>"))
+        replacements.append((str(context_header), "<SDK-CONTEXT>"))
 
-    # Parse a normal wrapper translation unit instead of making the target leaf
-    # Clang's main file. A main-file leaf is considered already entered while
-    # -include processes its umbrella, so a sibling that recursively imports
-    # that leaf can observe missing declarations. The wrapper lets Apple's own
-    # import graph execute normally; source attribution below still limits the
-    # manifest to declarations physically owned by this exact target header.
+    # Parse a normal wrapper translation unit. This lets the SDK's own umbrella
+    # or C++ include graph execute normally while source attribution below still
+    # limits the manifest to declarations physically owned by the target leaf.
     with tempfile.TemporaryDirectory(
         prefix="ipasim-sdk-header-context-"
     ) as directory:
-        source_path = Path(directory) / "header_context.m"
+        suffix = ".mm" if language.endswith("++") else ".m"
+        source_path = Path(directory) / f"header_context{suffix}"
         source_path.write_text(
             _context_source(context_header, resolved),
             encoding="utf-8",
@@ -656,7 +729,7 @@ def _analyze_sdk_header(
         first_args = _sdk_clang_base(
             clang,
             target,
-            "objective-c",
+            language,
             root,
             resolved,
             extra_args,
@@ -693,6 +766,7 @@ def _analyze_sdk_header(
         clang=clang,
         target=target,
         sdk_root=root,
+        language=language,
         extra_args=extra_args,
         replacements=replacements,
         timeout_seconds=timeout_seconds,
@@ -803,8 +877,6 @@ def build_parallel_manifest(
                     flush=True,
                 )
 
-    # Completion order is deliberately ignored for failure selection. If more
-    # than one worker fails, the earliest deterministic SDK input still wins.
     for index, error in enumerate(errors):
         if error is None:
             continue
