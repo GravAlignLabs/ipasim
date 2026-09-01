@@ -30,7 +30,10 @@ _CXX_MODELINE = re.compile(
     r'-\*-\s*(?:mode\s*:\s*)?(?:c\+\+|objective-c\+\+)\s*-\*-',
     re.IGNORECASE,
 )
-_MODULE_IMPORT = re.compile(r'^[ \t]*@import\s+[A-Za-z_][A-Za-z0-9_.]*\s*;', re.MULTILINE)
+_MODULE_IMPORT = re.compile(
+    r'^[ \t]*@import\s+[A-Za-z_][A-Za-z0-9_.]*\s*;',
+    re.MULTILINE,
+)
 _MODULE_FEATURE = re.compile(r'__has_feature\s*\(\s*modules\s*\)')
 _PP_ERROR = re.compile(r'^[ \t]*#[ \t]*error[ \t]+(.+)$', re.MULTILINE)
 _UNKNOWN_TYPE = re.compile(r"error:\s+unknown type name '([^']+)'", re.IGNORECASE)
@@ -174,7 +177,9 @@ def _reverse_include_index(
 
 
 @functools.lru_cache(maxsize=8)
-def _definition_provider_index_cached(sdk_root_text: str) -> dict[str, tuple[Path, ...]]:
+def _definition_provider_index_cached(
+    sdk_root_text: str,
+) -> dict[str, tuple[Path, ...]]:
     """Index explicit typedef/macro providers in SDK usr/include once per SDK."""
     sdk_root = Path(sdk_root_text).resolve()
     usr_include = sdk_root / "usr" / "include"
@@ -394,7 +399,7 @@ def explicit_inactive_reason(
     relevant_text = "\n".join(relevant_lines)
 
     for raw_payload in _PP_ERROR.findall(text):
-        payload = raw_payload.strip().strip('"\'').strip()
+        payload = raw_payload.strip().strip("\"'").strip()
         if payload and payload.lower() in relevant_text.lower():
             return (
                 "SDK header explicitly rejects the selected compilation context: "
