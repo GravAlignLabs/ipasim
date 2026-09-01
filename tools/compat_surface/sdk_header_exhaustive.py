@@ -107,6 +107,18 @@ def _candidate_languages(
     )
 
 
+def _is_libcxx_support_header(path: Path, sdk_root: Path) -> bool:
+    """Return whether a header is an internal libc++ ``__support`` leaf."""
+    libcxx = core._libcxx_root(sdk_root)
+    if libcxx is None:
+        return False
+    try:
+        relative = path.resolve().relative_to(libcxx.resolve())
+    except ValueError:
+        return False
+    return len(relative.parts) >= 3 and relative.parts[0] == "__support"
+
+
 def _discover_raw_functions_for_source(
     ast: dict,
     *,
@@ -458,6 +470,122 @@ def _analyze_sdk_header(
             "skipped_static": skipped_static,
             "declarations": 0,
         }
+
+    # libc++ ships internal platform-support leaves for many targets in every
+    # SDK. Some compile successfully in isolation even though the selected
+    # target's owning libc++ header conditionally chooses a different platform
+    # implementation. A support leaf may contribute C ABI declarations only
+    # after an actual installed SDK owner compiles for this target and Clang's
+    # dependency output proves that owner entered the leaf. This prevents a
+    # standalone non-Darwin support implementation from overriding Darwin's
+    # real declarations while still keeping the physical header in coverage.
+    if _is_libcxx_support_header(resolved, root):
+        libcxx = core._libcxx_root(root)
+        assert libcxx is not None
+        owner_candidates = sdk_header_context.reverse_context_candidates(
+            resolved,
+            sdk_root=root,
+            libcxx_root=libcxx,
+        )
+        if not owner_candidates:
+            return [], {
+                "skipped_cxx": 0,
+                "skipped_static": 0,
+                "declarations": 0,
+                "target_inactive": core._target_inactive_record(
+                    display=display,
+                    sdk_root=root,
+                    context_header=None,
+                    reason=(
+                        "libc++ support leaf has no owner in the installed SDK include graph"
+                    ),
+                ),
+            }
+
+        selected_ast: dict | None = None
+        selected_context: Path | None = None
+        selected_language = language
+        selected_extra_args: tuple[str, ...] = ()
+        inactive_context: Path | None = None
+        owner_errors: list[str] = []
+        for candidate in owner_candidates:
+            candidate_args = _context_extra_args(
+                resolved,
+                candidate,
+                root,
+                extra_args,
+            )
+            for candidate_language in _candidate_languages(
+                language,
+                candidate,
+                target_header=resolved,
+                sdk_root=root,
+            ):
+                try:
+                    candidate_ast, candidate_entered = core._parse_context_translation_unit(
+                        context_header=candidate,
+                        target_header=resolved,
+                        include_target=False,
+                        display=display,
+                        clang=clang,
+                        target=target,
+                        sdk_root=root,
+                        language=candidate_language,
+                        extra_args=candidate_args,
+                        replacements=replacements,
+                        timeout_seconds=timeout_seconds,
+                    )
+                except header_surface.HeaderParseError as exc:
+                    owner_errors.append(str(exc))
+                    continue
+                if candidate_entered:
+                    selected_ast = candidate_ast
+                    selected_context = candidate
+                    selected_language = candidate_language
+                    selected_extra_args = candidate_args
+                    break
+                if inactive_context is None:
+                    inactive_context = candidate
+            if selected_ast is not None:
+                break
+
+        if selected_ast is None:
+            if inactive_context is not None:
+                return [], {
+                    "skipped_cxx": 0,
+                    "skipped_static": 0,
+                    "declarations": 0,
+                    "target_inactive": core._target_inactive_record(
+                        display=display,
+                        sdk_root=root,
+                        context_header=inactive_context,
+                        reason=(
+                            "libc++ support leaf is present but no compiling SDK owner "
+                            "activates it for the selected target"
+                        ),
+                    ),
+                }
+            detail = owner_errors[0] if owner_errors else "no owner context succeeded"
+            raise header_surface.HeaderParseError(
+                f"{display}: libc++ support leaf target reachability could not be proven: "
+                f"{detail}"
+            )
+
+        assert selected_context is not None
+        context_header = selected_context
+        language = selected_language
+        active_extra_args = selected_extra_args
+        raw, skipped_cxx, skipped_static = _discover_raw_functions_for_source(
+            selected_ast,
+            header=display,
+            source_path=resolved,
+        )
+        if not raw:
+            return [], {
+                "skipped_cxx": skipped_cxx,
+                "skipped_static": skipped_static,
+                "declarations": 0,
+            }
 
     signatures, unavailable = core._recover_contextual_signatures(
         raw=raw,
