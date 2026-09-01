@@ -37,6 +37,7 @@ _MODULE_IMPORT = re.compile(
 _MODULE_DECL = re.compile(
     r'\b(?:framework\s+)?module\s+([A-Za-z_][A-Za-z0-9_.]*)\b'
 )
+_MODULE_FEATURE = re.compile(r'__has_feature\s*\(\s*modules\s*\)')
 _PP_ERROR = re.compile(r'^[ \t]*#[ \t]*error[ \t]+(.+)$', re.MULTILINE)
 _UNKNOWN_TYPE = re.compile(r"error:\s+unknown type name '([^']+)'", re.IGNORECASE)
 _MISSING_HEADER = re.compile(
@@ -92,15 +93,25 @@ def preferred_clang_language(path: Path) -> str:
 
 
 def requires_clang_modules(path: Path) -> bool:
-    """Return whether the header contains an actual Clang module import.
+    """Return whether the physical header itself requires module semantics.
 
-    A ``__has_feature(modules)`` guard plus ``#error`` does not mean the leaf
-    should be forced through ``-fmodules``. Those private leaves normally tell
-    clients to enter through a public textual owner instead. Enabling modules
-    merely to satisfy the guard can make Clang build unrelated SDK modules in
-    the wrong language mode.
+    Actual ``@import`` directives always require modules. A module-feature
+    guard with ``#error`` also requires them when the header does not name a
+    public replacement. When the SDK explicitly says to include another header
+    instead (for example ``<os/workgroup.h>``), that public owner is the
+    authoritative entrypoint and forcing ``-fmodules`` would fabricate a
+    different compilation environment.
     """
-    return bool(_MODULE_IMPORT.search(_read_text(path)))
+    text = _read_text(path)
+    if _MODULE_IMPORT.search(text):
+        return True
+    module_guard = bool(_MODULE_FEATURE.search(text) and _PP_ERROR.search(text))
+    if not module_guard:
+        return False
+    has_public_owner = bool(
+        _RECOMMENDED_ANGLE.search(text) or _RECOMMENDED_BARE.search(text)
+    )
+    return not has_public_owner
 
 
 def is_swift_shim_header(path: Path, sdk_root: Path) -> bool:
