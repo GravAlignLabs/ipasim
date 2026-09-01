@@ -53,7 +53,7 @@ class CompilerBatchingTests(unittest.TestCase):
                     )
                     self.assertEqual(self.compact(batched), self.compact(baseline))
 
-    def test_aapcs64_failure_names_the_exact_batch_symbol_range(self):
+    def test_aapcs64_failure_logs_every_batch_before_failing_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inventory = self.make_inventory(root)
@@ -61,16 +61,22 @@ class CompilerBatchingTests(unittest.TestCase):
                 compiler_batching.abi_surface,
                 "build_abi_manifest",
                 side_effect=abi_surface.AbiSurfaceError("synthetic clang failure"),
-            ):
-                with self.assertRaisesRegex(
-                    compiler_batching.CompilerBatchError,
-                    r"AAPCS64 batch 1/8 symbols '_big_roundtrip'\.\.'_big_roundtrip'.*synthetic clang failure",
-                ):
+            ) as build:
+                with self.assertRaises(compiler_batching.CompilerBatchError) as raised:
                     compiler_batching.build_aapcs64_manifest(
                         inventory,
                         header_root=root,
                         batch_size=1,
                     )
+
+            message = str(raised.exception)
+            self.assertIn("AAPCS64 completed all 8 batches with 8 failure(s)", message)
+            self.assertIn(
+                "AAPCS64 batch 1/8 symbols '_big_roundtrip'..'_big_roundtrip' failed: synthetic clang failure",
+                message,
+            )
+            self.assertIn("AAPCS64 batch 8/8", message)
+            self.assertEqual(build.call_count, 8)
 
     def test_win64_failure_names_the_exact_batch_symbol_range(self):
         with tempfile.TemporaryDirectory() as directory:
