@@ -56,30 +56,36 @@ def _collect_headers(
     sdk_root: Path,
     relative_headers: Sequence[str] = (),
 ) -> list[tuple[Path, str]]:
+    """Return the canonical physical SDK header inventory.
+
+    The shard scanner canonicalizes each SDK-relative header through ``resolve``
+    and then keeps only the first deterministic display path for a physical
+    file. The merge stage must reconstruct that exact same inventory. Apple SDKs
+    contain header aliases/symlinks, so counting every directory entry here can
+    otherwise make a valid shard set appear to have the wrong SDK header count.
+    """
+    root = sdk_root.resolve()
     if relative_headers:
-        relatives = sorted(
-            {Path(item) for item in relative_headers},
-            key=lambda item: item.as_posix(),
-        )
+        relatives = [Path(item) for item in relative_headers]
     else:
         relatives = sorted(
             (
-                path.relative_to(sdk_root)
-                for path in sdk_root.rglob("*.h")
+                path.relative_to(root)
+                for path in root.rglob("*.h")
                 if path.is_file()
             ),
             key=lambda item: item.as_posix(),
         )
 
-    inputs: list[tuple[Path, str]] = []
+    unique: dict[str, tuple[Path, str]] = {}
     for relative in relatives:
         if relative.is_absolute() or ".." in relative.parts:
             raise SdkCompatibilityError(
                 f"relative header must stay inside SDK root: {relative}"
             )
-        path = (sdk_root / relative).resolve()
+        path = (root / relative).resolve()
         try:
-            path.relative_to(sdk_root)
+            path.relative_to(root)
         except ValueError as exc:
             raise SdkCompatibilityError(
                 f"relative header escapes SDK root: {relative}"
@@ -88,11 +94,11 @@ def _collect_headers(
             raise SdkCompatibilityError(
                 f"SDK header does not exist: {relative.as_posix()}"
             )
-        inputs.append((path, relative.as_posix()))
+        unique.setdefault(str(path), (path, relative.as_posix()))
 
-    if not inputs:
+    if not unique:
         raise SdkCompatibilityError("no SDK headers were found")
-    return inputs
+    return sorted(unique.values(), key=lambda item: item[1])
 
 
 def _build_tapi_manifest(
