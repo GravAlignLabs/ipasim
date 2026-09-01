@@ -12,11 +12,13 @@ original physical source path stable for the existing ABI machinery, but prepend
 only public/prelude headers derived from the SDK itself. That includes headers
 explicitly recommended by a leaf and a framework's canonical umbrella when the
 SDK's own include/import graph proves that umbrella reaches the declaration owner.
-It also removes any source-level macro alias that shadows a selected exported C
-identifier after the declaration owner has been entered, so the address probe binds
-to the TAPI-backed declaration rather than an inline convenience implementation.
-No application names, semantic-provider approvals, or header-specific exceptions
-are introduced here.
+When a proven prelude already enters the declaration owner, the wrapper does not
+include that physical header a second time; this matters for SDK implementation
+headers that are intentionally unguarded. It also removes any source-level macro
+alias that shadows a selected exported C identifier after the declaration owner has
+been entered, so the address probe binds to the TAPI-backed declaration rather than
+an inline convenience implementation. No application names, semantic-provider
+approvals, or header-specific exceptions are introduced here.
 """
 from __future__ import annotations
 
@@ -63,9 +65,7 @@ def _framework_layout(
     sdk_root: Path,
 ) -> tuple[Path, str] | None:
     """Return the innermost framework Headers root and framework name."""
-    frameworks_root = (
-        sdk_root.resolve() / "System" / "Library" / "Frameworks"
-    )
+    frameworks_root = sdk_root.resolve() / "System" / "Library" / "Frameworks"
     try:
         relative = source.resolve().relative_to(frameworks_root)
     except ValueError:
@@ -125,6 +125,57 @@ def _resolve_framework_include(
     return None
 
 
+def _framework_header_reaches(
+    entry: Path,
+    target: Path,
+    *,
+    headers_root: Path,
+    framework_name: str,
+) -> bool:
+    """Prove reachability using only include/import edges in one framework."""
+    entry = entry.resolve()
+    target = target.resolve()
+    try:
+        entry.relative_to(headers_root)
+        target.relative_to(headers_root)
+    except ValueError:
+        return False
+    if entry == target:
+        return True
+
+    queue = [entry]
+    seen: set[str] = set()
+    while queue:
+        owner = queue.pop(0).resolve()
+        key = str(owner)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            text = owner.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise SdkAbiContextError(
+                f"could not read SDK framework header {owner.name}: {exc}"
+            ) from exc
+        children: list[Path] = []
+        for match in _INCLUDE_DIRECTIVE.finditer(text):
+            child = _resolve_framework_include(
+                owner=owner,
+                opener=match.group(1),
+                spec=match.group(2).strip(),
+                headers_root=headers_root,
+                framework_name=framework_name,
+            )
+            if child is None:
+                continue
+            if child == target:
+                return True
+            if str(child) not in seen:
+                children.append(child)
+        queue.extend(sorted(set(children), key=lambda path: path.as_posix()))
+    return False
+
+
 def _framework_umbrella(source: Path, *, sdk_root: Path) -> Path | None:
     """Return a canonical framework umbrella that reaches ``source``.
 
@@ -144,8 +195,65 @@ def _framework_umbrella(source: Path, *, sdk_root: Path) -> Path | None:
     umbrella = (headers_root / f"{framework_name}.h").resolve()
     if not umbrella.is_file() or umbrella == resolved:
         return None
+    if _framework_header_reaches(
+        umbrella,
+        resolved,
+        headers_root=headers_root,
+        framework_name=framework_name,
+    ):
+        return umbrella
+    return None
 
-    queue = [umbrella]
+
+def _resolve_usr_include(
+    *,
+    owner: Path,
+    opener: str,
+    spec: str,
+    sdk_root: Path,
+) -> Path | None:
+    """Resolve an SDK usr/include edge without escaping that installed tree."""
+    root = sdk_root.resolve()
+    usr_include = (root / "usr" / "include").resolve()
+    libcxx_root = _libcxx_root(root)
+    candidates: list[Path] = []
+    if opener == '"':
+        candidates.append(owner.resolve().parent / spec)
+    if libcxx_root is not None:
+        candidates.append(libcxx_root / spec)
+    candidates.append(usr_include / spec)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            resolved.relative_to(usr_include)
+        except ValueError:
+            continue
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def _usr_header_reaches(entry: Path, target: Path, *, sdk_root: Path) -> bool:
+    """Prove reachability using only installed usr/include include/import edges."""
+    root = sdk_root.resolve()
+    usr_include = (root / "usr" / "include").resolve()
+    entry = entry.resolve()
+    target = target.resolve()
+    try:
+        entry.relative_to(usr_include)
+        target.relative_to(usr_include)
+    except ValueError:
+        return False
+    if entry == target:
+        return True
+
+    queue = [entry]
     seen: set[str] = set()
     while queue:
         owner = queue.pop(0).resolve()
@@ -153,31 +261,58 @@ def _framework_umbrella(source: Path, *, sdk_root: Path) -> Path | None:
         if key in seen:
             continue
         seen.add(key)
-        if owner == resolved:
-            return umbrella
         try:
             text = owner.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             raise SdkAbiContextError(
-                f"could not read SDK framework header {owner.name}: {exc}"
+                f"could not read SDK include header {owner.name}: {exc}"
             ) from exc
         children: list[Path] = []
         for match in _INCLUDE_DIRECTIVE.finditer(text):
-            child = _resolve_framework_include(
+            child = _resolve_usr_include(
                 owner=owner,
                 opener=match.group(1),
                 spec=match.group(2).strip(),
-                headers_root=headers_root,
-                framework_name=framework_name,
+                sdk_root=root,
             )
             if child is None:
                 continue
-            if child == resolved:
-                return umbrella
+            if child == target:
+                return True
             if str(child) not in seen:
                 children.append(child)
         queue.extend(sorted(set(children), key=lambda path: path.as_posix()))
-    return None
+    return False
+
+
+def _prelude_reaches_source(
+    prelude: Path,
+    source: Path,
+    *,
+    sdk_root: Path,
+) -> bool:
+    """Return whether SDK include evidence proves ``prelude`` enters ``source``."""
+    prelude = prelude.resolve()
+    source = source.resolve()
+    if prelude == source:
+        return True
+
+    layout = _framework_layout(source, sdk_root=sdk_root)
+    if layout is not None:
+        headers_root, framework_name = layout
+        try:
+            prelude.relative_to(headers_root)
+        except ValueError:
+            pass
+        else:
+            return _framework_header_reaches(
+                prelude,
+                source,
+                headers_root=headers_root,
+                framework_name=framework_name,
+            )
+
+    return _usr_header_reaches(prelude, source, sdk_root=sdk_root)
 
 
 def recommended_preludes(
@@ -248,13 +383,23 @@ def _write_wrapper(
     lines = [
         "/* Generated locally for SDK ABI probing; not compatibility policy. */"
     ]
-    for context in recommended_preludes(source, sdk_root=sdk_root):
+    preludes = recommended_preludes(source, sdk_root=sdk_root)
+    source_entered = False
+    for context in preludes:
         lines.append(f'#include "{_escaped_include(context)}"')
-    # Always include the physical declaration owner after its SDK-authored
-    # prelude. If the public owner already entered the leaf, its normal include
-    # guard/pragma-once handling makes this a no-op; otherwise this preserves
-    # prerequisite semantics.
-    lines.append(f'#include "{_escaped_include(source)}"')
+        if not source_entered and _prelude_reaches_source(
+            context,
+            source,
+            sdk_root=sdk_root,
+        ):
+            source_entered = True
+
+    # Some SDK leaves are intentionally unguarded implementation headers. A public
+    # prelude that already entered such a leaf is the complete declaration context;
+    # including the physical source again would redeclare its enums/functions. Only
+    # add the source directly when the SDK include graph did not already reach it.
+    if not source_entered:
+        lines.append(f'#include "{_escaped_include(source)}"')
 
     # Some public SDK headers declare a real exported function and then replace
     # that spelling with an object-like macro to a static inline implementation.
@@ -262,8 +407,6 @@ def _write_wrapper(
     # so allowing that later macro to rewrite ``&name`` would make Clang lower the
     # convenience helper instead of the exported symbol. Undefine only C names
     # selected from this physical declaration owner, after the owner has compiled.
-    # Header guards ensure later indirect includes cannot replay this owner's macro
-    # definitions in the same ABI probe translation unit.
     for name in sorted({_validate_c_name(item) for item in selected_c_names}):
         lines.extend(
             [
