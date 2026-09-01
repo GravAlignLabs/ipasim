@@ -23,14 +23,14 @@ permissions:
 env:
   THEOS_SDK_COMMIT: 0222fd5413cf4b9af096f37b4621afa2688572f7
   HEADER_SHARD_COUNT: '32'
-  HEADER_SHARD_WALL_TIMEOUT: '10m'
+  HEADER_SHARD_WALL_TIMEOUT: '15m'
   FULL_PREFLIGHT_WALL_TIMEOUT: '35m'
 
 jobs:
   header-shards:
     name: header-shard-${{ matrix.shard }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       max-parallel: 16
@@ -76,7 +76,7 @@ jobs:
           printf 'running\n' > "$status"
 
           timeout --signal=TERM --kill-after=30s "$HEADER_SHARD_WALL_TIMEOUT" \
-            python tools/compat_surface/sdk_header_surface.py \
+            python tools/compat_surface/sdk_header_exhaustive.py \
               --sdk-root "$GITHUB_WORKSPACE/theos-sdks/iPhoneOS16.5.sdk" \
               --shard-count "$HEADER_SHARD_COUNT" \
               --shard-index "$shard" \
@@ -108,7 +108,7 @@ jobs:
             echo "### Theos SDK header shard ${{ matrix.shard }}"
             echo
             echo "Captured analyzer exit status: \`$code\`"
-            echo "Job hard limit: **15 minutes**"
+            echo "Job hard limit: **20 minutes**"
             echo "Analyzer wall-clock watchdog: **${HEADER_SHARD_WALL_TIMEOUT}**"
           } >> "$GITHUB_STEP_SUMMARY"
 
