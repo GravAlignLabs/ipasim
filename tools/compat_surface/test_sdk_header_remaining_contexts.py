@@ -27,7 +27,9 @@ class RemainingSdkHeaderContextTests(unittest.TestCase):
                 "usr/lib/swift/shims/Probe.h",
                 "// -*- C++ -*-\n"
                 "#ifdef __swift__\n"
+                "#ifdef __cplusplus\nextern \"C\" {\n#endif\n"
                 "extern int swift_importer_probe(int value);\n"
+                "#ifdef __cplusplus\n}\n#endif\n"
                 "#else\n"
                 "#include \"swift/Compiler/NotInSdk.h\"\n"
                 "#endif\n",
