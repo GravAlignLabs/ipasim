@@ -68,13 +68,15 @@ def _collect_headers(
     if relative_headers:
         relatives = [Path(item) for item in relative_headers]
     else:
+        # Match header_surface._resolve_inputs exactly. Path ordering compares
+        # path components, which intentionally differs from sorting as_posix()
+        # when a file and directory share a prefix (for example pthread.h and
+        # pthread/introspection.h). The first path wins when aliases resolve to
+        # the same physical header, so the ordering itself is part of coverage.
         relatives = sorted(
-            (
-                path.relative_to(root)
-                for path in root.rglob("*.h")
-                if path.is_file()
-            ),
-            key=lambda item: item.as_posix(),
+            path.relative_to(root)
+            for path in root.rglob("*.h")
+            if path.is_file()
         )
 
     unique: dict[str, tuple[Path, str]] = {}
