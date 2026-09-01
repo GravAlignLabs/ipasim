@@ -1,3 +1,4 @@
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,7 +49,12 @@ class SdkAbiContextTests(unittest.TestCase):
             sdk_root = Path(directory) / "sdk"
             umbrella, leaf = self._write_apple_archive_fixture(sdk_root)
             relative = "usr/include/AppleArchive/AAArchiveStream.h"
-            selected = [SimpleNamespace(source_header=relative)]
+            selected = [
+                SimpleNamespace(
+                    source_header=relative,
+                    c_name="AAArchiveStreamCancel",
+                )
+            ]
             captured = {}
 
             def fake_build(inventory, **kwargs):
@@ -87,12 +93,90 @@ class SdkAbiContextTests(unittest.TestCase):
             self.assertIn(umbrella_include, text)
             self.assertIn(leaf_include, text)
             self.assertLess(text.index(umbrella_include), text.index(leaf_include))
+            self.assertIn("#ifdef AAArchiveStreamCancel", text)
+            self.assertIn("#undef AAArchiveStreamCancel", text)
+            self.assertLess(
+                text.index(leaf_include),
+                text.index("#undef AAArchiveStreamCancel"),
+            )
             build.assert_called_once()
             kwargs = build.call_args.kwargs
             self.assertEqual(kwargs["sdk_root"], sdk_root.resolve())
             self.assertEqual(kwargs["batch_size"], 23)
             self.assertEqual(kwargs["extra_args"], ("-DTEST",))
             self.assertEqual(kwargs["timeout_seconds"], 17)
+
+    @unittest.skipUnless(shutil.which("clang"), "clang is required")
+    def test_exported_function_macro_alias_does_not_replace_abi_probe_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sdk_root = Path(directory) / "sdk"
+            header = sdk_root / "usr" / "include" / "MacroAlias.h"
+            header.parent.mkdir(parents=True)
+            header.write_text(
+                "int PublicThing(int value);\n"
+                "static inline int __PublicThing(int value) { return value; }\n"
+                "#define PublicThing __PublicThing\n",
+                encoding="utf-8",
+            )
+            relative = "usr/include/MacroAlias.h"
+            int_type = {"kind": "builtin", "name": "int"}
+            signature = {
+                "symbol": "_PublicThing",
+                "names": ["PublicThing"],
+                "function_type_spellings": [],
+                "calling_convention": "cdecl",
+                "variadic": False,
+                "prototype": True,
+                "return_type": int_type,
+                "parameters": [
+                    {
+                        "index": 0,
+                        "names": ["value"],
+                        "spellings": ["int"],
+                        "type": int_type,
+                    }
+                ],
+                "sources": [
+                    {
+                        "header": relative,
+                        "line": 1,
+                        "column": 1,
+                    }
+                ],
+            }
+            inventory = {
+                "schema_version": 1,
+                "kind": "typed-compatibility-inventory",
+                "targets": {
+                    "clang": "arm64-apple-ios16.0",
+                    "tapi": "arm64-ios",
+                },
+                "summary": {},
+                "symbols": [
+                    {
+                        "symbol": "_PublicThing",
+                        "required_by": [],
+                        "requirement_count": 0,
+                        "sdk_direct_exports": [],
+                        "signature": signature,
+                    }
+                ],
+                "requirements": [],
+            }
+
+            manifest = sdk_abi_context.build_aapcs64_manifest(
+                inventory,
+                header_root=sdk_root,
+                sdk_root=sdk_root,
+                clang="clang",
+                timeout_seconds=30,
+                batch_size=8,
+            )
+
+            self.assertEqual(manifest["summary"]["typed_symbol_count"], 1)
+            self.assertEqual(manifest["symbols"][0]["symbol"], "_PublicThing")
+            self.assertEqual(manifest["symbols"][0]["c_name"], "PublicThing")
+            self.assertEqual(manifest["symbols"][0]["llvm_ir_name"], "PublicThing")
 
     def test_without_sdk_root_delegates_without_context_wrappers(self):
         expected = {"kind": "aapcs64-abi-surface"}
