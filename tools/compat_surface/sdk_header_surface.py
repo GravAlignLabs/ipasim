@@ -4,9 +4,9 @@
 ``header_surface`` remains authoritative for Clang AST/type canonicalization.
 This SDK layer supplies the compilation context that Apple framework headers
 expect while keeping each physical header as the authoritative source being
-measured. Framework leaf headers are compiled as the main Clang input after
-preloading their framework umbrella, so declarations keep exact leaf-header
-provenance instead of being inferred from a wrapper translation unit.
+measured. Framework leaves are parsed through a wrapper translation unit that
+loads the framework umbrella before the target leaf, then Clang declarations
+are attributed back to the physical target header by source location.
 
 Declarations that Clang proves are unavailable for the selected target remain
 explicit evidence in the manifest rather than being silently discarded.
@@ -223,6 +223,183 @@ def _context_source(context_header: Path, target_header: Path) -> str:
     if context_header.resolve() != target_header.resolve():
         lines.append(f'#import "{_quote_import(target_header)}"')
     return "\n".join(lines) + "\n"
+
+
+def _location_candidates(loc: dict) -> list[dict]:
+    """Return Clang source-location variants without treating includers as owners."""
+    result = []
+    for candidate in (
+        loc,
+        loc.get("expansionLoc") or {},
+        loc.get("spellingLoc") or {},
+    ):
+        if isinstance(candidate, dict):
+            result.append(candidate)
+    return result
+
+
+def _normalized_source_file(value) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return os.path.normcase(os.path.abspath(value))
+
+
+def _source_line_column(source: bytes, offset: int) -> tuple[int, int]:
+    prefix = source[:offset]
+    line = prefix.count(b"\n") + 1
+    last_newline = prefix.rfind(b"\n")
+    column = offset + 1 if last_newline < 0 else offset - last_newline
+    return line, column
+
+
+def _node_belongs_to_source(
+    node: dict,
+    *,
+    source_path: Path,
+    source_bytes: bytes,
+) -> bool:
+    """Attribute a Clang declaration to one physical header, fail-closed.
+
+    Clang JSON elides the ``file`` field when a declaration continues in the
+    same source file as nearby AST records. Explicit file locations therefore
+    win first. When the file is elided, the declaration is accepted only when
+    its byte offset, token spelling, and any emitted line/column coordinates
+    all verify against the target header itself. ``includedFrom`` is never used
+    as ownership evidence because it names the includer, not the declaration.
+    """
+    loc = node.get("loc") or {}
+    if not isinstance(loc, dict):
+        return False
+    candidates = _location_candidates(loc)
+    expected_file = os.path.normcase(
+        os.path.abspath(str(source_path.resolve()))
+    )
+    explicit_files = {
+        normalized
+        for candidate in candidates
+        for normalized in [_normalized_source_file(candidate.get("file"))]
+        if normalized is not None
+    }
+    if expected_file in explicit_files:
+        return True
+    if explicit_files:
+        return False
+
+    name = node.get("name")
+    if not isinstance(name, str) or not name:
+        return False
+    name_bytes = name.encode("utf-8")
+    for candidate in candidates:
+        offset = candidate.get("offset")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            continue
+        token_length = candidate.get("tokLen")
+        if token_length is None:
+            token_length = len(name_bytes)
+        if (
+            isinstance(token_length, bool)
+            or not isinstance(token_length, int)
+            or token_length <= 0
+        ):
+            continue
+        end = offset + token_length
+        if end > len(source_bytes):
+            continue
+        if source_bytes[offset:end] != name_bytes:
+            continue
+        expected_line, expected_column = _source_line_column(source_bytes, offset)
+        line = candidate.get("line")
+        column = candidate.get("col")
+        if line is not None and (
+            isinstance(line, bool)
+            or not isinstance(line, int)
+            or line != expected_line
+        ):
+            continue
+        if column is not None and (
+            isinstance(column, bool)
+            or not isinstance(column, int)
+            or column != expected_column
+        ):
+            continue
+        return True
+    return False
+
+
+def _discover_raw_functions_for_source(
+    ast: dict,
+    *,
+    header: str,
+    source_path: Path,
+) -> tuple[list[header_surface.RawFunction], int, int]:
+    """Discover C functions physically declared by one target header only."""
+    source_bytes = source_path.read_bytes()
+    functions: list[header_surface.RawFunction] = []
+    skipped_cxx = 0
+    skipped_static = 0
+    for node, ancestors in header_surface._walk(ast):
+        if node.get("kind") != "FunctionDecl":
+            continue
+        if node.get("isImplicit"):
+            continue
+        if not _node_belongs_to_source(
+            node,
+            source_path=source_path,
+            source_bytes=source_bytes,
+        ):
+            continue
+        if any(kind in header_surface.SCOPE_BLOCKERS for kind in ancestors):
+            skipped_cxx += 1
+            continue
+        if node.get("storageClass") == "static":
+            skipped_static += 1
+            continue
+        name = node.get("name")
+        mangled = node.get("mangledName")
+        function_type = (node.get("type") or {}).get("qualType")
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(mangled, str)
+            or not mangled
+        ):
+            continue
+        if mangled.startswith("__Z"):
+            skipped_cxx += 1
+            continue
+        if not isinstance(function_type, str) or not function_type:
+            raise header_surface.HeaderParseError(
+                f"{header}: function {name} has no Clang type spelling"
+            )
+        params = []
+        for child in node.get("inner") or []:
+            if (
+                not isinstance(child, dict)
+                or child.get("kind") != "ParmVarDecl"
+            ):
+                continue
+            spelling = (child.get("type") or {}).get("qualType")
+            if not isinstance(spelling, str) or not spelling:
+                raise header_surface.HeaderParseError(
+                    f"{header}: parameter of {name} has no type spelling"
+                )
+            params.append(
+                header_surface.RawParam(child.get("name"), spelling)
+            )
+        line, column = header_surface._source_position(node.get("loc") or {})
+        functions.append(
+            header_surface.RawFunction(
+                header=header,
+                name=name,
+                symbol=mangled,
+                function_type=function_type,
+                params=tuple(params),
+                variadic=bool(node.get("variadic", False)),
+                line=line,
+                column=column,
+            )
+        )
+    return functions, skipped_cxx, skipped_static
 
 
 def _context_helper_source(
@@ -461,35 +638,45 @@ def _analyze_sdk_header(
     if context_header != resolved:
         replacements.append((str(context_header), "<FRAMEWORK-CONTEXT>"))
 
-    # Keep the leaf itself as Clang's main source file. Preloading the umbrella
-    # supplies dependent declarations/macros, but main-file source ownership is
-    # still unambiguous and the existing authoritative raw-declaration walker
-    # can continue to reject declarations that arrived only from dependencies.
-    first_args = _sdk_clang_base(
-        clang,
-        target,
-        "objective-c-header",
-        root,
-        resolved,
-        extra_args,
-    )
-    if context_header != resolved:
-        first_args += ["-include", str(context_header)]
-    first_args += ["-Xclang", "-ast-dump=json", str(resolved)]
-    first_output = header_surface._run_clang(
-        first_args,
-        replacements,
-        timeout_seconds,
-    )
+    # Parse a normal wrapper translation unit instead of making the target leaf
+    # Clang's main file. A main-file leaf is considered already entered while
+    # -include processes its umbrella, so a sibling that recursively imports
+    # that leaf can observe missing declarations. The wrapper lets Apple's own
+    # import graph execute normally; source attribution below still limits the
+    # manifest to declarations physically owned by this exact target header.
+    with tempfile.TemporaryDirectory(
+        prefix="ipasim-sdk-header-context-"
+    ) as directory:
+        source_path = Path(directory) / "header_context.m"
+        source_path.write_text(
+            _context_source(context_header, resolved),
+            encoding="utf-8",
+        )
+        first_replacements = replacements + [(directory, "<TMP>")]
+        first_args = _sdk_clang_base(
+            clang,
+            target,
+            "objective-c",
+            root,
+            resolved,
+            extra_args,
+        )
+        first_args += ["-Xclang", "-ast-dump=json", str(source_path)]
+        first_output = header_surface._run_clang(
+            first_args,
+            first_replacements,
+            timeout_seconds,
+        )
 
     objects = header_surface._json_objects(first_output)
     if len(objects) != 1:
         raise header_surface.HeaderParseError(
             f"{display}: expected one Clang translation-unit AST, got {len(objects)}"
         )
-    raw, skipped_cxx, skipped_static = header_surface._discover_raw_functions(
+    raw, skipped_cxx, skipped_static = _discover_raw_functions_for_source(
         objects[0],
-        display,
+        header=display,
+        source_path=resolved,
     )
     if not raw:
         return [], {

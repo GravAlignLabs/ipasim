@@ -32,13 +32,15 @@ class SdkHeaderContextTests(unittest.TestCase):
             self.write(
                 root,
                 f"{headers}/DemoBase.h",
-                "@interface DemoBase\n@end\n",
+                "@interface DemoBase\n@end\n"
+                "extern int demo_base_value(void);\n",
             )
             leaf = self.write(
                 root,
                 f"{headers}/DemoLegacy.h",
                 "@interface DemoBase (Legacy)\n@end\n"
-                "extern int demo_legacy_value(int value);\n",
+                "extern int demo_legacy_value(int value);\n"
+                "extern long demo_legacy_other(long value);\n",
             )
             self.write(
                 root,
@@ -62,9 +64,45 @@ class SdkHeaderContextTests(unittest.TestCase):
             )
             self.assertEqual(
                 [item["symbol"] for item in manifest["signatures"]],
-                ["_demo_legacy_value"],
+                ["_demo_legacy_other", "_demo_legacy_value"],
             )
+            self.assertNotIn("_demo_base_value", json.dumps(manifest))
             self.assertNotIn(str(root), json.dumps(manifest))
+
+    def test_framework_wrapper_preserves_recursive_target_imports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Synthetic.sdk"
+            headers = "System/Library/Frameworks/Demo.framework/Headers"
+            leaf = self.write(
+                root,
+                f"{headers}/Target.h",
+                "typedef int DemoType;\n"
+                "extern DemoType target_api(DemoType value);\n",
+            )
+            self.write(
+                root,
+                f"{headers}/UsesTarget.h",
+                "#import <Demo/Target.h>\n"
+                "extern DemoType uses_target(DemoType value);\n",
+            )
+            self.write(
+                root,
+                f"{headers}/Demo.h",
+                "#import <Demo/UsesTarget.h>\n"
+                "#import <Demo/Target.h>\n",
+            )
+            display = f"{headers}/Target.h"
+
+            manifest = sdk_header_surface.build_parallel_manifest(
+                [(leaf, display)],
+                jobs=1,
+                sdk_root=root,
+            )
+            self.assertEqual(
+                [item["symbol"] for item in manifest["signatures"]],
+                ["_target_api"],
+            )
+            self.assertNotIn("_uses_target", json.dumps(manifest))
 
     def test_developer_framework_search_path_is_reconstructed(self):
         with tempfile.TemporaryDirectory() as directory:
