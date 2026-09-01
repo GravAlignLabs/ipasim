@@ -33,7 +33,7 @@ import generate_semantic_routes
 import header_surface
 import runtime_adapter_table
 import sdk_catalog
-import sdk_header_surface
+import sdk_header_exhaustive as sdk_header_surface
 import tbd_surface
 import win64_abi_surface
 
