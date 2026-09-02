@@ -9,7 +9,7 @@
       "provider_module": "ipasimdarwinhost.dll",
       "adapter_symbol": "_getpid",
       "semantic_owner": "DarwinHostBridge.getpid",
-      "live_profile": "NoArgumentsSInt32ToX0",
+      "live_profile": "GeneratedAdapterState",
       "evidence": "Darwin getpid process identity is implemented by the Windows CRT _getpid-backed Darwin host bridge and covered by the generated semantic-provider/import-router smoke tests."
     }
   ]
