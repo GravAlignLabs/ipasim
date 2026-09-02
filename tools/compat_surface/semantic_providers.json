@@ -3,6 +3,36 @@
   "kind": "semantic-provider-inventory",
   "providers": [
     {
+      "guest_symbol": "_getegid",
+      "status": "approved",
+      "host_export": "getegid",
+      "provider_module": "ipasimdarwinhost.dll",
+      "adapter_symbol": "_getegid",
+      "semantic_owner": "DarwinCredentialAdapter.getegid",
+      "live_profile": "GeneratedAdapterState",
+      "evidence": "Darwin effective gid is derived from the Windows effective identity token primary-group SID terminal RID. Thread impersonation is honored when present, otherwise the process token is used; query failure is fatal instead of fabricating an identity."
+    },
+    {
+      "guest_symbol": "_geteuid",
+      "status": "approved",
+      "host_export": "geteuid",
+      "provider_module": "ipasimdarwinhost.dll",
+      "adapter_symbol": "_geteuid",
+      "semantic_owner": "DarwinCredentialAdapter.geteuid",
+      "live_profile": "GeneratedAdapterState",
+      "evidence": "Darwin effective uid is derived from the Windows effective identity token user SID terminal RID. Thread impersonation is honored when present, otherwise the process token is used; query failure is fatal instead of fabricating an identity."
+    },
+    {
+      "guest_symbol": "_getgid",
+      "status": "approved",
+      "host_export": "getgid",
+      "provider_module": "ipasimdarwinhost.dll",
+      "adapter_symbol": "_getgid",
+      "semantic_owner": "DarwinCredentialAdapter.getgid",
+      "live_profile": "GeneratedAdapterState",
+      "evidence": "Darwin real gid is derived from the current Windows process token primary-group SID terminal RID, preserving a stable OS-backed 32-bit process identity and failing visibly if the token identity cannot be queried."
+    },
+    {
       "guest_symbol": "_getpid",
       "status": "approved",
       "host_export": "getpid",
@@ -11,6 +41,16 @@
       "semantic_owner": "DarwinHostBridge.getpid",
       "live_profile": "GeneratedAdapterState",
       "evidence": "Darwin getpid process identity is implemented by the Windows CRT _getpid-backed Darwin host bridge and covered by the generated semantic-provider/import-router smoke tests."
+    },
+    {
+      "guest_symbol": "_getuid",
+      "status": "approved",
+      "host_export": "getuid",
+      "provider_module": "ipasimdarwinhost.dll",
+      "adapter_symbol": "_getuid",
+      "semantic_owner": "DarwinCredentialAdapter.getuid",
+      "live_profile": "GeneratedAdapterState",
+      "evidence": "Darwin real uid is derived from the current Windows process token user SID terminal RID, preserving a stable OS-backed 32-bit process identity and failing visibly if the token identity cannot be queried."
     }
   ]
 }

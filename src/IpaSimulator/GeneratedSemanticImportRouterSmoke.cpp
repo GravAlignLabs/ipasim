@@ -25,31 +25,31 @@ std::uint64_t addressOf(FARPROC proc) {
     return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(proc));
 }
 
-bool proveSymbolAbsentFromTableStaysOnExistingPath(HMODULE bridge) {
-    std::puts("[generated-semantic-import-router-smoke] absent table route begin");
+bool proveUnapprovedSymbolStaysOnExistingPath(HMODULE bridge) {
+    std::puts("[generated-semantic-import-router-smoke] unapproved route begin");
 
-    FARPROC getuid = GetProcAddress(bridge, "getuid");
-    if (!getuid) {
-        std::fprintf(stderr, "[generated-semantic-import-router-smoke] bridge getuid export is missing\n");
+    FARPROC close = GetProcAddress(bridge, "close");
+    if (!close) {
+        std::fprintf(stderr, "[generated-semantic-import-router-smoke] bridge close export is missing\n");
         return false;
     }
 
     std::string error;
     const auto selection = selectGeneratedSemanticImport(
-        "getuid", bridge, addressOf(getuid), &error);
+        "close", bridge, addressOf(close), &error);
     if (selection != GeneratedSemanticImportSelection::NotCandidate || !error.empty()) {
         std::fprintf(
             stderr,
-            "[generated-semantic-import-router-smoke] symbol absent from route table changed routing: %s\n",
+            "[generated-semantic-import-router-smoke] unapproved symbol changed routing: %s\n",
             error.c_str());
         return false;
     }
-    if (isSelectedGeneratedSemanticImport(addressOf(getuid))) {
-        std::fprintf(stderr, "[generated-semantic-import-router-smoke] absent-table address was selected\n");
+    if (isSelectedGeneratedSemanticImport(addressOf(close))) {
+        std::fprintf(stderr, "[generated-semantic-import-router-smoke] unapproved address was selected\n");
         return false;
     }
 
-    std::puts("[generated-semantic-import-router-smoke] absent table route passed");
+    std::puts("[generated-semantic-import-router-smoke] unapproved route passed");
     return true;
 }
 
@@ -132,69 +132,95 @@ bool proveApprovedProviderMismatchFailsClosed(HMODULE bridge) {
     return true;
 }
 
-bool proveGeneratedGetpidRoute(HMODULE bridge) {
-    std::puts("[generated-semantic-import-router-smoke] adapter-driven getpid route begin");
+bool proveGeneratedProcessIdentityRoutes(HMODULE bridge) {
+    std::puts("[generated-semantic-import-router-smoke] process identity routes begin");
 
-    FARPROC getpid = GetProcAddress(bridge, "getpid");
-    if (!getpid) {
-        std::fprintf(stderr, "[generated-semantic-import-router-smoke] bridge getpid export is missing\n");
-        return false;
-    }
-    const std::uint64_t address = addressOf(getpid);
+    struct Route {
+        const char* hostExport;
+        const char* guestSymbol;
+    };
+    const Route routes[] = {
+        {"getpid", "_getpid"},
+        {"getuid", "_getuid"},
+        {"geteuid", "_geteuid"},
+        {"getgid", "_getgid"},
+        {"getegid", "_getegid"},
+    };
 
-    std::string error;
-    const auto selection = selectGeneratedSemanticImport(
-        "getpid", bridge, address, &error);
-    if (selection != GeneratedSemanticImportSelection::Selected || !error.empty()) {
-        std::fprintf(
-            stderr,
-            "[generated-semantic-import-router-smoke] approved table-driven _getpid route was not selected: %s\n",
-            error.c_str());
-        return false;
-    }
-    if (!isSelectedGeneratedSemanticImport(address)) {
-        std::fprintf(stderr, "[generated-semantic-import-router-smoke] selected _getpid address was not retained\n");
-        return false;
+    using IdentityFunction = std::uint32_t (*)();
+    for (const Route& route : routes) {
+        FARPROC proc = GetProcAddress(bridge, route.hostExport);
+        if (!proc) {
+            std::fprintf(
+                stderr,
+                "[generated-semantic-import-router-smoke] bridge %s export is missing\n",
+                route.hostExport);
+            return false;
+        }
+        const std::uint64_t address = addressOf(proc);
+        const std::uint32_t expected =
+            reinterpret_cast<IdentityFunction>(proc)();
+
+        std::string error;
+        const auto selection = selectGeneratedSemanticImport(
+            route.hostExport, bridge, address, &error);
+        if (selection != GeneratedSemanticImportSelection::Selected || !error.empty()) {
+            std::fprintf(
+                stderr,
+                "[generated-semantic-import-router-smoke] approved route %s was not selected: %s\n",
+                route.guestSymbol,
+                error.c_str());
+            return false;
+        }
+        if (!isSelectedGeneratedSemanticImport(address)) {
+            std::fprintf(
+                stderr,
+                "[generated-semantic-import-router-smoke] selected route %s was not retained\n",
+                route.guestSymbol);
+            return false;
+        }
+
+        AdapterExecutionRequirements requirements;
+        if (!getSelectedGeneratedSemanticImportRequirements(
+                address, requirements, &error)) {
+            std::fprintf(
+                stderr,
+                "[generated-semantic-import-router-smoke] generated requirements for %s failed: %s\n",
+                route.guestSymbol,
+                error.c_str());
+            return false;
+        }
+        if (requirements.guestStackBytes != 0 || requirements.usesSimd ||
+            requirements.requiresPointerValidation) {
+            std::fprintf(
+                stderr,
+                "[generated-semantic-import-router-smoke] %s requirements were not derived as a no-argument generated adapter\n",
+                route.guestSymbol);
+            return false;
+        }
+
+        SyntheticGuestState guest;
+        guest.x[0] = ~std::uint64_t{0};
+        if (!executeSelectedGeneratedSemanticImport(address, guest, {}, &error)) {
+            std::fprintf(
+                stderr,
+                "[generated-semantic-import-router-smoke] generated execution for %s failed: %s\n",
+                route.guestSymbol,
+                error.c_str());
+            return false;
+        }
+        if (guest.x[0] != expected) {
+            std::fprintf(
+                stderr,
+                "[generated-semantic-import-router-smoke] %s expected guest x0=%lu, got %llu\n",
+                route.guestSymbol,
+                static_cast<unsigned long>(expected),
+                static_cast<unsigned long long>(guest.x[0]));
+            return false;
+        }
     }
 
-    AdapterExecutionRequirements requirements;
-    if (!getSelectedGeneratedSemanticImportRequirements(
-            address, requirements, &error)) {
-        std::fprintf(
-            stderr,
-            "[generated-semantic-import-router-smoke] generated _getpid requirements failed: %s\n",
-            error.c_str());
-        return false;
-    }
-    if (requirements.guestStackBytes != 0 || requirements.usesSimd ||
-        requirements.requiresPointerValidation) {
-        std::fprintf(
-            stderr,
-            "[generated-semantic-import-router-smoke] _getpid requirements were not derived from its no-argument generated adapter\n");
-        return false;
-    }
-
-    SyntheticGuestState guest;
-    guest.x[0] = ~std::uint64_t{0};
-    if (!executeSelectedGeneratedSemanticImport(address, guest, {}, &error)) {
-        std::fprintf(
-            stderr,
-            "[generated-semantic-import-router-smoke] generated _getpid execution failed: %s\n",
-            error.c_str());
-        return false;
-    }
-
-    const auto expected = static_cast<std::uint32_t>(_getpid());
-    if (guest.x[0] != expected) {
-        std::fprintf(
-            stderr,
-            "[generated-semantic-import-router-smoke] expected guest x0=%lu, got %llu\n",
-            static_cast<unsigned long>(expected),
-            static_cast<unsigned long long>(guest.x[0]));
-        return false;
-    }
-
-    std::puts("[generated-semantic-import-router-smoke] adapter-driven getpid route passed");
+    std::puts("[generated-semantic-import-router-smoke] process identity routes passed");
     return true;
 }
 
@@ -231,11 +257,11 @@ int main(int argc, char** argv) {
     }
 
     const bool passed =
-        proveSymbolAbsentFromTableStaysOnExistingPath(bridge) &&
+        proveUnapprovedSymbolStaysOnExistingPath(bridge) &&
         proveApprovedSymbolWithoutModuleFailsClosed(bridge) &&
         proveSameSpellingOtherModuleStaysOnExistingPath() &&
         proveApprovedProviderMismatchFailsClosed(bridge) &&
-        proveGeneratedGetpidRoute(bridge);
+        proveGeneratedProcessIdentityRoutes(bridge);
 
     FreeLibrary(bridge);
     if (!passed) {

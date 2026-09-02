@@ -3,12 +3,44 @@ static std::vector<ipasim::bridge::AdapterRecord> makeGeneratedSemanticProviderA
     using namespace ipasim::bridge;
     return {
         AdapterRecord{
+            "_getegid",
+            false,
+            {
+            },
+            ResultSpec{
+                TypeSpec::builtin(ValueTypeKind::UInt32),
+                CommitSpec::toRegisters(GuestBank::Gpr, {0}, 4)}},
+        AdapterRecord{
+            "_geteuid",
+            false,
+            {
+            },
+            ResultSpec{
+                TypeSpec::builtin(ValueTypeKind::UInt32),
+                CommitSpec::toRegisters(GuestBank::Gpr, {0}, 4)}},
+        AdapterRecord{
+            "_getgid",
+            false,
+            {
+            },
+            ResultSpec{
+                TypeSpec::builtin(ValueTypeKind::UInt32),
+                CommitSpec::toRegisters(GuestBank::Gpr, {0}, 4)}},
+        AdapterRecord{
             "_getpid",
             false,
             {
             },
             ResultSpec{
-                TypeSpec::builtin(ValueTypeKind::SInt32),
+                TypeSpec::builtin(ValueTypeKind::UInt32),
+                CommitSpec::toRegisters(GuestBank::Gpr, {0}, 4)}},
+        AdapterRecord{
+            "_getuid",
+            false,
+            {
+            },
+            ResultSpec{
+                TypeSpec::builtin(ValueTypeKind::UInt32),
                 CommitSpec::toRegisters(GuestBank::Gpr, {0}, 4)}},
     };
 }
