@@ -92,6 +92,34 @@ const DarwinHostCallSignature *findDarwinHostCallSignature(
       {"pthread_setspecific", 2, true},
       {"_pthread_setspecific_static", 2, true},
       {"pthread_getspecific", 1, true},
+      {"pthread_attr_init", 1, true},
+      {"pthread_attr_destroy", 1, true},
+      {"pthread_attr_getschedparam", 2, true},
+      {"pthread_attr_getschedpolicy", 2, true},
+      {"pthread_attr_setdetachstate", 2, true},
+      {"pthread_attr_setschedparam", 2, true},
+      {"pthread_attr_setschedpolicy", 2, true},
+      {"pthread_attr_setcpupercent_np", 3, true},
+      {"pthread_attr_get_qos_class_np", 3, true},
+      {"pthread_self", 0, true},
+      {"pthread_main_np", 0, true},
+      {"pthread_threadid_np", 2, true},
+      {"pthread_get_qos_class_np", 3, true},
+      {"pthread_get_stackaddr_np", 1, true},
+      {"pthread_setname_np", 1, true},
+      {"pthread_sigmask", 3, true},
+      {"pthread_create", 4, true},
+      {"pthread_detach", 1, true},
+      {"pthread_join", 2, true},
+      // The native provider returns internally so SysTranslator can unwind its
+      // C++ execution context, but the ARM64 guest must never resume after this
+      // void/non-returning Darwin call.
+      {"pthread_exit", 1, false},
+      {"pthread_qos_max_parallelism", 2, true},
+      {"pthread_time_constraint_max_parallelism", 1, true},
+      {"qos_class_main", 0, true},
+      {"pthread_cpu_number_np", 1, true},
+      {"pthread_install_workgroup_functions_np", 1, true},
       {"__pthread_fchdir", 1, true},
       {"connect", 3, true},
       {"fcntl", 3, true},
@@ -182,6 +210,65 @@ bool validateGeneratedLivePointer(uint64_t Address,
 
 } // namespace
 
+bool SysTranslator::prepareExecutionStack() {
+  constexpr size_t StackSize = 8 * 1024 * 1024;
+  if (!ExecutionStack) {
+    void *StackPtr = _aligned_malloc(StackSize, DynamicLoader::PageSize);
+    if (!StackPtr) {
+      Log.error("could not allocate guest execution stack");
+      return false;
+    }
+
+    const uint64_t StackAddr = reinterpret_cast<uint64_t>(StackPtr);
+    // CPU stacks are private execution-context state. They share the same host
+    // process but must not be replayed as process-wide dyld mappings into every
+    // future Unicorn context.
+    if (!Emu.mapRecordedMemory(StackAddr, StackSize,
+                               UC_PROT_READ | UC_PROT_WRITE)) {
+      _aligned_free(StackPtr);
+      return false;
+    }
+    ExecutionStack = StackPtr;
+    ExecutionStackSize = StackSize;
+  }
+
+  const uint64_t StackAddr = reinterpret_cast<uint64_t>(ExecutionStack);
+  Emu.writeReg(UC_ARM64_REG_SP,
+               (StackAddr + ExecutionStackSize) & ~uint64_t(0xF));
+  return true;
+}
+
+bool SysTranslator::initializeExecutionContext() {
+  if (ExecutionContextInitialized)
+    return true;
+  if (!prepareExecutionStack())
+    return false;
+
+  Emu.hook(UC_HOOK_MEM_FETCH_PROT, &SysTranslator::handleFetchProtMem, this);
+  Emu.hook(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED,
+           &SysTranslator::handleMemUnmapped, this);
+  ExecutionContextInitialized = true;
+  return true;
+}
+
+bool SysTranslator::getExecutionStackBounds(void *&Base, size_t &Size) const {
+  if (!ExecutionStack || ExecutionStackSize == 0) {
+    Base = nullptr;
+    Size = 0;
+    return false;
+  }
+  Base = ExecutionStack;
+  Size = ExecutionStackSize;
+  return true;
+}
+
+void SysTranslator::requestGuestThreadExit(void *ExitValue) {
+  GuestThreadExitRequested = true;
+  Restart = false;
+  RestartFromLRs = false;
+  Emu.writeReg(UC_ARM64_REG_X0, reinterpret_cast<uint64_t>(ExitValue));
+}
+
 void SysTranslator::execute(LoadedLibrary *Lib) {
   auto *Dylib = dynamic_cast<LoadedDylib *>(Lib);
   if (!Dylib) {
@@ -189,13 +276,8 @@ void SysTranslator::execute(LoadedLibrary *Lib) {
     return;
   }
 
-  // Initialize the stack.
-  size_t StackSize = 8 * 1024 * 1024; // 8 MiB
-  void *StackPtr = _aligned_malloc(StackSize, DynamicLoader::PageSize);
-  uint64_t StackAddr = reinterpret_cast<uint64_t>(StackPtr);
-  Emu.mapMemory(StackAddr, StackSize, UC_PROT_READ | UC_PROT_WRITE);
-  // AAPCS64 requires SP to remain 16-byte aligned at public call boundaries.
-  Emu.writeReg(UC_ARM64_REG_SP, (StackAddr + StackSize) & ~uint64_t(0xF));
+  if (!prepareExecutionStack())
+    return;
 
   // Install hooks.
   // This hook handles calls across platform boundaries (iOS -> Windows). It
@@ -205,12 +287,13 @@ void SysTranslator::execute(LoadedLibrary *Lib) {
     // This hook logs execution for debugging purposes.
     Emu.hook(UC_HOOK_CODE, &SysTranslator::handleCode, this);
   if constexpr (PrintMemoryWrites)
-    // This hook logs all execution for debugging purposes.
+    // This hook allows logging guest memory writes for diagnostics.
     Emu.hook(UC_HOOK_MEM_WRITE, &SysTranslator::handleMemWrite, this);
   // This hook allows through reading and writing to unmapped memory (probably
   // heap or other external objects).
   Emu.hook(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED,
            &SysTranslator::handleMemUnmapped, this);
+  ExecutionContextInitialized = true;
 
   // TODO: Do this also for all non-wrapper Dylibs (i.e., Dylibs that come with
   // the `.ipa` file).
@@ -226,9 +309,15 @@ void SysTranslator::execute(LoadedLibrary *Lib) {
 }
 
 void SysTranslator::execute(uint64_t Addr) {
+  // Every interval of ARM64 execution publishes the exact SysTranslator for
+  // callbacks and pthread stack/exit introspection on this Windows thread.
+  ScopedSysTranslatorActivation Active(*this);
+
   if constexpr (PrintEmuInfo)
     Log.info() << "starting emulation at " << Dyld.dumpAddr(Addr)
                << " in thread " << this_thread::get_id() << Log.end();
+
+  const size_t FrameDepth = LRs.size();
 
   // AArch64 uses X30 as the link register.
   LRs.push(Emu.readReg(UC_ARM64_REG_X30));
@@ -246,6 +335,11 @@ void SysTranslator::execute(uint64_t Addr) {
       Continuation = nullptr;
     }
 
+    if (GuestThreadExitRequested) {
+      Restart = false;
+      RestartFromLRs = false;
+    }
+
     if (Restart) {
       // If restarting, continue where we left off.
       Restart = false;
@@ -257,6 +351,18 @@ void SysTranslator::execute(uint64_t Addr) {
         Addr = Emu.readReg(UC_ARM64_REG_X30);
     } else
       break;
+  }
+
+  // pthread_exit terminates this logical guest execution without fetching the
+  // normal kernel return sentinel. Restore/pop only the LR frames owned by this
+  // execute() invocation so nested host->guest callbacks unwind cleanly too.
+  if (GuestThreadExitRequested && LRs.size() > FrameDepth) {
+    uint64_t RestoreLR = 0;
+    while (LRs.size() > FrameDepth) {
+      RestoreLR = LRs.top();
+      LRs.pop();
+    }
+    Emu.writeReg(UC_ARM64_REG_X30, RestoreLR);
   }
 }
 
@@ -274,6 +380,9 @@ void SysTranslator::returnToKernel() {
 }
 
 void SysTranslator::returnToEmulation() {
+  if (GuestThreadExitRequested)
+    return;
+
   if constexpr (PrintEmuInfo)
     Log.info() << "returning to "
                << Dyld.dumpAddr(Emu.readReg(UC_ARM64_REG_X30)) << Log.end();
