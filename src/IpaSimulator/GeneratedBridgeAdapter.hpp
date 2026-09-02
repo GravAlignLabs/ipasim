@@ -107,13 +107,22 @@ struct AdapterRecord {
     ResultSpec result;
 };
 
-// This state is deliberately independent of Unicorn. Production routing can
-// later populate the same mechanical view from a live guest context without
-// teaching generated adapter records about emulator internals.
+// This state is deliberately independent of Unicorn. Production routing
+// populates this same mechanical view from the live ARM64 context, so generated
+// adapters never need to know which emulator engine supplied the registers.
 struct SyntheticGuestState {
     std::array<std::uint64_t, 9> x{};
     alignas(16) std::array<std::array<unsigned char, 16>, 8> v{};
     std::vector<unsigned char> stack;
+};
+
+// The runtime asks the registered adapter what portion of the live ARM64 state
+// must be captured before execution. Stack sizing is derived after libffi has
+// laid out the generated carrier types, rather than guessed from symbol names.
+struct AdapterExecutionRequirements {
+    std::size_t guestStackBytes{0};
+    bool usesSimd{false};
+    bool requiresPointerValidation{false};
 };
 
 enum class PointerUse {
@@ -143,6 +152,11 @@ public:
         BindingKind kind,
         std::string owner,
         std::string* error = nullptr);
+
+    bool describeExecution(
+        const std::string& symbol,
+        AdapterExecutionRequirements& requirements,
+        std::string* error = nullptr) const;
 
     bool execute(
         const std::string& symbol,
