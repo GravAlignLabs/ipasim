@@ -753,7 +753,7 @@ void SysTranslator::handleTrampoline(void *Ret, void **Args, void *Data) {
 
 void SysTranslator::handleTrampolineStatic(ffi_cif *, void *Ret, void **Args,
                                            void *Data) {
-  IpaSim.Sys.handleTrampoline(Ret, Args, Data);
+  currentSysTranslator().handleTrampoline(Ret, Args, Data);
 }
 
 // If `FP` points to emulated code, returns address of wrapper that should be
