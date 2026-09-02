@@ -10,10 +10,6 @@ import sdk_header_surface
 import tbd_surface
 
 
-ROOT = Path(__file__).resolve().parents[2]
-SEMANTIC_PROVIDERS = Path(__file__).with_name("semantic_providers.json")
-
-
 class SdkCompatibilityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -47,6 +43,43 @@ class SdkCompatibilityTests(unittest.TestCase):
         )
 
     @staticmethod
+    def write_semantic_fixture(root: Path) -> tuple[Path, Path]:
+        providers = root / "semantic-providers.json"
+        providers.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "semantic-provider-inventory",
+                    "providers": [
+                        {
+                            "guest_symbol": "_getpid",
+                            "status": "approved",
+                            "host_export": "getpid",
+                            "provider_module": "ipasimdarwinhost.dll",
+                            "adapter_symbol": "_getpid",
+                            "semantic_owner": "SyntheticHost.getpid",
+                            "live_profile": "GeneratedAdapterState",
+                            "evidence": (
+                                "Synthetic SDK compatibility fixture with an explicit "
+                                "getpid semantic provider."
+                            ),
+                        }
+                    ],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        host_def = root / "SyntheticHost.def"
+        host_def.write_text(
+            "LIBRARY IpaSimDarwinHost\nEXPORTS\n    getpid=darwin_getpid\n",
+            encoding="utf-8",
+        )
+        return providers, host_def
+
+    @staticmethod
     def write_single_header_shard(sdk: Path, destination: Path) -> None:
         inputs = sdk_compatibility._collect_headers(sdk)
         manifest = sdk_header_surface.build_parallel_manifest(
@@ -70,11 +103,7 @@ class SdkCompatibilityTests(unittest.TestCase):
             root = Path(directory)
             sdk = root / "SyntheticPublic.sdk"
             self.write_sdk(sdk)
-            host_def = root / "SyntheticHost.def"
-            host_def.write_text(
-                "LIBRARY IpaSimDarwinHost\nEXPORTS\n    getpid=darwin_getpid\n",
-                encoding="utf-8",
-            )
+            semantic_providers, host_def = self.write_semantic_fixture(root)
             output = root / "bundle"
 
             code = sdk_compatibility.main(
@@ -84,7 +113,7 @@ class SdkCompatibilityTests(unittest.TestCase):
                     "--output-dir",
                     str(output),
                     "--semantic-providers",
-                    str(SEMANTIC_PROVIDERS),
+                    str(semantic_providers),
                     "--host-export-def",
                     str(host_def),
                     "--header-jobs",
@@ -161,6 +190,7 @@ class SdkCompatibilityTests(unittest.TestCase):
             root = Path(directory)
             sdk = root / "SyntheticPublic.sdk"
             self.write_sdk(sdk)
+            semantic_providers, host_def = self.write_semantic_fixture(root)
             shard = root / "header-shard-00.json"
             self.write_single_header_shard(sdk, shard)
             output = root / "bundle"
@@ -177,7 +207,9 @@ class SdkCompatibilityTests(unittest.TestCase):
                         "--output-dir",
                         str(output),
                         "--semantic-providers",
-                        str(SEMANTIC_PROVIDERS),
+                        str(semantic_providers),
+                        "--host-export-def",
+                        str(host_def),
                         "--header-manifest",
                         str(shard),
                         "--compiler-batch-size",
@@ -195,6 +227,7 @@ class SdkCompatibilityTests(unittest.TestCase):
             root = Path(directory)
             sdk = root / "SyntheticPublic.sdk"
             self.write_sdk(sdk)
+            semantic_providers, host_def = self.write_semantic_fixture(root)
             shard = root / "header-shard-00.json"
             self.write_single_header_shard(sdk, shard)
             manifest = json.loads(shard.read_text(encoding="utf-8"))
@@ -209,7 +242,9 @@ class SdkCompatibilityTests(unittest.TestCase):
                     "--output-dir",
                     str(output),
                     "--semantic-providers",
-                    str(SEMANTIC_PROVIDERS),
+                    str(semantic_providers),
+                    "--host-export-def",
+                    str(host_def),
                     "--header-manifest",
                     str(shard),
                     "--compiler-batch-size",
@@ -224,6 +259,7 @@ class SdkCompatibilityTests(unittest.TestCase):
             root = Path(directory)
             sdk = root / "SyntheticPublic.sdk"
             self.write_sdk(sdk, symbol="_other", c_name="other")
+            semantic_providers, host_def = self.write_semantic_fixture(root)
             output = root / "bundle"
 
             code = sdk_compatibility.main(
@@ -233,7 +269,9 @@ class SdkCompatibilityTests(unittest.TestCase):
                     "--output-dir",
                     str(output),
                     "--semantic-providers",
-                    str(SEMANTIC_PROVIDERS),
+                    str(semantic_providers),
+                    "--host-export-def",
+                    str(host_def),
                     "--header-jobs",
                     "1",
                     "--compiler-batch-size",
