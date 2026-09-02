@@ -13,7 +13,6 @@ scope:
   - src/IpaSimulator/DarwinPthreadCoreSmoke.cpp
   - src/IpaSimulator/DarwinPthreadTsdBridge.cpp
   - src/IpaSimulator/DarwinPthreadWorkqueueBridge.cpp
-  - src/IpaSimulator/SysTranslator.cpp
   - src/IpaSimulator/IpaSimulator.cpp
   - include/ipasim/IpaSimulator.hpp
   - include/ipasim/Probe.hpp
@@ -26,13 +25,16 @@ base_sha: 960ca890cf93a4564e346bc02ad942ba9933623c
 expected_pr: tbd
 
 next_checkpoint: >-
-  Build exact 64-byte Darwin pthread_attr behavior from Apple source, introduce
-  guest pthread identity/lifetime state, route pthread_create start routines to
-  independent ARM64 execution contexts, run destructor/exit cleanup, and cover
-  the whole libdispatch pthread import neighborhood with executable smoke tests.
+  Rebase the existing pthread-core implementation onto current master, preserve
+  exact 64-byte Darwin pthread_attr behavior, guest pthread identity/lifetime
+  state, independent ARM64 worker execution, destructor/exit cleanup, and the
+  libdispatch pthread import neighborhood with executable smoke tests.
 
 notes: >-
-  Optimize for a working emulator. Do not implement pthread_create as a
-  synchronous main-engine callback. Preserve truthful error/lifetime behavior.
-  Fix libffi trampoline callback affinity so worker-originated native callbacks
-  remain on their originating ARM64 context.
+  SysTranslator.cpp is deliberately released from this claim as of 2026-09-02
+  so generated semantic-routing migration can continue without overlap. The
+  current pthread branch has no SysTranslator diff. If later callback-affinity
+  work genuinely requires SysTranslator, rebase first and acquire a fresh narrow
+  claim rather than relying on this historical reservation. Do not implement
+  pthread_create as a synchronous main-engine callback. Preserve truthful
+  error/lifetime behavior.
