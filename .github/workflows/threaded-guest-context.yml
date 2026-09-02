@@ -37,8 +37,8 @@ jobs:
           set -euo pipefail
 
           # Manual runs preserve the standalone build path. Pull-request runs
-          # must reuse the authoritative exact-head Core result so this workflow
-          # never recompiles a SHA already being validated elsewhere.
+          # reuse the authoritative exact-head Core result whenever that workflow
+          # was triggered, avoiding a second Windows compile for the same SHA.
           if [[ "${{ github.event_name }}" != 'pull_request' ]]; then
             echo 'reuse=false' >> "$GITHUB_OUTPUT"
             echo 'run_id=' >> "$GITHUB_OUTPUT"
@@ -58,8 +58,10 @@ jobs:
           done
 
           if [[ -z "$run_id" ]]; then
-            echo "No exact-head Windows ARM64 Core run appeared for $TARGET_SHA; refusing a duplicate PR build." >&2
-            exit 1
+            echo 'reuse=false' >> "$GITHUB_OUTPUT"
+            echo 'run_id=' >> "$GITHUB_OUTPUT"
+            echo "No exact-head Windows ARM64 Core run exists for $TARGET_SHA; preserving the standalone fallback for a workflow-only PR."
+            exit 0
           fi
 
           echo "Found Windows ARM64 Core run $run_id for $TARGET_SHA."
