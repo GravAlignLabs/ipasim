@@ -28,15 +28,15 @@ std::uint64_t addressOf(FARPROC proc) {
 bool proveUnapprovedSymbolStaysOnExistingPath(HMODULE bridge) {
     std::puts("[generated-semantic-import-router-smoke] unapproved route begin");
 
-    FARPROC close = GetProcAddress(bridge, "close");
-    if (!close) {
-        std::fprintf(stderr, "[generated-semantic-import-router-smoke] bridge close export is missing\n");
+    FARPROC read = GetProcAddress(bridge, "read");
+    if (!read) {
+        std::fprintf(stderr, "[generated-semantic-import-router-smoke] bridge read export is missing\n");
         return false;
     }
 
     std::string error;
     const auto selection = selectGeneratedSemanticImport(
-        "close", bridge, addressOf(close), &error);
+        "read", bridge, addressOf(read), &error);
     if (selection != GeneratedSemanticImportSelection::NotCandidate || !error.empty()) {
         std::fprintf(
             stderr,
@@ -44,7 +44,7 @@ bool proveUnapprovedSymbolStaysOnExistingPath(HMODULE bridge) {
             error.c_str());
         return false;
     }
-    if (isSelectedGeneratedSemanticImport(addressOf(close))) {
+    if (isSelectedGeneratedSemanticImport(addressOf(read))) {
         std::fprintf(stderr, "[generated-semantic-import-router-smoke] unapproved address was selected\n");
         return false;
     }
@@ -224,6 +224,138 @@ bool proveGeneratedProcessIdentityRoutes(HMODULE bridge) {
     return true;
 }
 
+bool proveGeneratedScalarDescriptorRoutes(HMODULE bridge) {
+    std::puts("[generated-semantic-import-router-smoke] scalar descriptor routes begin");
+
+    FARPROC openProc = GetProcAddress(bridge, "open");
+    FARPROC closeProc = GetProcAddress(bridge, "close");
+    FARPROC lseekProc = GetProcAddress(bridge, "lseek");
+    if (!openProc || !closeProc || !lseekProc) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] scalar descriptor exports are incomplete\n");
+        return false;
+    }
+
+    using OpenFunction = int (*)(const char*, int, std::uint16_t);
+    using CloseFunction = int (*)(int);
+    auto open = reinterpret_cast<OpenFunction>(openProc);
+    auto directClose = reinterpret_cast<CloseFunction>(closeProc);
+
+    constexpr int DarwinOpenReadWrite = 0x00000002;
+    constexpr int DarwinOpenCreate = 0x00000200;
+    constexpr int DarwinOpenTruncate = 0x00000400;
+    const int fd = open(
+        "/generated-semantic-route-scalar",
+        DarwinOpenReadWrite | DarwinOpenCreate | DarwinOpenTruncate,
+        0600);
+    if (fd < 0) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] could not create descriptor fixture\n");
+        return false;
+    }
+
+    bool descriptorOpen = true;
+    const auto cleanup = [&]() {
+        if (descriptorOpen)
+            directClose(fd);
+    };
+
+    const std::uint64_t closeAddress = addressOf(closeProc);
+    const std::uint64_t lseekAddress = addressOf(lseekProc);
+    std::string error;
+
+    for (const auto& route : {
+             std::pair<const char*, std::uint64_t>{"close", closeAddress},
+             std::pair<const char*, std::uint64_t>{"lseek", lseekAddress},
+         }) {
+        const auto selection = selectGeneratedSemanticImport(
+            route.first, bridge, route.second, &error);
+        if (selection != GeneratedSemanticImportSelection::Selected || !error.empty()) {
+            std::fprintf(
+                stderr,
+                "[generated-semantic-import-router-smoke] scalar route %s was not selected: %s\n",
+                route.first,
+                error.c_str());
+            cleanup();
+            return false;
+        }
+    }
+
+    AdapterExecutionRequirements closeRequirements;
+    AdapterExecutionRequirements seekRequirements;
+    if (!getSelectedGeneratedSemanticImportRequirements(
+            closeAddress, closeRequirements, &error) ||
+        !getSelectedGeneratedSemanticImportRequirements(
+            lseekAddress, seekRequirements, &error)) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] scalar descriptor requirements failed: %s\n",
+            error.c_str());
+        cleanup();
+        return false;
+    }
+    if (closeRequirements.guestStackBytes != 0 || closeRequirements.usesSimd ||
+        closeRequirements.requiresPointerValidation ||
+        seekRequirements.guestStackBytes != 0 || seekRequirements.usesSimd ||
+        seekRequirements.requiresPointerValidation) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] scalar descriptor requirements unexpectedly need stack/SIMD/pointer validation\n");
+        cleanup();
+        return false;
+    }
+
+    constexpr std::uint64_t LargeOffset = 0x100000005ULL;
+    SyntheticGuestState seekGuest;
+    seekGuest.x[0] = static_cast<std::uint32_t>(fd);
+    seekGuest.x[1] = LargeOffset;
+    seekGuest.x[2] = 0; // SEEK_SET on Darwin and UCRT.
+    if (!executeSelectedGeneratedSemanticImport(
+            lseekAddress, seekGuest, {}, &error)) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated lseek execution failed: %s\n",
+            error.c_str());
+        cleanup();
+        return false;
+    }
+    if (seekGuest.x[0] != LargeOffset) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated lseek truncated 64-bit offset/result: expected %llu got %llu\n",
+            static_cast<unsigned long long>(LargeOffset),
+            static_cast<unsigned long long>(seekGuest.x[0]));
+        cleanup();
+        return false;
+    }
+
+    SyntheticGuestState closeGuest;
+    closeGuest.x[0] = static_cast<std::uint32_t>(fd);
+    if (!executeSelectedGeneratedSemanticImport(
+            closeAddress, closeGuest, {}, &error)) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated close execution failed: %s\n",
+            error.c_str());
+        cleanup();
+        return false;
+    }
+    if (static_cast<std::uint32_t>(closeGuest.x[0]) != 0) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated close returned %llu instead of success\n",
+            static_cast<unsigned long long>(closeGuest.x[0]));
+        cleanup();
+        return false;
+    }
+    descriptorOpen = false;
+
+    std::puts("[generated-semantic-import-router-smoke] scalar descriptor routes passed");
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -261,7 +393,8 @@ int main(int argc, char** argv) {
         proveApprovedSymbolWithoutModuleFailsClosed(bridge) &&
         proveSameSpellingOtherModuleStaysOnExistingPath() &&
         proveApprovedProviderMismatchFailsClosed(bridge) &&
-        proveGeneratedProcessIdentityRoutes(bridge);
+        proveGeneratedProcessIdentityRoutes(bridge) &&
+        proveGeneratedScalarDescriptorRoutes(bridge);
 
     FreeLibrary(bridge);
     if (!passed) {

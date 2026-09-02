@@ -24,6 +24,11 @@ PROCESS_IDENTITY = {
     "_getpid": ("getpid", "DarwinHostBridge.getpid"),
     "_getuid": ("getuid", "DarwinCredentialAdapter.getuid"),
 }
+SCALAR_DESCRIPTOR = {
+    "_close": ("close", "DarwinHostBridge.close"),
+    "_lseek": ("lseek", "DarwinHostBridge.lseek"),
+}
+APPROVED_PRODUCTION = {**PROCESS_IDENTITY, **SCALAR_DESCRIPTOR}
 
 
 class SemanticProviderFixtureTests(unittest.TestCase):
@@ -72,35 +77,56 @@ class SemanticProviderFixtureTests(unittest.TestCase):
             "semantic provider C++ fixture drifted from runtime_adapter_table.py",
         )
 
-    def test_production_process_identity_adapters_match_sdk_abi(self):
-        source = PRODUCTION_ADAPTERS.read_text(encoding="utf-8")
+    def test_production_generated_adapter_set_matches_approved_sdk_subset(self):
         self.assertEqual(
             self._production_adapter_symbols(),
-            sorted(PROCESS_IDENTITY),
-            "production semantic adapter set is not the approved process-identity SDK subset",
+            sorted(APPROVED_PRODUCTION),
+            "production semantic adapter set is not the explicitly approved SDK-backed subset",
         )
-        self.assertEqual(
-            source.count("ValueTypeKind::UInt32"),
-            len(PROCESS_IDENTITY),
-            "Darwin uid_t/gid_t/pid_t process-identity adapters must use the SDK-derived 32-bit carrier",
-        )
+
+    def test_process_identity_adapters_match_sdk_abi(self):
+        source = PRODUCTION_ADAPTERS.read_text(encoding="utf-8")
+        for guest in PROCESS_IDENTITY:
+            marker = f'AdapterRecord{{\n            "{guest}",'
+            self.assertIn(marker, source)
         self.assertNotIn(
             "ValueTypeKind::SInt32",
             source,
-            "production process-identity adapter drifted from the full-SDK generated UInt32 ABI evidence",
+            "production generated routes drifted from the full-SDK unsigned carrier evidence",
         )
-        self.assertEqual(
-            source.count("CommitSpec::toRegisters(GuestBank::Gpr, {0}, 4)"),
-            len(PROCESS_IDENTITY),
+
+    def test_scalar_descriptor_adapters_match_full_sdk_abi(self):
+        source = PRODUCTION_ADAPTERS.read_text(encoding="utf-8")
+        close_pattern = re.compile(
+            r'AdapterRecord\{\s*"_close"\s*,\s*false\s*,\s*\{\s*'
+            r'ArgumentSpec\{\s*0\s*,\s*0\s*,\s*true\s*,\s*'
+            r'TypeSpec::builtin\(ValueTypeKind::UInt32\)\s*,\s*'
+            r'CaptureSpec::fromRegisters\(GuestBank::Gpr, \{0\}, 4\)\s*,\s*false\}\s*,\s*'
+            r'\}\s*,\s*ResultSpec\{\s*'
+            r'TypeSpec::builtin\(ValueTypeKind::UInt32\)\s*,\s*'
+            r'CommitSpec::toRegisters\(GuestBank::Gpr, \{0\}, 4\)\}\}',
+            re.DOTALL,
         )
+        lseek_pattern = re.compile(
+            r'AdapterRecord\{\s*"_lseek"\s*,\s*false\s*,\s*\{\s*'
+            r'ArgumentSpec\{\s*0\s*,\s*0\s*,\s*true\s*,\s*TypeSpec::builtin\(ValueTypeKind::UInt32\).*?'
+            r'ArgumentSpec\{\s*1\s*,\s*1\s*,\s*true\s*,\s*TypeSpec::builtin\(ValueTypeKind::UInt64\).*?'
+            r'ArgumentSpec\{\s*2\s*,\s*2\s*,\s*true\s*,\s*TypeSpec::builtin\(ValueTypeKind::UInt32\).*?'
+            r'ResultSpec\{\s*TypeSpec::builtin\(ValueTypeKind::UInt64\)\s*,\s*'
+            r'CommitSpec::toRegisters\(GuestBank::Gpr, \{0\}, 8\)\}\}',
+            re.DOTALL,
+        )
+        self.assertRegex(source, close_pattern)
+        self.assertRegex(source, lseek_pattern)
+        self.assertNotIn("ValueTypeKind::Pointer", source)
 
     def test_approved_route_table_is_explicit_and_backed_by_generated_abi(self):
         generated_symbols = set(self._production_adapter_symbols())
         routes = self._approved_routes()
 
         expected = []
-        for guest in sorted(PROCESS_IDENTITY):
-            host, owner = PROCESS_IDENTITY[guest]
+        for guest in sorted(APPROVED_PRODUCTION):
+            host, owner = APPROVED_PRODUCTION[guest]
             expected.append(
                 {
                     "guest": guest,
@@ -134,9 +160,9 @@ class SemanticProviderFixtureTests(unittest.TestCase):
         self.assertNotIn("HostGetpid", router)
         self.assertNotIn("hostLookupName != HostGetpid", router)
 
-    def test_process_identity_routes_are_not_duplicated_in_handwritten_darwin_abi_table(self):
+    def test_generated_routes_are_not_duplicated_in_handwritten_darwin_abi_table(self):
         translator = SYS_TRANSLATOR.read_text(encoding="utf-8")
-        for guest, (host, _) in PROCESS_IDENTITY.items():
+        for guest, (host, _) in APPROVED_PRODUCTION.items():
             handwritten = re.compile(r'\{\s*"' + re.escape(host) + r'"\s*,\s*\d+\s*,')
             self.assertIsNone(
                 handwritten.search(translator),

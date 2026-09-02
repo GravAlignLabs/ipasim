@@ -3,6 +3,21 @@ static std::vector<ipasim::bridge::AdapterRecord> makeGeneratedSemanticProviderA
     using namespace ipasim::bridge;
     return {
         AdapterRecord{
+            "_close",
+            false,
+            {
+                ArgumentSpec{
+                    0,
+                    0,
+                    true,
+                    TypeSpec::builtin(ValueTypeKind::UInt32),
+                    CaptureSpec::fromRegisters(GuestBank::Gpr, {0}, 4),
+                    false},
+            },
+            ResultSpec{
+                TypeSpec::builtin(ValueTypeKind::UInt32),
+                CommitSpec::toRegisters(GuestBank::Gpr, {0}, 4)}},
+        AdapterRecord{
             "_getegid",
             false,
             {
@@ -42,5 +57,34 @@ static std::vector<ipasim::bridge::AdapterRecord> makeGeneratedSemanticProviderA
             ResultSpec{
                 TypeSpec::builtin(ValueTypeKind::UInt32),
                 CommitSpec::toRegisters(GuestBank::Gpr, {0}, 4)}},
+        AdapterRecord{
+            "_lseek",
+            false,
+            {
+                ArgumentSpec{
+                    0,
+                    0,
+                    true,
+                    TypeSpec::builtin(ValueTypeKind::UInt32),
+                    CaptureSpec::fromRegisters(GuestBank::Gpr, {0}, 4),
+                    false},
+                ArgumentSpec{
+                    1,
+                    1,
+                    true,
+                    TypeSpec::builtin(ValueTypeKind::UInt64),
+                    CaptureSpec::fromRegisters(GuestBank::Gpr, {1}, 8),
+                    false},
+                ArgumentSpec{
+                    2,
+                    2,
+                    true,
+                    TypeSpec::builtin(ValueTypeKind::UInt32),
+                    CaptureSpec::fromRegisters(GuestBank::Gpr, {2}, 4),
+                    false},
+            },
+            ResultSpec{
+                TypeSpec::builtin(ValueTypeKind::UInt64),
+                CommitSpec::toRegisters(GuestBank::Gpr, {0}, 8)}},
     };
 }

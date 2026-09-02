@@ -3,6 +3,16 @@
   "kind": "semantic-provider-inventory",
   "providers": [
     {
+      "guest_symbol": "_close",
+      "status": "approved",
+      "host_export": "close",
+      "provider_module": "ipasimdarwinhost.dll",
+      "adapter_symbol": "_close",
+      "semantic_owner": "DarwinHostBridge.close",
+      "live_profile": "GeneratedAdapterState",
+      "evidence": "Darwin close is implemented by the host bridge's coherent guest descriptor namespace: sockets dispatch through the Winsock-backed registry, filesystem descriptors are validated against the tracked guest namespace, and successful CRT close removes the descriptor from guest-visible enumeration."
+    },
+    {
       "guest_symbol": "_getegid",
       "status": "approved",
       "host_export": "getegid",
@@ -51,6 +61,16 @@
       "semantic_owner": "DarwinCredentialAdapter.getuid",
       "live_profile": "GeneratedAdapterState",
       "evidence": "Darwin real uid is derived from the current Windows process token user SID terminal RID, preserving a stable OS-backed 32-bit process identity and failing visibly if the token identity cannot be queried."
+    },
+    {
+      "guest_symbol": "_lseek",
+      "status": "approved",
+      "host_export": "lseek",
+      "provider_module": "ipasimdarwinhost.dll",
+      "adapter_symbol": "_lseek",
+      "semantic_owner": "DarwinHostBridge.lseek",
+      "live_profile": "GeneratedAdapterState",
+      "evidence": "Darwin lseek uses the host bridge's 64-bit _lseeki64 implementation over the same tracked guest file-descriptor namespace, preserving signed 64-bit off_t width, SEEK_SET/SEEK_CUR/SEEK_END behavior, and CRT errno rather than truncating through Windows long."
     }
   ]
 }
