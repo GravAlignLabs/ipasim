@@ -6,6 +6,7 @@
 // they are never represented by zero-filled success records.
 
 #include "DarwinCredentialAdapter.hpp"
+#include "DarwinGuestMemory.hpp"
 #include "DarwinSocketAdapter.hpp"
 #include "FifoAdapter.hpp"
 #include "MachIpc.hpp"
@@ -220,6 +221,14 @@ std::intptr_t positionalFileIo(int Fd, void *Buffer, std::size_t Count,
   }
   if (Count == 0)
     return 0;
+
+  const bool ValidSpan =
+      Write ? ipasim::darwinmem::readableSpan(Buffer, Count)
+            : ipasim::darwinmem::writableSpan(Buffer, Count);
+  if (!ValidSpan) {
+    errno = EFAULT;
+    return -1;
+  }
 
   HANDLE Original = INVALID_HANDLE_VALUE;
   if (!guestRegularFileHandle(Fd, Original))
@@ -721,6 +730,10 @@ std::intptr_t darwin_write(int Fd, const void *Buffer, std::size_t Count) {
   }
   if (Count == 0)
     return 0;
+  if (!ipasim::darwinmem::readableSpan(Buffer, Count)) {
+    errno = EFAULT;
+    return -1;
+  }
 
   if (ipasim::darwinsock::isSocketDescriptor(Fd))
     return ipasim::darwinsock::sendTo(Fd, Buffer, Count, 0, nullptr, 0);
