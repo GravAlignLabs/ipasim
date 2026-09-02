@@ -80,59 +80,77 @@ There is also parallel Darwin pthread work. Before changing pthread, `SysTransla
 
 ## Current ARM64 work
 
-The modern ARM64 foundation began with [PR #3](https://github.com/GravAlignLabs/ipasim/pull/3). Merged compatibility-engine development has advanced through [PR #53](https://github.com/GravAlignLabs/ipasim/pull/53), while active [PR #58](https://github.com/GravAlignLabs/ipasim/pull/58) is validating the complete SDK-wide path against a pinned public iOS SDK.
+The modern ARM64 foundation began with [PR #3](https://github.com/GravAlignLabs/ipasim/pull/3). Merged compatibility-engine development has advanced through [PR #53](https://github.com/GravAlignLabs/ipasim/pull/53), while active [PR #58](https://github.com/GravAlignLabs/ipasim/pull/58) has now proven the complete SDK-wide mechanical compatibility preflight against a pinned public iOS SDK.
 
 The project is working on two connected layers:
 
 1. real Windows-backed Darwin/runtime implementation required by modern iOS binaries; and
 2. an SDK/compiler-driven compatibility engine that generates the mechanical ABI bridge in bulk instead of hand-writing one symbol signature at a time.
 
-### Active SDK-wide preflight checkpoint — September 1, 2026
+### Successful full-SDK preflight checkpoint — September 1, 2026
 
 PR #58 exercises the full compatibility pipeline against `theos/sdks@0222fd5413cf4b9af096f37b4621afa2688572f7`, scoped to `iPhoneOS16.5.sdk`.
 
 The authoritative physical header inventory is **5,118 headers**. CI partitions it into **32 deterministic shards** and accepts a merged header surface only when every physical header is owned exactly once. There are no bad-header ignore lists and no partial-success semantics.
 
-The header stage is now fully clearing the pinned SDK. The merged result contains **13,795 typed symbols**. Exact per-shard caches are validated before reuse, while current-run shard artifacts are still uploaded so cache acceleration never replaces auditable evidence.
+At commit `fbe336d0b4060766dc498f8a7757097c07c79fc3`, **Compatibility Surface Analyzer run #103 passed** and the authoritative **Theos iPhoneOS16.5 SDK Preflight run #55 passed end to end**.
+
+The successful run produced the following mechanical coverage:
+
+- exhaustive physical headers analyzed: **5,118**
+- TAPI symbols: **1,355,229**
+- Clang header C signatures: **13,795**
+- SDK catalog symbols: **1,354,457**
+- typed C candidates: **13,298**
+- AAPCS64 generated candidates: **12,599**
+- Win64 cross-ABI candidates: **12,515**
+- generated runtime adapters: **10,599**
+- approved mechanical routes currently ready: **1**
+- catalog rows not yet semantically approved: **1,354,456**
+
+The large difference between the SDK catalog size and the typed C candidate count is intentional. The catalog keeps callable C exports distinct from Objective-C metadata, TLS/data records, weak/mixed metadata, untyped globals, and other non-callable evidence instead of pretending every exported SDK record can become a function adapter.
 
 Current pipeline state:
 
 ```text
 pinned iPhoneOS16.5.sdk
-        -> complete TAPI scan
-        -> exhaustive Clang header indexing      PASS: 5,118/5,118
-        -> merged SDK typed catalog              PASS: 13,795 symbols
-        -> AAPCS64 lowering                      now reaches completion far enough to enter Win64
-        -> Win64 carrier lowering                CURRENT FIRST BLOCKER
-        -> libffi bridge plans
-        -> runtime adapter table
-        -> compatibility planner
-        -> explicitly approved semantic routes
+        -> complete TAPI scan                    PASS: 1,355,229 symbols
+        -> exhaustive Clang header indexing      PASS: 5,118/5,118 headers
+        -> merged header C signatures            PASS: 13,795
+        -> SDK typed catalog                     PASS: 1,354,457 records
+        -> typed C projection                    PASS: 13,298 candidates
+        -> AAPCS64 lowering                      PASS: 12,599 generated candidates
+        -> Win64 carrier lowering                PASS: 12,515 cross-ABI candidates
+        -> libffi bridge plans                   PASS
+        -> generated runtime adapters            PASS: 10,599 adapters
+        -> compatibility planner                 PASS
+        -> semantic-route comparison             PASS / fail-closed approval boundary
 ```
 
-At commit `be9d9f3e75994ca0b527157a14ca7a52fc989c3a`, **Compatibility Surface Analyzer run #102 passed**. The complete **Theos iPhoneOS16.5 SDK Preflight run #54** then advanced through the full cached header surface and failed at the first downstream Win64 invariant:
+The successful workflow published the complete generated compatibility bundle as the `theos-iphoneos16.5-sdk-compatibility` artifact in run #55. The bundle contains the TAPI surface, header signatures, SDK catalog, AAPCS64 and Win64 manifests, bridge plan, runtime adapter table, compatibility plan, generated adapter include, and approved semantic route include.
 
-```text
-[sdk-compatibility] ERROR: Win64 batch carrier numbering is not dense
-```
+Passing this preflight does **not** mean 10,599 iOS APIs are semantically implemented on Windows. It means the mechanical SDK/compiler pipeline can describe and carry that proven subset through the complete generation path without weakening validation. Semantic-provider approval remains separate and currently conservative.
 
-That is the active compatibility-engine boundary. It is a Win64 batch-lowering correctness issue, not a header-coverage failure and not a reason to weaken validation.
-
-The preflight is intentionally fail-closed. It captures the real command output, updates one persistent PR diagnostic, uploads the raw log, and only then fails the GitHub check normally.
+The preflight remains intentionally fail-closed. Compiler/header/context failures, ABI invariant failures, unsupported carrier shapes, and missing semantic approval remain visible evidence rather than being converted into success.
 
 ### SDK context recovery learned during PR #58
 
-The exhaustive run has already exposed and fixed several generic SDK/compiler-context classes rather than adding header-specific exceptions:
+The exhaustive run exposed and fixed several generic SDK/compiler-context classes rather than adding header-specific exceptions:
 
 - framework leaves are entered through SDK-derived umbrella/public ownership while declarations remain attributed to the physical target header;
+- nested framework include ownership can be followed transitively through SDK-authored include/import edges;
+- guarded declaration leaves may be re-entered safely when an umbrella edge is target-conditional, while unguarded implementation leaves are not entered twice;
 - libc++ is entered through the SDK's own `usr/include/c++/v1` root;
 - explicit SDK-authored public-header recommendations and reverse include owners are used as evidence;
 - module guards are distinguished from genuine module imports;
 - actual `@import` failures are checked against the SDK module maps;
 - Swift shim headers can use their SDK-authored importer branch when appropriate;
+- package-style `usr/include/<name>/<name>.h` ownership and prerequisite typedef providers can be recovered from SDK/compiler evidence;
 - target-inactive headers remain narrowly evidence-based rather than being converted into success;
-- AAPCS64 probes preserve required SDK umbrella context; and
-- SDK convenience macros that alias an exported C function to an inline helper are removed only after the owning declaration has been entered, so ABI probing still targets the real exported function.
+- AAPCS64 probes preserve required SDK umbrella context;
+- SDK convenience macros that alias an exported C function to an inline helper are removed only after the owning declaration has been entered, so ABI probing still targets the real exported function;
+- AAPCS64 batching records all batch failures before failing closed, improving one-run diagnostics without approving partial output; and
+- Win64 batch canonicalization now preserves the complete compiler-generated carrier namespace, including intermediate carrier typedef numbers that may disappear from the public LLVM-derived manifest.
 
 This work remains mechanical SDK analysis only. It does not grant semantic-provider approval, alter loader policy, or claim that an exported SDK function is correctly implemented on Windows merely because its ABI is mechanically describable.
 
@@ -261,7 +279,7 @@ Core rules:
 - [PR #50](https://github.com/GravAlignLabs/ipasim/pull/50) — generated adapter bound to an explicitly approved real Darwin semantic provider
 - [PR #52](https://github.com/GravAlignLabs/ipasim/pull/52) — real loader-resolved import routed through generated ABI + approved semantic provider
 - [PR #53](https://github.com/GravAlignLabs/ipasim/pull/53) — table-driven generated semantic import routing
-- [PR #58](https://github.com/GravAlignLabs/ipasim/pull/58) — active pinned full-SDK compatibility preflight and generic SDK-context hardening
+- [PR #58](https://github.com/GravAlignLabs/ipasim/pull/58) — pinned full-SDK compatibility preflight, generic SDK-context hardening, and successful end-to-end iPhoneOS16.5 mechanical coverage
 
 ## Compatibility subsystems implemented so far
 
@@ -284,11 +302,13 @@ Unsupported behavior remains explicit rather than being fabricated as success.
 
 ## What remains
 
-ipaSim is still an active emulator bring-up effort, not a finished modern iOS compatibility layer. Important remaining areas include:
+ipaSim is still an active emulator bring-up effort, not a finished modern iOS compatibility layer. The complete pinned SDK mechanical preflight is now proven; the major remaining work is increasingly about turning mechanically describable coverage into correct runtime behavior without weakening the semantic-approval boundary.
 
-- complete the pinned **5,118-header** full-SDK preflight through Win64, libffi planning, runtime adapters, compatibility planning, and semantic-route comparison;
-- publish SDK-wide typed/ABI/adapter coverage metrics from that complete pipeline;
-- build a machine-readable semantic-provider inventory without conflating semantic status with ABI evidence;
+Important remaining areas include:
+
+- expand the machine-readable semantic-provider inventory so SDK-wide rows can move deliberately from `unclassified` / `not-approved` into approved, candidate, complex, or unsupported semantic states;
+- progressively generate more production route data from that semantic inventory while preserving explicit module/export/address verification;
+- avoid turning runtime route tables into a second handwritten ABI database; generated adapter records should remain the mechanical source of truth;
 - exact guest-stack placement for ABI cases that overflow ARM64 register banks;
 - callback/closure trampolines for host-to-guest calls;
 - variadic and no-prototype runtime boundaries;
@@ -303,7 +323,7 @@ The static/SDK-wide compatibility map is a planning and coverage surface. It is 
 
 ## Apple SDK metadata for compatibility research
 
-Use the maintained [Theos SDK archive](https://github.com/theos/sdks) as the public symbol/provider/header reference for SDK-wide analysis. The active authoritative preflight pins a specific commit and `iPhoneOS16.5.sdk` so results cannot silently drift with upstream changes.
+Use the maintained [Theos SDK archive](https://github.com/theos/sdks) as the public symbol/provider/header reference for SDK-wide analysis. The authoritative preflight pins a specific commit and `iPhoneOS16.5.sdk` so results cannot silently drift with upstream changes.
 
 `.tbd` files are useful for exported names, install names, provider/re-export relationships, targets, weak/TLS/Objective-C metadata classes, and SDK-version comparisons. They are **not implementation source**. Function prototypes require SDK headers/compiler evidence, and correct Windows semantics require independent implementation evidence.
 
