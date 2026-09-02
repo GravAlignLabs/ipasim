@@ -445,7 +445,8 @@ bool proveGeneratedWriteRoute(HMODULE bridge) {
     error.clear();
     if (executeSelectedGeneratedSemanticImport(
             writeAddress, missingValidator, {}, &error) ||
-        error.find("pointer validator rejected") == std::string::npos) {
+        error.find("pointer validation is required before host execution") ==
+            std::string::npos) {
         std::fprintf(
             stderr,
             "[generated-semantic-import-router-smoke] generated write did not fail closed without pointer validation: %s\n",

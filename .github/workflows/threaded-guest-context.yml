@@ -14,11 +14,86 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
+  resolve-core-tester:
+    name: Reuse Windows Core tester
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      reuse: ${{ steps.core.outputs.reuse }}
+      run_id: ${{ steps.core.outputs.run_id }}
+
+    steps:
+      - name: Find exact-head Core artifact
+        id: core
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Manual runs preserve the standalone build path. Pull-request runs
+          # must reuse the authoritative exact-head Core result so this workflow
+          # never recompiles a SHA already being validated elsewhere.
+          if [[ "${{ github.event_name }}" != 'pull_request' ]]; then
+            echo 'reuse=false' >> "$GITHUB_OUTPUT"
+            echo 'run_id=' >> "$GITHUB_OUTPUT"
+            echo 'Manual Threaded run will use its standalone fallback build.'
+            exit 0
+          fi
+
+          run_id=''
+          for attempt in {1..9}; do
+            runs_json="$(gh api -H 'Accept: application/vnd.github+json' \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/windows-arm64-core.yml/runs?head_sha=$TARGET_SHA&per_page=20")"
+            run_id="$(jq -r '.workflow_runs[0].id // empty' <<<"$runs_json")"
+            if [[ -n "$run_id" ]]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [[ -z "$run_id" ]]; then
+            echo "No exact-head Windows ARM64 Core run appeared for $TARGET_SHA; refusing a duplicate PR build." >&2
+            exit 1
+          fi
+
+          echo "Found Windows ARM64 Core run $run_id for $TARGET_SHA."
+          while true; do
+            run_json="$(gh api -H 'Accept: application/vnd.github+json' \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+            status="$(jq -r '.status' <<<"$run_json")"
+            conclusion="$(jq -r '.conclusion // empty' <<<"$run_json")"
+
+            if [[ "$status" == 'completed' ]]; then
+              if [[ "$conclusion" != 'success' ]]; then
+                echo "Matching Windows ARM64 Core run $run_id completed as $conclusion; Threaded validation will not consume macOS/Windows runners." >&2
+                exit 1
+              fi
+              break
+            fi
+            sleep 10
+          done
+
+          artifacts_json="$(gh api -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100")"
+          artifact_id="$(jq -r '.artifacts[] | select(.name == "ipasim-ipa-tester" and .expired == false) | .id' <<<"$artifacts_json" | head -n1)"
+          if [[ -z "$artifact_id" ]]; then
+            echo "Successful Core run $run_id did not publish ipasim-ipa-tester." >&2
+            exit 1
+          fi
+
+          echo 'reuse=true' >> "$GITHUB_OUTPUT"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "Reusing tester artifact $artifact_id from Core run $run_id."
+
   build-arm64-fixture:
     name: Build ARM64 guest fixture
+    needs: resolve-core-tester
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -68,7 +143,9 @@ jobs:
 
   execute-on-windows:
     name: Execute on independent Windows guest CPU
-    needs: build-arm64-fixture
+    needs:
+      - resolve-core-tester
+      - build-arm64-fixture
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -77,36 +154,74 @@ jobs:
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
 
     steps:
-      - name: Check out ipaSim
+      - name: Download exact-head Core tester
+        if: needs.resolve-core-tester.outputs.reuse == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ipasim-ipa-tester
+          path: tester
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-core-tester.outputs.run_id }}
+
+      - name: Check out ipaSim for manual standalone fallback
+        if: needs.resolve-core-tester.outputs.reuse != 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Fetch modern-core submodules
+      - name: Fetch modern-core submodules for manual standalone fallback
+        if: needs.resolve-core-tester.outputs.reuse != 'true'
         shell: pwsh
         run: |
           git submodule sync -- deps/llvm deps/LIEF deps/unicorn deps/Libffi
           git submodule update --init --depth 1 --jobs 4 deps/llvm deps/LIEF deps/unicorn deps/Libffi
 
-      - name: Enter x64 MSVC environment
+      - name: Enter x64 MSVC environment for manual standalone fallback
+        if: needs.resolve-core-tester.outputs.reuse != 'true'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Enable compiler result cache
+      - name: Enable compiler result cache for manual standalone fallback
+        if: needs.resolve-core-tester.outputs.reuse != 'true'
         uses: mozilla-actions/sccache-action@v0.0.11
         with:
           version: v0.17.0
 
-      - name: Configure modern core
+      - name: Configure modern core for manual standalone fallback
+        if: needs.resolve-core-tester.outputs.reuse != 'true'
         shell: pwsh
         run: |
           cmake -S . -B build -G Ninja
           cmake --build build --target config-ipaSim-x64-Release -- -v
 
-      - name: Build threaded probe path
+      - name: Build threaded probe path for manual standalone fallback
+        if: needs.resolve-core-tester.outputs.reuse != 'true'
         shell: pwsh
         run: cmake --build build\ipaSim-x64-Release --target IpaProbe -- -v
+
+      - name: Select ipaSim tester binaries
+        shell: pwsh
+        run: |
+          if ('${{ needs.resolve-core-tester.outputs.reuse }}' -eq 'true') {
+            $bin = (Resolve-Path 'tester').Path
+            $source = 'Windows ARM64 Core artifact'
+          } else {
+            $bin = (Resolve-Path 'build\ipaSim-x64-Release\bin').Path
+            $source = 'manual standalone fallback build'
+          }
+
+          $probe = Join-Path $bin 'IpaProbe.exe'
+          if (-not (Test-Path $probe)) {
+            throw "Expected threaded tester output not found: $probe"
+          }
+          "IPASIM_BIN=$bin" | Add-Content $env:GITHUB_ENV
+          '## Threaded tester source' | Add-Content $env:GITHUB_STEP_SUMMARY
+          $source | Add-Content $env:GITHUB_STEP_SUMMARY
+          if ('${{ needs.resolve-core-tester.outputs.reuse }}' -eq 'true') {
+            'Core run: ${{ needs.resolve-core-tester.outputs.run_id }}' | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
 
       - name: Download ARM64 guest fixture
         uses: actions/download-artifact@v4
@@ -117,7 +232,7 @@ jobs:
       - name: Execute guest on secondary Unicorn context
         shell: pwsh
         run: |
-          $probe = (Resolve-Path 'build\ipaSim-x64-Release\bin\IpaProbe.exe').Path
+          $probe = Join-Path $env:IPASIM_BIN 'IpaProbe.exe'
           $image = (Resolve-Path 'fixture\ThreadedGuest').Path
           $lines = @(& $probe --execute-threaded $image 2>&1)
           $code = $LASTEXITCODE
