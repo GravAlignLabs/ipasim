@@ -44,7 +44,7 @@ class SemanticMigrationTests(unittest.TestCase):
                     "provider_module": "ipasimdarwinhost.dll",
                     "adapter_symbol": "_getpid",
                     "semantic_owner": "DarwinHostBridge.getpid",
-                    "live_profile": "NoArgumentsSInt32ToX0",
+                    "live_profile": "GeneratedAdapterState",
                     "evidence": "approved fixture",
                 },
                 {
