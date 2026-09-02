@@ -17,6 +17,14 @@ APPROVED_ROUTES = (
 ROUTER = ROOT / "src" / "IpaSimulator" / "GeneratedSemanticImportRouter.cpp"
 SYS_TRANSLATOR = ROOT / "src" / "IpaSimulator" / "SysTranslator.cpp"
 
+PROCESS_IDENTITY = {
+    "_getegid": ("getegid", "DarwinCredentialAdapter.getegid"),
+    "_geteuid": ("geteuid", "DarwinCredentialAdapter.geteuid"),
+    "_getgid": ("getgid", "DarwinCredentialAdapter.getgid"),
+    "_getpid": ("getpid", "DarwinHostBridge.getpid"),
+    "_getuid": ("getuid", "DarwinCredentialAdapter.getuid"),
+}
+
 
 class SemanticProviderFixtureTests(unittest.TestCase):
     def _generated_table(self):
@@ -46,6 +54,10 @@ class SemanticProviderFixtureTests(unittest.TestCase):
         )
         return [match.groupdict() for match in pattern.finditer(source)]
 
+    def _production_adapter_symbols(self):
+        source = PRODUCTION_ADAPTERS.read_text(encoding="utf-8")
+        return re.findall(r'AdapterRecord\{\s*"([^"]+)"', source)
+
     def test_generated_cpp_fixture_has_no_drift(self):
         table = self._generated_table()
         expected_path = FIXTURES / "semantic_provider_fixture.inc"
@@ -60,35 +72,48 @@ class SemanticProviderFixtureTests(unittest.TestCase):
             "semantic provider C++ fixture drifted from runtime_adapter_table.py",
         )
 
-    def test_production_generated_adapter_has_no_drift(self):
-        table = self._generated_table()
-        rendered = runtime_adapter_table.render_cpp_table(
-            table,
-            "makeGeneratedSemanticProviderAdapters",
+    def test_production_process_identity_adapters_match_sdk_abi(self):
+        source = PRODUCTION_ADAPTERS.read_text(encoding="utf-8")
+        self.assertEqual(
+            self._production_adapter_symbols(),
+            sorted(PROCESS_IDENTITY),
+            "production semantic adapter set is not the approved process-identity SDK subset",
         )
         self.assertEqual(
-            PRODUCTION_ADAPTERS.read_text(encoding="utf-8"),
-            rendered,
-            "production semantic adapter drifted from runtime_adapter_table.py",
+            source.count("ValueTypeKind::UInt32"),
+            len(PROCESS_IDENTITY),
+            "Darwin uid_t/gid_t/pid_t process-identity adapters must use the SDK-derived 32-bit carrier",
+        )
+        self.assertNotIn(
+            "ValueTypeKind::SInt32",
+            source,
+            "production process-identity adapter drifted from the full-SDK generated UInt32 ABI evidence",
+        )
+        self.assertEqual(
+            source.count("CommitSpec::toRegisters(GuestBank::Gpr, {0}, 4)"),
+            len(PROCESS_IDENTITY),
         )
 
     def test_approved_route_table_is_explicit_and_backed_by_generated_abi(self):
-        table = self._generated_table()
-        generated_symbols = {adapter["symbol"] for adapter in table["adapters"]}
+        generated_symbols = set(self._production_adapter_symbols())
         routes = self._approved_routes()
 
-        self.assertEqual(
-            routes,
-            [
+        expected = []
+        for guest in sorted(PROCESS_IDENTITY):
+            host, owner = PROCESS_IDENTITY[guest]
+            expected.append(
                 {
-                    "guest": "_getpid",
-                    "host": "getpid",
+                    "guest": guest,
+                    "host": host,
                     "module": "ipasimdarwinhost.dll",
-                    "adapter": "_getpid",
-                    "owner": "DarwinHostBridge.getpid",
+                    "adapter": guest,
+                    "owner": owner,
                     "profile": "GeneratedAdapterState",
                 }
-            ],
+            )
+        self.assertEqual(
+            routes,
+            expected,
             "semantic approval changed without an explicit route-table update",
         )
         for route in routes:
@@ -109,16 +134,14 @@ class SemanticProviderFixtureTests(unittest.TestCase):
         self.assertNotIn("HostGetpid", router)
         self.assertNotIn("hostLookupName != HostGetpid", router)
 
-    def test_getpid_is_not_duplicated_in_handwritten_darwin_abi_table(self):
-        table = self._generated_table()
-        self.assertEqual(table["adapters"][0]["symbol"], "_getpid")
-
+    def test_process_identity_routes_are_not_duplicated_in_handwritten_darwin_abi_table(self):
         translator = SYS_TRANSLATOR.read_text(encoding="utf-8")
-        handwritten_getpid = re.compile(r'\{\s*"getpid"\s*,\s*\d+\s*,')
-        self.assertIsNone(
-            handwritten_getpid.search(translator),
-            "_getpid is generated and must not also exist in the handwritten Darwin ABI table",
-        )
+        for guest, (host, _) in PROCESS_IDENTITY.items():
+            handwritten = re.compile(r'\{\s*"' + re.escape(host) + r'"\s*,\s*\d+\s*,')
+            self.assertIsNone(
+                handwritten.search(translator),
+                f"{guest} is generated and must not also exist in the handwritten Darwin ABI table",
+            )
         self.assertIn(
             "getSelectedGeneratedSemanticImportRequirements",
             translator,
