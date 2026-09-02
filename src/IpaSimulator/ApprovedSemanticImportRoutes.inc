@@ -79,6 +79,14 @@ static constexpr ApprovedSemanticImportRoute ApprovedSemanticImportRoutes[] = {
         LiveGuestProfile::GeneratedAdapterState,
     },
     {
+        "_read",
+        "read",
+        L"ipasimdarwinhost.dll",
+        "_read",
+        "DarwinHostBridge.read",
+        LiveGuestProfile::GeneratedAdapterState,
+    },
+    {
         "_write",
         "write",
         L"ipasimdarwinhost.dll",

@@ -93,6 +93,16 @@
       "evidence": "Darwin pwrite accepts only tracked regular-file descriptors, rejects socket descriptors with ESPIPE, validates the complete readable guest buffer span before host I/O, reopens an independent Windows file object, and uses a signed 64-bit position so the explicit write offset cannot change the caller descriptor's current file position."
     },
     {
+      "guest_symbol": "_read",
+      "status": "approved",
+      "host_export": "read",
+      "provider_module": "ipasimdarwinhost.dll",
+      "adapter_symbol": "_read",
+      "semantic_owner": "DarwinHostBridge.read",
+      "live_profile": "GeneratedAdapterState",
+      "evidence": "Darwin read uses the coherent guest descriptor namespace, dispatches socket descriptors through the Winsock-backed receive path, reads tracked regular-file descriptors through UCRT, preserves zero-length and stream-EOF behavior, rejects unknown descriptors with EBADF, and validates the complete writable guest buffer span before any host API dereferences it."
+    },
+    {
       "guest_symbol": "_write",
       "status": "approved",
       "host_export": "write",
