@@ -14,20 +14,19 @@ scope:
   - src/IpaSimulator/DarwinHostBridge.def
   - src/IpaSimulator/DarwinFsSmoke.cpp
   - src/IpaSimulator/SysTranslator.cpp
+  - README.md
   - .github/agent-work/guarded-fd-core.yml
 
 branch: compat-guarded-fd-core
 started_utc: 2026-09-02T19:08:00Z
 base_sha: d57e723ddeab39694e7b9cb2e8e8a19727a36229
-expected_pr: draft
+expected_pr: 65
 
 next_checkpoint: >-
-  Add XNU-backed guarded_open_np/guarded_close_np semantics without aliasing
-  guarded_close to close: validate/copy the 64-bit guard, require GUARD_DUP and
-  O_CLOEXEC, accept libdispatch's GUARD_CLOSE|GUARD_DUP|GUARD_SOCKET_IPC|
-  GUARD_FILEPORT set, reject GUARD_WRITE until write-side enforcement exists,
-  block ordinary close and F_SETFD clearing on guarded descriptors, and prove
-  exact/mismatched/unprotected descriptor behavior through IpaSimDarwinHost.dll.
+  Guarded-open/guarded-close semantics are implemented and green on the exact
+  runtime checkpoint. Keep the README handoff synchronized with merged generated
+  routing through PR #64 and the current PR #65 guarded-fd boundary, then merge
+  only after final exact-head review.
 
 notes: >-
   Evidence is Apple XNU guarded.h/kern_guarded.c plus the real IPA static audit:
