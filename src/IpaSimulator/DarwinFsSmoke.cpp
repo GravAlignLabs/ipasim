@@ -172,7 +172,11 @@ int main(int ArgC, char **ArgV) {
   using Mkfifo = int (*)(const char *, std::uint16_t);
   using Mknod = int (*)(const char *, std::uint16_t, std::int32_t);
   using Open = int (*)(const char *, int, std::uint16_t);
+  using GuardedOpen = int (*)(const char *, const std::uint64_t *,
+                              std::uint32_t, int, int);
+  using GuardedClose = int (*)(int, const std::uint64_t *);
   using Close = int (*)(int);
+  using Fcntl = int (*)(int, int, std::intptr_t);
   using Write = std::intptr_t (*)(int, const void *, std::size_t);
   using Fstat = int (*)(int, void *);
   using PathStat = int (*)(const char *, void *);
@@ -180,24 +184,33 @@ int main(int ArgC, char **ArgV) {
   auto HostMkfifo = reinterpret_cast<Mkfifo>(GetProcAddress(DarwinHost, "mkfifo"));
   auto HostMknod = reinterpret_cast<Mknod>(GetProcAddress(DarwinHost, "mknod"));
   auto HostOpen = reinterpret_cast<Open>(GetProcAddress(DarwinHost, "open"));
+  auto HostGuardedOpen = reinterpret_cast<GuardedOpen>(
+      GetProcAddress(DarwinHost, "guarded_open_np"));
+  auto HostGuardedClose = reinterpret_cast<GuardedClose>(
+      GetProcAddress(DarwinHost, "guarded_close_np"));
   auto HostClose = reinterpret_cast<Close>(GetProcAddress(DarwinHost, "close"));
+  auto HostFcntl = reinterpret_cast<Fcntl>(GetProcAddress(DarwinHost, "fcntl"));
   auto HostWrite = reinterpret_cast<Write>(GetProcAddress(DarwinHost, "write"));
   auto HostFstat = reinterpret_cast<Fstat>(GetProcAddress(DarwinHost, "fstat"));
   auto HostStat = reinterpret_cast<PathStat>(GetProcAddress(DarwinHost, "stat"));
   auto HostLstat = reinterpret_cast<PathStat>(GetProcAddress(DarwinHost, "lstat"));
   auto HostError = reinterpret_cast<Error>(GetProcAddress(DarwinHost, "__error"));
-  if (!HostMkfifo || !HostMknod || !HostOpen || !HostClose || !HostWrite ||
+  if (!HostMkfifo || !HostMknod || !HostOpen || !HostGuardedOpen ||
+      !HostGuardedClose || !HostClose || !HostFcntl || !HostWrite ||
       !HostFstat || !HostStat || !HostLstat || !HostError) {
     FreeLibrary(DarwinHost);
-    return fail(!HostMkfifo   ? "mkfifo export was missing"
-                : !HostMknod ? "mknod export was missing"
-                : !HostOpen  ? "open export was missing"
-                : !HostClose ? "close export was missing"
-                : !HostWrite ? "write export was missing"
-                : !HostFstat ? "fstat export was missing"
-                : !HostStat  ? "stat export was missing"
-                : !HostLstat ? "lstat export was missing"
-                             : "__error export was missing",
+    return fail(!HostMkfifo        ? "mkfifo export was missing"
+                : !HostMknod      ? "mknod export was missing"
+                : !HostOpen       ? "open export was missing"
+                : !HostGuardedOpen ? "guarded_open_np export was missing"
+                : !HostGuardedClose ? "guarded_close_np export was missing"
+                : !HostClose      ? "close export was missing"
+                : !HostFcntl      ? "fcntl export was missing"
+                : !HostWrite      ? "write export was missing"
+                : !HostFstat      ? "fstat export was missing"
+                : !HostStat       ? "stat export was missing"
+                : !HostLstat      ? "lstat export was missing"
+                                  : "__error export was missing",
                 24);
   }
 
@@ -316,7 +329,185 @@ int main(int ArgC, char **ArgV) {
     return fail("open export did not preserve guest-visible O_EXCL/EEXIST", 37);
   }
 
+  // Apple libdispatch opens its internal dispatch_io descriptors with exactly
+  // this guard set, then closes them through guarded_close_np with the same
+  // 64-bit identity value. Prove the XNU contract rather than aliasing guarded
+  // close to ordinary close.
+  constexpr std::uint32_t GuardClose = 1u << 0;
+  constexpr std::uint32_t GuardDup = 1u << 1;
+  constexpr std::uint32_t GuardSocketIpc = 1u << 2;
+  constexpr std::uint32_t GuardFileport = 1u << 3;
+  constexpr std::uint32_t GuardWrite = 1u << 4;
+  constexpr std::uint32_t DispatchGuardFlags =
+      GuardClose | GuardDup | GuardSocketIpc | GuardFileport;
+  constexpr std::uint64_t GuardValue = 0x1122334455667788ULL;
+  constexpr const char *GuardedPath = "/tmp/ipasim-host-guarded-open";
+
+  *HostError() = 0;
+  if (HostGuardedOpen(
+          GuardedPath, &GuardValue, DispatchGuardFlags,
+          DarwinOpenReadWrite | DarwinOpenCreate | DarwinOpenExclusive, 0600) !=
+          -1 ||
+      *HostError() != EINVAL) {
+    FreeLibrary(DarwinHost);
+    return fail("guarded_open_np accepted a descriptor without O_CLOEXEC", 38);
+  }
+
+  constexpr std::uint64_t ZeroGuard = 0;
+  *HostError() = 0;
+  if (HostGuardedOpen(
+          GuardedPath, &ZeroGuard, DispatchGuardFlags,
+          DarwinOpenReadWrite | DarwinOpenCreate | DarwinOpenExclusive |
+              DarwinOpenCloseOnExec,
+          0600) != -1 ||
+      *HostError() != EINVAL) {
+    FreeLibrary(DarwinHost);
+    return fail("guarded_open_np accepted a zero guard identity", 39);
+  }
+
+  *HostError() = 0;
+  if (HostGuardedOpen(
+          GuardedPath, nullptr, DispatchGuardFlags,
+          DarwinOpenReadWrite | DarwinOpenCreate | DarwinOpenExclusive |
+              DarwinOpenCloseOnExec,
+          0600) != -1 ||
+      *HostError() != EFAULT) {
+    FreeLibrary(DarwinHost);
+    return fail("guarded_open_np did not validate the guard pointer", 40);
+  }
+
+  *HostError() = 0;
+  if (HostGuardedOpen(
+          GuardedPath, &GuardValue, GuardClose,
+          DarwinOpenReadWrite | DarwinOpenCreate | DarwinOpenExclusive |
+              DarwinOpenCloseOnExec,
+          0600) != -1 ||
+      *HostError() != EINVAL) {
+    FreeLibrary(DarwinHost);
+    return fail("guarded_open_np accepted a guard set without GUARD_DUP", 41);
+  }
+
+  *HostError() = 0;
+  if (HostGuardedOpen(
+          GuardedPath, &GuardValue, DispatchGuardFlags | GuardWrite,
+          DarwinOpenReadWrite | DarwinOpenCreate | DarwinOpenExclusive |
+              DarwinOpenCloseOnExec,
+          0600) != -1 ||
+      *HostError() != ENOTSUP) {
+    FreeLibrary(DarwinHost);
+    return fail("guarded_open_np silently accepted unsupported GUARD_WRITE", 42);
+  }
+
+  *HostError() = 0;
+  const int GuardedFd = HostGuardedOpen(
+      GuardedPath, &GuardValue, DispatchGuardFlags,
+      DarwinOpenReadWrite | DarwinOpenCreate | DarwinOpenExclusive |
+          DarwinOpenCloseOnExec,
+      0600);
+  if (GuardedFd < 0) {
+    FreeLibrary(DarwinHost);
+    return fail("guarded_open_np could not create the libdispatch guard set", 43);
+  }
+
+  constexpr int DarwinFGetFd = 1;
+  constexpr int DarwinFSetFd = 2;
+  constexpr std::intptr_t DarwinFdCloExec = 1;
+  *HostError() = 0;
+  if (HostFcntl(GuardedFd, DarwinFGetFd, 0) != DarwinFdCloExec) {
+    HostGuardedClose(GuardedFd, &GuardValue);
+    FreeLibrary(DarwinHost);
+    return fail("guarded descriptor was not forced close-on-exec", 44);
+  }
+
+  *HostError() = 0;
+  if (HostFcntl(GuardedFd, DarwinFSetFd, 0) != -1 ||
+      *HostError() != EPERM ||
+      HostFcntl(GuardedFd, DarwinFGetFd, 0) != DarwinFdCloExec) {
+    HostGuardedClose(GuardedFd, &GuardValue);
+    FreeLibrary(DarwinHost);
+    return fail("F_SETFD cleared close-on-exec on a guarded descriptor", 45);
+  }
+
+  constexpr char GuardedPayload[] = "darwin-guarded-fd";
+  if (HostWrite(GuardedFd, GuardedPayload, sizeof(GuardedPayload) - 1) !=
+      static_cast<std::intptr_t>(sizeof(GuardedPayload) - 1)) {
+    HostGuardedClose(GuardedFd, &GuardValue);
+    FreeLibrary(DarwinHost);
+    return fail("guarded descriptor stopped normal file I/O", 46);
+  }
+
+  *HostError() = 0;
+  if (HostClose(GuardedFd) != -1 || *HostError() != EPERM) {
+    HostGuardedClose(GuardedFd, &GuardValue);
+    FreeLibrary(DarwinHost);
+    return fail("ordinary close bypassed GUARD_CLOSE", 47);
+  }
+  DarwinStat64 GuardedStat{};
+  if (HostFstat(GuardedFd, &GuardedStat) != 0) {
+    HostGuardedClose(GuardedFd, &GuardValue);
+    FreeLibrary(DarwinHost);
+    return fail("failed ordinary close destroyed guarded descriptor state", 48);
+  }
+
+  constexpr std::uint64_t WrongGuard = GuardValue ^ 0x55ULL;
+  *HostError() = 0;
+  if (HostGuardedClose(GuardedFd, &WrongGuard) != -1 ||
+      *HostError() != EPERM || HostFstat(GuardedFd, &GuardedStat) != 0) {
+    HostGuardedClose(GuardedFd, &GuardValue);
+    FreeLibrary(DarwinHost);
+    return fail("guarded_close_np accepted a mismatched guard identity", 49);
+  }
+
+  *HostError() = 0;
+  if (HostGuardedClose(GuardedFd, nullptr) != -1 ||
+      *HostError() != EFAULT || HostFstat(GuardedFd, &GuardedStat) != 0) {
+    HostGuardedClose(GuardedFd, &GuardValue);
+    FreeLibrary(DarwinHost);
+    return fail("guarded_close_np did not validate the guard pointer", 50);
+  }
+
+  if (HostGuardedClose(GuardedFd, &GuardValue) != 0) {
+    FreeLibrary(DarwinHost);
+    return fail("matching guarded_close_np did not close the descriptor", 51);
+  }
+  *HostError() = 0;
+  if (HostFstat(GuardedFd, &GuardedStat) != -1 || *HostError() != EBADF) {
+    FreeLibrary(DarwinHost);
+    return fail("guarded descriptor remained live after matching close", 52);
+  }
+
+  constexpr const char *UnguardedPath = "/tmp/ipasim-host-unguarded-control";
+  const int UnguardedFd = HostOpen(
+      UnguardedPath,
+      DarwinOpenReadWrite | DarwinOpenCreate | DarwinOpenExclusive |
+          DarwinOpenCloseOnExec,
+      0600);
+  if (UnguardedFd < 0) {
+    FreeLibrary(DarwinHost);
+    return fail("could not create unguarded control descriptor", 53);
+  }
+  *HostError() = 0;
+  if (HostGuardedClose(UnguardedFd, &GuardValue) != -1 ||
+      *HostError() != EINVAL || HostFstat(UnguardedFd, &GuardedStat) != 0) {
+    HostClose(UnguardedFd);
+    FreeLibrary(DarwinHost);
+    return fail("guarded_close_np did not distinguish an unguarded descriptor",
+                54);
+  }
+  if (HostClose(UnguardedFd) != 0) {
+    FreeLibrary(DarwinHost);
+    return fail("ordinary close stopped working for an unguarded descriptor",
+                55);
+  }
+
+  *HostError() = 0;
+  if (HostGuardedClose(0x7ffffffe, &GuardValue) != -1 ||
+      *HostError() != EBADF) {
+    FreeLibrary(DarwinHost);
+    return fail("guarded_close_np invalid descriptor did not report EBADF", 56);
+  }
+
   FreeLibrary(DarwinHost);
-  std::printf("Darwin filesystem smoke passed: shared typed node registry, FIFO named-pipe transport, regular-file backing, device metadata, real CRT open descriptors, O_CREAT/O_EXCL/O_TRUNC/O_CLOEXEC translation, Darwin LP64 fstat/stat/lstat metadata, descriptor-lifetime cleanup, mkfifo/mknod/open bridge exports, removal, and guest-visible errno.\n");
+  std::printf("Darwin filesystem smoke passed: shared typed node registry, FIFO named-pipe transport, regular-file backing, device metadata, real CRT open descriptors, O_CREAT/O_EXCL/O_TRUNC/O_CLOEXEC translation, Darwin LP64 fstat/stat/lstat metadata, descriptor-lifetime cleanup, XNU guarded-open/guarded-close identity and close-policy enforcement, mkfifo/mknod/open bridge exports, removal, and guest-visible errno.\n");
   return 0;
 }
