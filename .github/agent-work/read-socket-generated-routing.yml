@@ -1,0 +1,42 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Close the Darwin read(2) semantic gap by routing socket descriptors through a
+  real Winsock receive path while preserving tracked regular-file reads, complete
+  writable guest-buffer validation, errno/EOF behavior, and then migrate _read
+  from SysTranslator's handwritten ABI table to the explicit generated-adapter
+  route backed by the pinned iPhoneOS 16.5 SDK record.
+
+scope:
+  - src/IpaSimulator/DarwinSocketAdapter.hpp
+  - src/IpaSimulator/DarwinSocketAdapter.cpp
+  - src/IpaSimulator/DarwinSocketSmoke.cpp
+  - src/IpaSimulator/DarwinHostBridge.cpp
+  - src/IpaSimulator/DarwinGuestMemory.hpp
+  - src/IpaSimulator/SysTranslator.cpp
+  - src/IpaSimulator/GeneratedSemanticProviderAdapters.inc
+  - src/IpaSimulator/ApprovedSemanticImportRoutes.inc
+  - src/IpaSimulator/GeneratedSemanticImportRouterSmoke.cpp
+  - tools/compat_surface/semantic_providers.json
+  - tools/compat_surface/test_semantic_provider_fixture.py
+  - .github/agent-work/read-socket-generated-routing.yml
+
+branch: compat-read-socket-generated-routing
+started_utc: 2026-09-02T14:42:00Z
+updated_utc: 2026-09-02T14:42:00Z
+base_sha: 8133868c8ee6410b3319522cc8020718e0f93e77
+expected_pr: draft
+
+next_checkpoint: >-
+  Prove reverse-direction loopback TCP receive through the Darwin socket
+  descriptor registry, regular-file read preservation, zero-length/EOF/error
+  contracts, and complete writable-span rejection before approving the exact
+  generated _read route and removing its handwritten SysTranslator signature.
+
+notes: >-
+  Keep recvfrom/recvmsg address-result semantics, variadic open/fcntl, metadata,
+  Mach, pthread/workqueue, callbacks, and guest-thread lifecycle out of this
+  increment. Do not overlap the active darwin-pthread-core CMake scope. Generated
+  ABI evidence alone does not grant semantic approval.
