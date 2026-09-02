@@ -86,7 +86,7 @@ class SemanticProviderFixtureTests(unittest.TestCase):
                     "module": "ipasimdarwinhost.dll",
                     "adapter": "_getpid",
                     "owner": "DarwinHostBridge.getpid",
-                    "profile": "NoArgumentsSInt32ToX0",
+                    "profile": "GeneratedAdapterState",
                 }
             ],
             "semantic approval changed without an explicit route-table update",
@@ -102,6 +102,9 @@ class SemanticProviderFixtureTests(unittest.TestCase):
         router = ROUTER.read_text(encoding="utf-8")
         self.assertIn("ApprovedSemanticImportRoutes", router)
         self.assertIn("findApprovedRoute(hostLookupName, modulePath)", router)
+        self.assertIn("registry.describeExecution", router)
+        self.assertIn("registry.execute", router)
+        self.assertNotIn("NoArgumentsSInt32ToX0", router)
         self.assertNotIn("GuestGetpid", router)
         self.assertNotIn("HostGetpid", router)
         self.assertNotIn("hostLookupName != HostGetpid", router)
@@ -117,9 +120,19 @@ class SemanticProviderFixtureTests(unittest.TestCase):
             "_getpid is generated and must not also exist in the handwritten Darwin ABI table",
         )
         self.assertIn(
-            "isSelectedGeneratedSemanticImport(Addr)",
+            "getSelectedGeneratedSemanticImportRequirements",
             translator,
-            "SysTranslator no longer checks the loader-selected generated route",
+            "SysTranslator no longer derives its live state from the generated adapter",
+        )
+        self.assertIn(
+            "executeSelectedGeneratedSemanticImport",
+            translator,
+            "SysTranslator no longer executes the loader-selected generated route",
+        )
+        self.assertNotIn(
+            "uint64_t X0 = Emu.readReg(UC_ARM64_REG_X0);\n\n    if constexpr (PrintEmuInfo)",
+            translator,
+            "generated production routing regressed to the one-register _getpid profile",
         )
 
 
