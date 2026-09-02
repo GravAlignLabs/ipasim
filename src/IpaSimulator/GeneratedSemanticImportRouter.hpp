@@ -1,5 +1,7 @@
 #pragma once
 
+#include "GeneratedBridgeAdapter.hpp"
+
 #include <cstdint>
 #include <string>
 
@@ -22,13 +24,21 @@ GeneratedSemanticImportSelection selectGeneratedSemanticImport(
 
 bool isSelectedGeneratedSemanticImport(std::uint64_t address);
 
-// Live execution is profile-driven by the approved route table. The current
-// production profile has no arguments and commits one signed 32-bit result into
-// ARM64 x0. Additional profiles must extend guest capture/commit deliberately;
-// they must not bypass generated ABI records with a handwritten signature table.
+// Ask the selected generated AdapterRecord which pieces of live AAPCS64 state
+// SysTranslator must snapshot. This is deliberately adapter-driven: the runtime
+// does not keep a second argument-count or return-register signature table.
+bool getSelectedGeneratedSemanticImportRequirements(
+    std::uint64_t address,
+    AdapterExecutionRequirements& requirements,
+    std::string* error = nullptr);
+
+// Execute an already loader-selected, explicitly approved provider using the
+// complete generated guest capture/result-commit record. Pointer-bearing
+// adapters remain fail-closed unless the live runtime supplies a validator.
 bool executeSelectedGeneratedSemanticImport(
     std::uint64_t address,
-    std::uint64_t& guestX0,
+    SyntheticGuestState& guest,
+    const PointerValidator& pointerValidator = {},
     std::string* error = nullptr);
 
 } // namespace ipasim::bridge
