@@ -1,0 +1,37 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Implement the guarded file-descriptor semantics required by the real Run for
+  Office libdispatch boundary: guarded_open_np and guarded_close_np backed by the
+  existing Darwin regular-file descriptor namespace, with exact guard identity,
+  GUARD_CLOSE enforcement, immutable close-on-exec state, and fail-closed behavior
+  for guarded capabilities ipaSim does not yet implement.
+
+scope:
+  - src/IpaSimulator/DarwinHostBridge.cpp
+  - src/IpaSimulator/DarwinHostBridge.def
+  - src/IpaSimulator/DarwinFsSmoke.cpp
+  - src/IpaSimulator/SysTranslator.cpp
+  - .github/agent-work/guarded-fd-core.yml
+
+branch: compat-guarded-fd-core
+started_utc: 2026-09-02T19:08:00Z
+base_sha: d57e723ddeab39694e7b9cb2e8e8a19727a36229
+expected_pr: draft
+
+next_checkpoint: >-
+  Add XNU-backed guarded_open_np/guarded_close_np semantics without aliasing
+  guarded_close to close: validate/copy the 64-bit guard, require GUARD_DUP and
+  O_CLOEXEC, accept libdispatch's GUARD_CLOSE|GUARD_DUP|GUARD_SOCKET_IPC|
+  GUARD_FILEPORT set, reject GUARD_WRITE until write-side enforcement exists,
+  block ordinary close and F_SETFD clearing on guarded descriptors, and prove
+  exact/mismatched/unprotected descriptor behavior through IpaSimDarwinHost.dll.
+
+notes: >-
+  Evidence is Apple XNU guarded.h/kern_guarded.c plus the real IPA static audit:
+  libdispatch requires guarded_close_np and guarded_open_np. Keep guarded_kqueue,
+  change_fdguard, guarded write/pwrite/writev, dup/fileport/socket-IPC support,
+  pthread/workqueue, Mach, and CMake changes out of this increment. Unsupported
+  guarded capabilities must fail closed rather than being silently ignored.
