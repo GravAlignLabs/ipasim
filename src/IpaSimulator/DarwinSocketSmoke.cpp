@@ -154,6 +154,71 @@ int main(int ArgC, char **ArgV) {
     return fail("connected Darwin TCP socket did not carry payload");
   }
 
+  // Prove the receive side over the same Darwin descriptor. A real Winsock peer
+  // sends bytes in the opposite direction; receive() must return the exact short
+  // read result and then report orderly stream shutdown as EOF (0).
+  constexpr char ReversePayload[] = "ipasim-darwin-receive";
+  const int ReverseSent = ::send(
+      Accepted, ReversePayload, static_cast<int>(sizeof(ReversePayload) - 1), 0);
+  if (ReverseSent != static_cast<int>(sizeof(ReversePayload) - 1)) {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("Winsock peer could not send reverse-direction TCP payload");
+  }
+
+  char ReverseReceived[64] = {};
+  const std::intptr_t ReverseReceivedBytes =
+      receive(Client, ReverseReceived, sizeof(ReverseReceived));
+  if (ReverseReceivedBytes !=
+          static_cast<std::intptr_t>(sizeof(ReversePayload) - 1) ||
+      std::memcmp(ReverseReceived, ReversePayload,
+                  sizeof(ReversePayload) - 1) != 0) {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("Darwin receive did not return the reverse-direction TCP payload");
+  }
+
+  errno = 0;
+  if (receive(Client, nullptr, 0) != 0) {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("zero-length Darwin receive did not preserve null-buffer success");
+  }
+
+  errno = 0;
+  if (receive(Client, nullptr, 1) != -1 || errno != EFAULT) {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("Darwin receive null/nonzero buffer did not report EFAULT");
+  }
+
+  char InvalidBuffer = 0;
+  errno = 0;
+  if (receive(0x7ffffffe, &InvalidBuffer, 1) != -1 || errno != EBADF) {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("Darwin receive invalid descriptor did not report EBADF");
+  }
+
+  if (::shutdown(Accepted, SD_SEND) == SOCKET_ERROR) {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("could not orderly-shutdown Winsock peer send side");
+  }
+  char EofSentinel = 'Z';
+  if (receive(Client, &EofSentinel, 1) != 0 || EofSentinel != 'Z') {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("Darwin receive did not report orderly TCP shutdown as EOF");
+  }
+
   ::closesocket(Accepted);
   ::closesocket(Listener);
   if (closeSocket(Client) != 0)
@@ -285,6 +350,6 @@ int main(int ArgC, char **ArgV) {
   }
 
   FreeLibrary(DarwinHost);
-  std::printf("Darwin socket + credential smoke passed: normalized PE exports, Windows token identity, and real loopback TCP/UDP traffic validated.\n");
+  std::printf("Darwin socket + credential smoke passed: normalized PE exports, Windows token identity, and real loopback TCP send/receive + UDP traffic validated.\n");
   return 0;
 }
