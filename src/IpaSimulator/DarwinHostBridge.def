@@ -8,6 +8,8 @@ EXPORTS
     getegid=darwin_getegid
     open=darwin_open
     open$NOCANCEL=darwin_open
+    guarded_open_np=darwin_guarded_open_np
+    guarded_close_np=darwin_guarded_close_np
     close$NOCANCEL=close
     fcntl$NOCANCEL=fcntl
     fstat=darwin_fstat

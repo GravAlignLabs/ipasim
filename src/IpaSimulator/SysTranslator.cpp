@@ -96,6 +96,8 @@ const DarwinHostCallSignature *findDarwinHostCallSignature(
       {"connect", 3, true},
       {"fcntl", 3, true},
       {"fstat", 2, true},
+      {"guarded_close_np", 2, true},
+      {"guarded_open_np", 5, true},
       {"stat", 2, true},
       {"lstat", 2, true},
       {"pid_for_task", 2, true},

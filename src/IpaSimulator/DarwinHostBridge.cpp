@@ -36,6 +36,57 @@ constexpr int DarwinFGetFd = 1;
 constexpr int DarwinFSetFd = 2;
 constexpr intptr_t DarwinFdCloExec = 1;
 
+// XNU guarded-fd flags from <sys/guarded.h>. GUARD_DUP is mandatory for every
+// guarded descriptor. ipaSim can preserve libdispatch's close/dup/socket-IPC/
+// fileport guard set because the latter three bypass surfaces are not currently
+// implemented; GUARD_WRITE is rejected until the write provider can enforce it.
+constexpr uint32_t DarwinGuardClose = 1u << 0;
+constexpr uint32_t DarwinGuardDup = 1u << 1;
+constexpr uint32_t DarwinGuardSocketIpc = 1u << 2;
+constexpr uint32_t DarwinGuardFileport = 1u << 3;
+constexpr uint32_t DarwinGuardWrite = 1u << 4;
+constexpr uint32_t DarwinGuardAll =
+    DarwinGuardClose | DarwinGuardDup | DarwinGuardSocketIpc |
+    DarwinGuardFileport | DarwinGuardWrite;
+
+struct GuardedDescriptorState {
+  uint64_t Guard = 0;
+  uint32_t Flags = 0;
+};
+
+std::mutex GuardedDescriptorMutex;
+std::unordered_map<int, GuardedDescriptorState> GuardedDescriptors;
+
+bool copyGuardValue(const uint64_t *GuardAddress, uint64_t &GuardValue) {
+  if (!GuardAddress ||
+      !ipasim::darwinmem::readableSpan(GuardAddress, sizeof(GuardValue))) {
+    errno = EFAULT;
+    return false;
+  }
+  ::memcpy(&GuardValue, GuardAddress, sizeof(GuardValue));
+  return true;
+}
+
+bool isKnownDescriptor(int Fd) {
+  return ipasim::darwinsock::isSocketDescriptor(Fd) ||
+         ipasim::darwinfs::isOpenNodeDescriptor(Fd);
+}
+
+int closeDescriptorWithoutGuardPolicy(int Fd) {
+  if (ipasim::darwinsock::isSocketDescriptor(Fd))
+    return ipasim::darwinsock::closeSocket(Fd);
+
+  if (!ipasim::darwinfs::isOpenNodeDescriptor(Fd)) {
+    errno = EBADF;
+    return -1;
+  }
+
+  const int Result = _close(Fd);
+  if (Result == 0)
+    ipasim::darwinfs::forgetOpenNodeDescriptor(Fd);
+  return Result;
+}
+
 // XNU proc_info.h defines PROC_PIDPATHINFO_SIZE as MAXPATHLEN and the public
 // wrapper accepts at most four times MAXPATHLEN. Darwin MAXPATHLEN is 1024.
 constexpr uint32_t DarwinProcPidPathInfoSize = 1024;
@@ -222,21 +273,47 @@ __declspec(dllexport) int __pthread_fchdir(int NewFd) {
 }
 
 // close participates in the same guest descriptor namespace as open/socket and
-// proc_pidinfo. Dispatch sockets through the Winsock registry, and forget a
-// filesystem descriptor only after the CRT close succeeds so stale fds cannot
-// remain visible through PROC_PIDLISTFDS.
+// proc_pidinfo. Guarded descriptors retain their XNU close policy: ordinary
+// close cannot bypass GUARD_CLOSE, while descriptors without that guard flag
+// continue through the same socket/filesystem lifetime path.
 __declspec(dllexport) int close(int Fd) {
-  if (ipasim::darwinsock::isSocketDescriptor(Fd))
-    return ipasim::darwinsock::closeSocket(Fd);
-
-  if (!ipasim::darwinfs::isOpenNodeDescriptor(Fd)) {
-    errno = EBADF;
+  std::lock_guard<std::mutex> Guard(GuardedDescriptorMutex);
+  const auto Guarded = GuardedDescriptors.find(Fd);
+  if (Guarded != GuardedDescriptors.end() &&
+      (Guarded->second.Flags & DarwinGuardClose) != 0) {
+    errno = EPERM;
     return -1;
   }
 
-  const int Result = _close(Fd);
+  const int Result = closeDescriptorWithoutGuardPolicy(Fd);
   if (Result == 0)
-    ipasim::darwinfs::forgetOpenNodeDescriptor(Fd);
+    GuardedDescriptors.erase(Fd);
+  return Result;
+}
+
+// guarded_close_np is deliberately not an alias to close(2). XNU first copies
+// the caller's 64-bit guard value, requires the descriptor to be guarded with
+// that exact value, and only then closes it. Preserve EINVAL for a valid but
+// unguarded descriptor, EPERM for a guard mismatch, and EBADF for an unknown fd.
+int darwin_guarded_close_np(int Fd, const uint64_t *GuardAddress) {
+  uint64_t GuardValue = 0;
+  if (!copyGuardValue(GuardAddress, GuardValue))
+    return -1;
+
+  std::lock_guard<std::mutex> Guard(GuardedDescriptorMutex);
+  const auto Guarded = GuardedDescriptors.find(Fd);
+  if (Guarded == GuardedDescriptors.end()) {
+    errno = isKnownDescriptor(Fd) ? EINVAL : EBADF;
+    return -1;
+  }
+  if (Guarded->second.Guard != GuardValue) {
+    errno = EPERM;
+    return -1;
+  }
+
+  const int Result = closeDescriptorWithoutGuardPolicy(Fd);
+  if (Result == 0)
+    GuardedDescriptors.erase(Guarded);
   return Result;
 }
 
@@ -317,8 +394,9 @@ __declspec(dllexport) intptr_t readlink(const char *Path, char *Buffer,
 // the AAPCS64 integer/pointer register class. Export a fixed third integer
 // argument so ipaSim never relies on unsupported native varargs classification.
 // F_GETFD ignores Argument. F_SETFD translates Darwin FD_CLOEXEC into the
-// inverse Windows HANDLE_FLAG_INHERIT state. Unknown commands fail closed so a
-// future target-required fcntl operation becomes an explicit boundary.
+// inverse Windows HANDLE_FLAG_INHERIT state. XNU makes close-on-exec immutable
+// on every guarded descriptor, so clearing it fails rather than weakening the
+// guard contract. Unknown commands remain fail-closed.
 __declspec(dllexport) int fcntl(int Fd, int Command, intptr_t Argument) {
   HANDLE NativeHandle;
   if (!getNativeHandle(Fd, NativeHandle))
@@ -340,6 +418,14 @@ __declspec(dllexport) int fcntl(int Fd, int Command, intptr_t Argument) {
     if ((Argument & ~DarwinFdCloExec) != 0) {
       errno = EINVAL;
       return -1;
+    }
+    {
+      std::lock_guard<std::mutex> Guard(GuardedDescriptorMutex);
+      if (GuardedDescriptors.count(Fd) != 0 &&
+          (Argument & DarwinFdCloExec) == 0) {
+        errno = EPERM;
+        return -1;
+      }
     }
     const bool Inherit = (Argument & DarwinFdCloExec) == 0;
     if (!SetHandleInformation(NativeHandle, HANDLE_FLAG_INHERIT,
@@ -511,6 +597,52 @@ int darwin_open(const char *Path, int Flags, uint16_t CreateMode) {
     return -1;
   }
   return ipasim::darwinfs::openNode(Path, Flags, CreateMode);
+}
+
+// XNU guarded_open_np is variadic only for the O_CREAT mode argument. Keep a
+// fixed five-register host entry so ARM64 marshalling remains explicit. The
+// public guarded-fd contract requires O_CLOEXEC and GUARD_DUP; libdispatch also
+// requests GUARD_CLOSE, GUARD_SOCKET_IPC and GUARD_FILEPORT. Those bypass
+// operations do not exist in ipaSim today, so their guards remain fail-closed.
+// GUARD_WRITE is rejected until the write path can enforce it.
+int darwin_guarded_open_np(const char *Path, const uint64_t *GuardAddress,
+                           uint32_t GuardFlags, int Flags, int CreateMode) {
+  if ((Flags & ipasim::darwinfs::DarwinOpenCloseOnExec) == 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  if ((GuardFlags & DarwinGuardDup) == 0 ||
+      (GuardFlags & ~DarwinGuardAll) != 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  if ((GuardFlags & DarwinGuardWrite) != 0) {
+    errno = ENOTSUP;
+    return -1;
+  }
+
+  uint64_t GuardValue = 0;
+  if (!copyGuardValue(GuardAddress, GuardValue))
+    return -1;
+  if (GuardValue == 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (Path && Path[0] != '/' && ThreadState.WorkingDirectoryFd != -1) {
+    errno = ENOTSUP;
+    return -1;
+  }
+
+  const int Fd = ipasim::darwinfs::openNode(
+      Path, Flags, static_cast<ipasim::darwinfs::Mode>(CreateMode));
+  if (Fd < 0)
+    return -1;
+
+  {
+    std::lock_guard<std::mutex> Guard(GuardedDescriptorMutex);
+    GuardedDescriptors[Fd] = GuardedDescriptorState{GuardValue, GuardFlags};
+  }
+  return Fd;
 }
 
 // Darwin's mach_msg_overwrite is not mapped to a fake Windows syscall. It
