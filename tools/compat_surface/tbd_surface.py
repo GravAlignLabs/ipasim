@@ -64,6 +64,9 @@ class TbdInterface:
     exports: tuple[TbdExport, ...]
     reexports: tuple[TbdReexport, ...]
     sources: tuple[str, ...]
+    source_format_versions: tuple[int, ...] = ()
+    source_current_versions: tuple[str, ...] = ()
+    evidence_variations: tuple[tuple[str, str, tuple[int, ...]], ...] = ()
 
 
 def _require_yaml() -> None:
@@ -252,16 +255,20 @@ def _parse_document(
         TbdReexport(name, tuple(sorted(targets)))
         for name, targets in sorted(reexport_targets.items())
     )
+    format_version = _format_version(document)
+    current_version = _as_string(document.get("current-version"))
 
     return TbdInterface(
         install_name=install_name,
-        format_version=_format_version(document),
-        current_version=_as_string(document.get("current-version")),
+        format_version=format_version,
+        current_version=current_version,
         compatibility_version=_as_string(document.get("compatibility-version")),
         targets=tuple(document_targets),
         exports=exports,
         reexports=reexports,
         sources=(source.replace("\\", "/"),),
+        source_format_versions=(format_version,),
+        source_current_versions=((current_version,) if current_version else ()),
     )
 
 
@@ -305,18 +312,97 @@ def parse_tbd_file(
     return parse_tbd_text(text, display_name or path.name, requested_targets)
 
 
+def _export_facts_by_kind_for_target(
+    interface: TbdInterface,
+    target: str,
+) -> dict[str, set[tuple[str, bool]]]:
+    facts: dict[str, set[tuple[str, bool]]] = {}
+    for item in interface.exports:
+        if target not in item.targets:
+            continue
+        facts.setdefault(item.kind, set()).add((item.name, item.weak))
+    return facts
+
+
+def _reexport_facts_for_target(
+    interface: TbdInterface,
+    target: str,
+) -> set[str]:
+    return {
+        item.install_name
+        for item in interface.reexports
+        if target in item.targets
+    }
+
+
+def _mixed_format_evidence_variations(
+    group: Sequence[TbdInterface],
+) -> tuple[tuple[str, str, tuple[int, ...]], ...]:
+    """Describe representation drift without treating omission as negative evidence.
+
+    Real SDK bundles can contain a legacy standalone stub and a v4 umbrella
+    document for the same install name.  Their export/re-export inventories can
+    be generated from different snapshots or carry different metadata classes.
+    Both observations are retained.  Variation is surfaced explicitly so later
+    planning can distinguish a clean duplicate from mixed-generation evidence.
+    """
+    variations: set[tuple[str, str, tuple[int, ...]]] = set()
+    for left_index, left in enumerate(group):
+        for right in group[left_index + 1 :]:
+            if left.format_version == right.format_version:
+                continue
+            format_versions = tuple(sorted({left.format_version, right.format_version}))
+            overlap = sorted(set(left.targets).intersection(right.targets))
+            for target in overlap:
+                left_exports = _export_facts_by_kind_for_target(left, target)
+                right_exports = _export_facts_by_kind_for_target(right, target)
+                for kind in sorted(set(left_exports).union(right_exports)):
+                    if left_exports.get(kind, set()) != right_exports.get(kind, set()):
+                        variations.add((target, f"export:{kind}", format_versions))
+                if _reexport_facts_for_target(left, target) != _reexport_facts_for_target(
+                    right, target
+                ):
+                    variations.add((target, "reexports", format_versions))
+    return tuple(sorted(variations))
+
+
+def _current_versions_by_format(
+    group: Sequence[TbdInterface],
+) -> dict[int, set[str]]:
+    versions: dict[int, set[str]] = {}
+    for item in group:
+        if item.current_version:
+            versions.setdefault(item.format_version, set()).add(item.current_version)
+    return versions
+
+
 def _merge_interface_group(group: Sequence[TbdInterface]) -> TbdInterface:
     first = group[0]
-    versions = {item.format_version for item in group}
-    current_versions = {item.current_version for item in group if item.current_version}
+    versions = {
+        version
+        for item in group
+        for version in (item.source_format_versions or (item.format_version,))
+    }
+    current_versions = {
+        version
+        for item in group
+        for version in (
+            item.source_current_versions
+            or ((item.current_version,) if item.current_version else ())
+        )
+    }
     compatibility_versions = {
         item.compatibility_version for item in group if item.compatibility_version
     }
-    if len(versions) != 1:
-        raise TbdParseError(
-            f"{first.install_name}: conflicting TAPI format versions {sorted(versions)}"
-        )
-    if len(current_versions) > 1:
+    evidence_variations = _mixed_format_evidence_variations(group)
+
+    for format_version, values in sorted(_current_versions_by_format(group).items()):
+        if len(values) > 1:
+            raise TbdParseError(
+                f"{first.install_name}: conflicting current-version values "
+                f"{sorted(values)} within TAPI format version {format_version}"
+            )
+    if len(current_versions) > 1 and len(versions) == 1:
         raise TbdParseError(
             f"{first.install_name}: conflicting current-version values "
             f"{sorted(current_versions)}"
@@ -351,15 +437,21 @@ def _merge_interface_group(group: Sequence[TbdInterface]) -> TbdInterface:
         TbdReexport(name, tuple(sorted(targets)))
         for name, targets in sorted(reexport_targets.items())
     )
+    canonical_current_version = (
+        next(iter(current_versions)) if len(current_versions) == 1 else None
+    )
     return TbdInterface(
         install_name=first.install_name,
-        format_version=first.format_version,
-        current_version=next(iter(current_versions), None),
+        format_version=max(versions),
+        current_version=canonical_current_version,
         compatibility_version=next(iter(compatibility_versions), None),
         targets=tuple(sorted(all_targets)),
         exports=exports,
         reexports=reexports,
         sources=tuple(sorted(sources)),
+        source_format_versions=tuple(sorted(versions)),
+        source_current_versions=tuple(sorted(current_versions)),
+        evidence_variations=evidence_variations,
     )
 
 
@@ -379,6 +471,8 @@ def build_sdk_manifest(interfaces: Iterable[TbdInterface]) -> dict:
     objc_count = 0
     export_count = 0
     reexport_count = 0
+    mixed_format_interface_count = 0
+    evidence_variation_count = 0
     symbol_providers: dict[tuple[str, str, bool], dict[str, set[str]]] = {}
 
     rendered = []
@@ -387,6 +481,10 @@ def build_sdk_manifest(interfaces: Iterable[TbdInterface]) -> dict:
         reexport_count += len(interface.reexports)
         weak_count += sum(1 for item in interface.exports if item.weak)
         objc_count += sum(1 for item in interface.exports if item.kind.startswith("objc-"))
+        source_versions = interface.source_format_versions or (interface.format_version,)
+        if len(source_versions) > 1:
+            mixed_format_interface_count += 1
+        evidence_variation_count += len(interface.evidence_variations)
 
         rendered_exports = []
         for item in interface.exports:
@@ -403,24 +501,40 @@ def build_sdk_manifest(interfaces: Iterable[TbdInterface]) -> dict:
             )
             providers.setdefault(interface.install_name, set()).update(item.targets)
 
-        rendered.append(
-            {
-                "install_name": interface.install_name,
-                "format_version": interface.format_version,
-                "current_version": interface.current_version,
-                "compatibility_version": interface.compatibility_version,
-                "targets": list(interface.targets),
-                "sources": list(interface.sources),
-                "exports": rendered_exports,
-                "reexports": [
-                    {
-                        "install_name": item.install_name,
-                        "targets": list(item.targets),
-                    }
-                    for item in interface.reexports
-                ],
-            }
+        rendered_interface = {
+            "install_name": interface.install_name,
+            "format_version": interface.format_version,
+            "current_version": interface.current_version,
+            "compatibility_version": interface.compatibility_version,
+            "targets": list(interface.targets),
+            "sources": list(interface.sources),
+            "exports": rendered_exports,
+            "reexports": [
+                {
+                    "install_name": item.install_name,
+                    "targets": list(item.targets),
+                }
+                for item in interface.reexports
+            ],
+        }
+        if len(source_versions) > 1:
+            rendered_interface["source_format_versions"] = list(source_versions)
+        current_versions = (
+            interface.source_current_versions
+            or ((interface.current_version,) if interface.current_version else ())
         )
+        if len(current_versions) > 1:
+            rendered_interface["source_current_versions"] = list(current_versions)
+        if interface.evidence_variations:
+            rendered_interface["evidence_variations"] = [
+                {
+                    "target": target,
+                    "category": category,
+                    "format_versions": list(format_versions),
+                }
+                for target, category, format_versions in interface.evidence_variations
+            ]
+        rendered.append(rendered_interface)
 
     symbol_index = []
     for (name, kind, weak), providers in sorted(
@@ -451,6 +565,8 @@ def build_sdk_manifest(interfaces: Iterable[TbdInterface]) -> dict:
             "objc_export_count": objc_count,
             "reexport_count": reexport_count,
             "unique_symbol_count": len(symbol_index),
+            "mixed_format_interface_count": mixed_format_interface_count,
+            "evidence_variation_count": evidence_variation_count,
         },
         "interfaces": rendered,
         "symbol_index": symbol_index,

@@ -48,7 +48,7 @@ class BulkCompatibilityTests(unittest.TestCase):
                 return_value=inventory,
             ) as build_inventory,
             mock.patch.object(
-                bulk_compatibility.compiler_batching,
+                bulk_compatibility.sdk_abi_recovery,
                 "build_aapcs64_manifest",
                 return_value=guest,
             ) as build_guest,
@@ -103,7 +103,7 @@ class BulkCompatibilityTests(unittest.TestCase):
             header_root=Path("headers"),
             clang="clang",
             sdk_root=Path("sdk"),
-            extra_args=("-DTEST",),
+            extra_args=("-O1", "-DTEST"),
             timeout_seconds=30,
             batch_size=17,
         )
@@ -124,6 +124,16 @@ class BulkCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual(outputs["routes_cpp"], "ROUTES\n")
         self.assertEqual(outputs["adapters_cpp"], "ADAPTERS\n")
+
+    def test_guest_abi_uses_minimal_optimization_unless_caller_selects_one(self):
+        self.assertEqual(
+            bulk_compatibility._guest_abi_clang_args(("-DTEST",)),
+            ("-O1", "-DTEST"),
+        )
+        self.assertEqual(
+            bulk_compatibility._guest_abi_clang_args(("-O2", "-DTEST")),
+            ("-O2", "-DTEST"),
+        )
 
     def test_approved_route_without_generated_adapter_fails_closed(self):
         semantics = {

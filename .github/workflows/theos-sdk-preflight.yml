@@ -1,0 +1,644 @@
+name: Theos iPhoneOS16.5 SDK Preflight
+
+on:
+  pull_request:
+    paths:
+      - 'tools/compat_surface/**'
+      - '.github/workflows/theos-sdk-preflight.yml'
+      - '.github/agent-work/theos-sdk-full-preflight.yml'
+  workflow_dispatch:
+
+concurrency:
+  # Include the PR head SHA so a zombie run from an obsolete commit cannot
+  # hold the current head behind GitHub's repository-wide concurrency lock.
+  group: theos-sdk-preflight-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  THEOS_SDK_COMMIT: 0222fd5413cf4b9af096f37b4621afa2688572f7
+  HEADER_SHARD_COUNT: '32'
+  HEADER_TARGET: arm64-apple-ios16.0
+  HEADER_SHARD_WALL_TIMEOUT: '15m'
+  FULL_PREFLIGHT_WALL_TIMEOUT: '35m'
+  # Run #37 is the first authoritative run with all 32 shards green. Its
+  # artifacts are allowed to seed the exact cache only while every analyzer
+  # blob and the Clang/Python identities still match that run.
+  HEADER_CACHE_SEED_RUN_ID: '33534466454'
+  HEADER_CACHE_SEED_RUN_NUMBER: '37'
+  HEADER_CACHE_SEED_HEAD: ca4a2e71b997b55d0176acb21ebdda55fd928fbd
+  HEADER_CACHE_SEED_CLANG: 'Ubuntu clang version 18.1.3 (1ubuntu1)'
+  HEADER_CACHE_SEED_PYTHON: 'Python 3.11.16'
+  HEADER_CACHE_SEED_HEADER_SURFACE_BLOB: 19c170dab35ab187739ff14ef5166b50899467e9
+  HEADER_CACHE_SEED_CONTEXT_BLOB: 21932aa610d3ecde8518781711b68a11cf6d653d
+  HEADER_CACHE_SEED_SURFACE_BLOB: af957e0630ea41c28d59610e1cbf3e254fa06553
+  HEADER_CACHE_SEED_EXHAUSTIVE_BLOB: c5c3aa83dfebe3d11a49ff920de6660aa9849716
+
+jobs:
+  header-shards:
+    name: header-shard-${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+
+    steps:
+      - name: Check out ipaSim
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Identify exact shard cache
+        id: cache_identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang_id="$(clang --version | head -n 1)"
+          python_id="$(python --version 2>&1)"
+
+          analyzer_digest="$({
+            git hash-object tools/compat_surface/header_surface.py
+            git hash-object tools/compat_surface/sdk_header_context.py
+            git hash-object tools/compat_surface/sdk_header_surface.py
+            git hash-object tools/compat_surface/sdk_header_exhaustive.py
+            printf '%s\n' \
+              "$THEOS_SDK_COMMIT" \
+              "$HEADER_TARGET" \
+              "$HEADER_SHARD_COUNT" \
+              "$clang_id" \
+              "$python_id"
+          } | sha256sum | awk '{print $1}')"
+
+          key="theos-sdk-header-v1-${analyzer_digest}-shard-${{ matrix.shard }}"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "clang_id=$clang_id" >> "$GITHUB_OUTPUT"
+          echo "python_id=$python_id" >> "$GITHUB_OUTPUT"
+
+          seed_compatible=true
+          [[ "$clang_id" == "$HEADER_CACHE_SEED_CLANG" ]] || seed_compatible=false
+          [[ "$python_id" == "$HEADER_CACHE_SEED_PYTHON" ]] || seed_compatible=false
+          [[ "$(git hash-object tools/compat_surface/header_surface.py)" == "$HEADER_CACHE_SEED_HEADER_SURFACE_BLOB" ]] || seed_compatible=false
+          [[ "$(git hash-object tools/compat_surface/sdk_header_context.py)" == "$HEADER_CACHE_SEED_CONTEXT_BLOB" ]] || seed_compatible=false
+          [[ "$(git hash-object tools/compat_surface/sdk_header_surface.py)" == "$HEADER_CACHE_SEED_SURFACE_BLOB" ]] || seed_compatible=false
+          [[ "$(git hash-object tools/compat_surface/sdk_header_exhaustive.py)" == "$HEADER_CACHE_SEED_EXHAUSTIVE_BLOB" ]] || seed_compatible=false
+          echo "seed_compatible=$seed_compatible" >> "$GITHUB_OUTPUT"
+
+          echo "Exact shard cache key: $key"
+          if [[ "$seed_compatible" == true ]]; then
+            echo "Run #${HEADER_CACHE_SEED_RUN_NUMBER} artifacts are exact-toolchain compatible and may seed a cache miss."
+          else
+            echo "Run #${HEADER_CACHE_SEED_RUN_NUMBER} artifacts are not exact-toolchain compatible; a cache miss will recompute the shard."
+          fi
+
+      - name: Restore exact header shard cache
+        id: header_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: shard-output
+          key: ${{ steps.cache_identity.outputs.key }}
+
+      - name: Download run 37 shard seed on cache miss
+        id: seed_shard
+        if: steps.header_cache.outputs.cache-hit != 'true' && steps.cache_identity.outputs.seed_compatible == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: theos-sdk-header-shard-${{ matrix.shard }}
+          path: seed-output
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.HEADER_CACHE_SEED_RUN_ID }}
+
+      - name: Validate cached or seeded shard evidence
+        id: reuse_shard
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.header_cache.outputs.cache-hit }}
+          SEED_OUTCOME: ${{ steps.seed_shard.outcome }}
+        run: |
+          set -euo pipefail
+          shard="${{ matrix.shard }}"
+          source="none"
+
+          if [[ "$CACHE_HIT" == "true" ]]; then
+            source="github-cache"
+          elif [[ "$SEED_OUTCOME" == "success" ]]; then
+            rm -rf shard-output
+            mkdir -p shard-output
+            cp -a seed-output/. shard-output/
+            source="ci-run-${HEADER_CACHE_SEED_RUN_NUMBER}-artifact"
+          fi
+
+          if [[ "$source" == "none" ]]; then
+            echo "reused=false" >> "$GITHUB_OUTPUT"
+            echo "source=compute" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! SHARD="$shard" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          shard = int(os.environ['SHARD'])
+          root = Path('shard-output')
+          manifest_path = root / f'header-shard-{shard}.json'
+          status_path = root / f'header-shard-{shard}.status'
+          if not manifest_path.is_file() or not status_path.is_file():
+              raise SystemExit(1)
+          if status_path.read_text(encoding='utf-8').strip() != '0':
+              raise SystemExit(1)
+          manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+          coverage = manifest.get('coverage') or {}
+          valid = (
+              manifest.get('schema_version') == 1
+              and manifest.get('kind') == 'header-signature-surface'
+              and manifest.get('target') == os.environ['HEADER_TARGET']
+              and coverage.get('schema_version') == 1
+              and coverage.get('strategy') == 'sorted-round-robin'
+              and coverage.get('shard_count') == int(os.environ['HEADER_SHARD_COUNT'])
+              and coverage.get('shard_index') == shard
+              and coverage.get('sdk_header_count') == 5118
+              and isinstance(coverage.get('headers'), list)
+              and coverage.get('headers')
+          )
+          raise SystemExit(0 if valid else 1)
+          PY
+          then
+            if [[ "$source" == "github-cache" ]]; then
+              echo "::error::Exact header cache entry failed validation for shard ${shard}; refusing to trust corrupted cache evidence."
+              exit 1
+            fi
+            echo "::warning::Run #${HEADER_CACHE_SEED_RUN_NUMBER} artifact failed validation for shard ${shard}; recomputing instead."
+            rm -rf shard-output
+            echo "reused=false" >> "$GITHUB_OUTPUT"
+            echo "source=compute" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "reused=true" >> "$GITHUB_OUTPUT"
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+          echo "Header shard ${shard} reused from ${source}."
+
+      - name: Check out pinned public Theos SDK
+        if: steps.reuse_shard.outputs.reused != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: theos/sdks
+          ref: ${{ env.THEOS_SDK_COMMIT }}
+          path: theos-sdks
+          fetch-depth: 1
+          sparse-checkout: |
+            iPhoneOS16.5.sdk
+          sparse-checkout-cone-mode: false
+
+      - name: Run exhaustive header shard and capture status
+        id: computed_shard
+        if: steps.reuse_shard.outputs.reused != 'true'
+        shell: bash
+        run: |
+          set +e
+          mkdir -p shard-output
+          shard="${{ matrix.shard }}"
+          log="shard-output/header-shard-${shard}.log"
+          manifest="shard-output/header-shard-${shard}.json"
+          status="shard-output/header-shard-${shard}.status"
+
+          # Materialize a sentinel before starting. If the analyzer is
+          # interrupted but the runner can still execute cleanup, the
+          # aggregator sees explicit incomplete evidence rather than silence.
+          printf 'running\n' > "$status"
+
+          timeout --signal=TERM --kill-after=30s "$HEADER_SHARD_WALL_TIMEOUT" \
+            python tools/compat_surface/sdk_header_exhaustive.py \
+              --sdk-root "$GITHUB_WORKSPACE/theos-sdks/iPhoneOS16.5.sdk" \
+              --shard-count "$HEADER_SHARD_COUNT" \
+              --shard-index "$shard" \
+              --jobs 2 \
+              --progress-every 10 \
+              --timeout 120 \
+              --output "$manifest" \
+              2>&1 | tee "$log"
+          code=${PIPESTATUS[0]}
+          printf '%s\n' "$code" > "$status"
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+          if [[ "$code" -eq 124 ]]; then
+            echo "::warning::Header shard ${shard} exceeded the ${HEADER_SHARD_WALL_TIMEOUT} wall-clock watchdog; evidence is retained and the final gate will fail closed."
+          elif [[ "$code" -ne 0 ]]; then
+            echo "::warning::Header shard ${shard} failed with exit code ${code}; the exact diagnostic is retained for the final self-reporting gate."
+          fi
+          exit 0
+
+      - name: Resolve shard result
+        id: header_shard
+        if: always()
+        shell: bash
+        env:
+          REUSED: ${{ steps.reuse_shard.outputs.reused }}
+          REUSE_SOURCE: ${{ steps.reuse_shard.outputs.source }}
+          COMPUTED_EXIT: ${{ steps.computed_shard.outputs.exit_code }}
+        run: |
+          if [[ "$REUSED" == "true" ]]; then
+            code=0
+            source="$REUSE_SOURCE"
+          else
+            code="$COMPUTED_EXIT"
+            source="computed"
+            if [[ -z "$code" ]]; then
+              code="no-status"
+            fi
+          fi
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+
+      - name: Save successful exact header shard cache
+        if: always() && steps.header_cache.outputs.cache-hit != 'true' && steps.header_shard.outputs.exit_code == '0'
+        uses: actions/cache/save@v4
+        with:
+          path: shard-output
+          key: ${{ steps.cache_identity.outputs.key }}
+
+      - name: Record shard result
+        if: always()
+        shell: bash
+        run: |
+          code="${{ steps.header_shard.outputs.exit_code }}"
+          source="${{ steps.header_shard.outputs.source }}"
+          if [[ -z "$code" ]]; then
+            code="no-status"
+          fi
+          if [[ -z "$source" ]]; then
+            source="unknown"
+          fi
+          {
+            echo "### Theos SDK header shard ${{ matrix.shard }}"
+            echo
+            echo "Captured analyzer exit status: \`$code\`"
+            echo "Evidence source: \`$source\`"
+            echo "Exact cache hit: \`${{ steps.header_cache.outputs.cache-hit }}\`"
+            echo "Job hard limit: **20 minutes**"
+            echo "Analyzer wall-clock watchdog: **${HEADER_SHARD_WALL_TIMEOUT}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: theos-sdk-header-shard-${{ matrix.shard }}
+          path: shard-output
+          if-no-files-found: warn
+          retention-days: 7
+
+  sdk-preflight:
+    name: sdk-preflight
+    needs: header-shards
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out ipaSim
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check out pinned public Theos SDK
+        uses: actions/checkout@v4
+        with:
+          repository: theos/sdks
+          ref: ${{ env.THEOS_SDK_COMMIT }}
+          path: theos-sdks
+          fetch-depth: 1
+          sparse-checkout: |
+            iPhoneOS16.5.sdk
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download header shard evidence
+        id: download_shards
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: theos-sdk-header-shard-*
+          path: header-shards
+          merge-multiple: false
+
+      - name: Run complete SDK compatibility preflight
+        id: sdk_preflight
+        shell: bash
+        env:
+          SHARD_DOWNLOAD_OUTCOME: ${{ steps.download_shards.outcome }}
+        run: |
+          set +e
+          rm -rf "$RUNNER_TEMP/ipasim-sdk-plan"
+          (
+            clang --version &&
+            python -m pip install --disable-pip-version-check PyYAML==6.0.2 &&
+            python - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          root = Path('header-shards')
+          expected_count = int(os.environ['HEADER_SHARD_COUNT'])
+          expected = set(range(expected_count))
+
+          if os.environ.get('SHARD_DOWNLOAD_OUTCOME') != 'success':
+              print(
+                  '[sdk-header-surface] ERROR: header shard artifact download '
+                  f"outcome={os.environ.get('SHARD_DOWNLOAD_OUTCOME')!r}",
+                  file=sys.stderr,
+              )
+
+          status_pattern = re.compile(r'header-shard-(\d+)\.status$')
+          statuses = {}
+          duplicates = []
+          for path in root.rglob('header-shard-*.status') if root.exists() else []:
+              match = status_pattern.search(path.name)
+              if not match:
+                  continue
+              index = int(match.group(1))
+              if index in statuses:
+                  duplicates.append(index)
+                  continue
+              try:
+                  raw_status = path.read_text(encoding='utf-8').strip()
+                  statuses[index] = int(raw_status)
+              except ValueError:
+                  print(
+                      f'[sdk-header-surface] ERROR: shard {index} did not finish '
+                      f'cleanly; captured status={raw_status!r}',
+                      file=sys.stderr,
+                  )
+                  statuses[index] = -1
+              except OSError as exc:
+                  print(
+                      f'[sdk-header-surface] ERROR: invalid status for shard {index}: {exc}',
+                      file=sys.stderr,
+                  )
+                  statuses[index] = -1
+
+          missing = sorted(expected - set(statuses))
+          extra = sorted(set(statuses) - expected)
+          if missing or extra or duplicates:
+              print(
+                  '[sdk-header-surface] ERROR: incomplete header shard evidence: '
+                  f'missing={missing} extra={extra} duplicates={sorted(set(duplicates))}',
+                  file=sys.stderr,
+              )
+
+          failed = sorted(index for index, code in statuses.items() if code != 0)
+          for index in failed:
+              code = statuses[index]
+              if code == 124:
+                  detail = ' (wall-clock watchdog expired)'
+              elif code in (137, 143):
+                  detail = ' (terminated by signal)'
+              else:
+                  detail = ''
+              print(
+                  f'[sdk-header-surface] ERROR: header shard {index}/{expected_count} '
+                  f'exited with code {code}{detail}',
+                  file=sys.stderr,
+              )
+              logs = list(root.rglob(f'header-shard-{index}.log'))
+              if logs:
+                  try:
+                      lines = logs[0].read_text(encoding='utf-8', errors='replace').splitlines()
+                  except OSError as exc:
+                      print(f'could not read shard log: {exc}', file=sys.stderr)
+                  else:
+                      print(f'--- header shard {index} diagnostic tail ---', file=sys.stderr)
+                      for line in lines[-160:]:
+                          print(line, file=sys.stderr)
+                      print(f'--- end header shard {index} diagnostic tail ---', file=sys.stderr)
+
+          manifests = list(root.rglob('header-shard-*.json')) if root.exists() else []
+          manifest_pattern = re.compile(r'header-shard-(\d+)\.json$')
+          manifest_indices = []
+          for path in manifests:
+              match = manifest_pattern.search(path.name)
+              if match:
+                  manifest_indices.append(int(match.group(1)))
+          missing_manifests = sorted(expected - set(manifest_indices))
+          extra_manifests = sorted(set(manifest_indices) - expected)
+          duplicate_manifests = sorted(
+              {index for index in manifest_indices if manifest_indices.count(index) > 1}
+          )
+          if missing_manifests or extra_manifests or duplicate_manifests:
+              print(
+                  '[sdk-header-surface] ERROR: incomplete header shard manifests: '
+                  f'missing={missing_manifests} extra={extra_manifests} '
+                  f'duplicates={duplicate_manifests}',
+                  file=sys.stderr,
+              )
+
+          if (
+              os.environ.get('SHARD_DOWNLOAD_OUTCOME') != 'success'
+              or missing
+              or extra
+              or duplicates
+              or failed
+              or missing_manifests
+              or extra_manifests
+              or duplicate_manifests
+          ):
+              raise SystemExit(1)
+
+          print(
+              '[sdk-header-surface] CI shard evidence complete: '
+              f'{expected_count} successful shards with manifests',
+              flush=True,
+          )
+          PY
+            precheck=$?
+            if [[ "$precheck" -ne 0 ]]; then
+              exit "$precheck"
+            fi
+
+            mapfile -t manifests < <(find header-shards -type f -name 'header-shard-*.json' | sort -V)
+            header_args=()
+            for manifest in "${manifests[@]}"; do
+              header_args+=(--header-manifest "$manifest")
+            done
+
+            timeout --signal=TERM --kill-after=30s "$FULL_PREFLIGHT_WALL_TIMEOUT" \
+              python tools/compat_surface/sdk_compatibility.py \
+                --sdk-root "$GITHUB_WORKSPACE/theos-sdks/iPhoneOS16.5.sdk" \
+                --output-dir "$RUNNER_TEMP/ipasim-sdk-plan" \
+                "${header_args[@]}" \
+                --compiler-batch-size 256 \
+                --timeout 120
+          ) 2>&1 | tee theos-sdk-preflight.log
+          code=${PIPESTATUS[0]}
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [[ "$code" -eq 124 ]]; then
+            echo "::warning::Full SDK preflight exceeded the ${FULL_PREFLIGHT_WALL_TIMEOUT} wall-clock watchdog; diagnostic evidence will be published."
+          fi
+          exit 0
+
+      - name: Summarize successful SDK map
+        if: always() && steps.sdk_preflight.outputs.exit_code == '0'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'ipasim-sdk-plan'
+          compatibility = json.loads((root / 'compatibility-plan.json').read_text(encoding='utf-8'))
+          tapi = json.loads((root / 'tapi-sdk-surface.json').read_text(encoding='utf-8'))
+          headers = json.loads((root / 'header-signatures.json').read_text(encoding='utf-8'))
+          guest = json.loads((root / 'aapcs64-abi.json').read_text(encoding='utf-8'))
+          host = json.loads((root / 'win64-abi.json').read_text(encoding='utf-8'))
+          adapters = json.loads((root / 'runtime-adapters.json').read_text(encoding='utf-8'))
+
+          summary = compatibility['summary']
+          lines = [
+              '# Theos iPhoneOS16.5 SDK compatibility preflight',
+              '',
+              f"Pinned Theos SDK commit: `{os.environ['THEOS_SDK_COMMIT']}`",
+              f"Exhaustive headers analyzed: **{headers['summary']['header_count']}**",
+              f"TAPI symbols: **{tapi['summary']['unique_symbol_count']}**",
+              f"Header C signatures: **{headers['summary']['unique_symbol_count']}**",
+              f"SDK catalog symbols: **{summary['symbol_count']}**",
+              f"Typed C candidates: **{summary['typed_c_candidate_count']}**",
+              f"AAPCS64 generated candidates: **{guest['summary']['generated_bridge_candidate_count']}**",
+              f"Win64 cross-ABI candidates: **{host['summary']['cross_abi_adapter_candidate_count']}**",
+              f"Runtime adapters: **{len(adapters.get('adapters') or [])}**",
+              '',
+              '## Route status',
+          ]
+          for key, value in sorted((summary.get('route_status_counts') or {}).items()):
+              lines.append(f'- `{key}`: {value}')
+          lines += ['', '## Semantic status']
+          for key, value in sorted((summary.get('semantic_status_counts') or {}).items()):
+              lines.append(f'- `{key}`: {value}')
+          text = '\n'.join(lines) + '\n'
+          Path('theos-sdk-summary.md').write_text(text, encoding='utf-8')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as stream:
+              stream.write(text)
+          PY
+
+      - name: Publish SDK preflight diagnostic
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          SDK_EXIT_CODE: ${{ steps.sdk_preflight.outputs.exit_code }}
+          SDK_LOG: theos-sdk-preflight.log
+          SDK_SUMMARY: theos-sdk-summary.md
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ipasim-theos-sdk-preflight-diagnostic -->';
+            const exitCode = process.env.SDK_EXIT_CODE || 'unknown';
+            const failed = exitCode !== '0';
+            const logLines = fs.existsSync(process.env.SDK_LOG)
+              ? fs.readFileSync(process.env.SDK_LOG, 'utf8').split(/\r?\n/)
+              : ['Theos SDK preflight log was not produced.'];
+            const highSignalPattern = /(^\[sdk-compatibility\] ERROR:)|(^\[sdk-header-surface\] ERROR:)|(^\[header-surface\] ERROR:)|(^\[tbd-surface\] ERROR:)|(^\[bulk-compatibility\] ERROR:)|CompilerBatchError|HeaderParseError|TbdParseError|SdkCompatibilityError|SdkHeaderSurfaceError|AbiSurfaceError|Win64AbiError|BridgePlanError|RuntimeAdapterTableError|CompatibilityPlannerError|SemanticRouteError|Traceback|AssertionError|\bFAILED\b|\bERROR\b/i;
+            const highSignal = logLines.filter(line => highSignalPattern.test(line)).slice(0, 100);
+            const tail = logLines.slice(-160);
+            const headSha = context.payload.pull_request.head.sha;
+            const summary = fs.existsSync(process.env.SDK_SUMMARY)
+              ? fs.readFileSync(process.env.SDK_SUMMARY, 'utf8').trim()
+              : '';
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+            const existing = comments.find(comment => comment.body && comment.body.includes(marker));
+
+            let body;
+            if (failed) {
+              body = [
+                marker,
+                '## Theos iPhoneOS16.5 SDK preflight diagnostic',
+                '',
+                `Commit: \`${headSha}\``,
+                `Pinned public SDK: \`theos/sdks@${process.env.THEOS_SDK_COMMIT}\``,
+                '',
+                ...(highSignal.length ? [
+                  '### High-signal diagnostics',
+                  '```text',
+                  ...highSignal,
+                  '```',
+                  ''
+                ] : []),
+                '### Log tail',
+                '```text',
+                ...tail,
+                '```'
+              ].join('\n').slice(0, 60000);
+            } else {
+              body = [
+                marker,
+                '## Theos iPhoneOS16.5 SDK preflight',
+                '',
+                `Commit: \`${headSha}\``,
+                '',
+                '✅ Complete pinned public-SDK compatibility preflight passed.',
+                '',
+                summary
+              ].join('\n').slice(0, 60000);
+            }
+
+            if (existing) {
+              await github.rest.issues.updateComment({owner, repo, comment_id: existing.id, body});
+            } else {
+              await github.rest.issues.createComment({owner, repo, issue_number, body});
+            }
+            console.log(body);
+
+      - name: Upload successful SDK compatibility bundle
+        if: always() && steps.sdk_preflight.outputs.exit_code == '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: theos-iphoneos16.5-sdk-compatibility
+          path: |
+            ${{ runner.temp }}/ipasim-sdk-plan
+            theos-sdk-summary.md
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload SDK preflight diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: theos-sdk-preflight-log
+          path: theos-sdk-preflight.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Fail after publishing diagnostic
+        if: always() && steps.sdk_preflight.outputs.exit_code != '0'
+        shell: bash
+        run: |
+          echo "::error::The pinned Theos SDK compatibility preflight failed. The first actionable diagnostic was published above."
+          exit 1

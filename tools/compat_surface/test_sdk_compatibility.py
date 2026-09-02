@@ -3,8 +3,10 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import sdk_compatibility
+import sdk_header_surface
 import tbd_surface
 
 
@@ -41,6 +43,25 @@ class SdkCompatibilityTests(unittest.TestCase):
         )
         (include / "unistd.h").write_text(
             f"int {c_name}(void);\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def write_single_header_shard(sdk: Path, destination: Path) -> None:
+        inputs = sdk_compatibility._collect_headers(sdk)
+        manifest = sdk_header_surface.build_parallel_manifest(
+            inputs,
+            jobs=1,
+            sdk_root=sdk,
+        )
+        manifest = sdk_header_surface.attach_shard_coverage(
+            manifest,
+            all_inputs=inputs,
+            shard_count=1,
+            shard_index=0,
+        )
+        destination.write_text(
+            json.dumps(manifest, indent=2) + "\n",
             encoding="utf-8",
         )
 
@@ -122,6 +143,69 @@ class SdkCompatibilityTests(unittest.TestCase):
                     path.read_text(encoding="utf-8"),
                     path.name,
                 )
+
+    def test_precomputed_header_shard_runs_same_complete_pipeline_without_rescan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sdk = root / "SyntheticPublic.sdk"
+            self.write_sdk(sdk)
+            shard = root / "header-shard-00.json"
+            self.write_single_header_shard(sdk, shard)
+            output = root / "bundle"
+
+            with mock.patch.object(
+                sdk_compatibility,
+                "_build_header_manifest",
+                side_effect=AssertionError("header scan must not run in merge stage"),
+            ):
+                code = sdk_compatibility.main(
+                    [
+                        "--sdk-root",
+                        str(sdk),
+                        "--output-dir",
+                        str(output),
+                        "--semantic-providers",
+                        str(SEMANTIC_PROVIDERS),
+                        "--header-manifest",
+                        str(shard),
+                        "--compiler-batch-size",
+                        "1",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            headers = json.loads((output / "header-signatures.json").read_text())
+            self.assertEqual(headers["summary"]["header_count"], 1)
+            self.assertEqual(headers["signatures"][0]["symbol"], "_getpid")
+            self.assertNotIn("coverage", headers)
+
+    def test_precomputed_header_shard_with_incomplete_coverage_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sdk = root / "SyntheticPublic.sdk"
+            self.write_sdk(sdk)
+            shard = root / "header-shard-00.json"
+            self.write_single_header_shard(sdk, shard)
+            manifest = json.loads(shard.read_text(encoding="utf-8"))
+            manifest["coverage"]["headers"] = []
+            shard.write_text(json.dumps(manifest), encoding="utf-8")
+            output = root / "bundle"
+
+            code = sdk_compatibility.main(
+                [
+                    "--sdk-root",
+                    str(sdk),
+                    "--output-dir",
+                    str(output),
+                    "--semantic-providers",
+                    str(SEMANTIC_PROVIDERS),
+                    "--header-manifest",
+                    str(shard),
+                    "--compiler-batch-size",
+                    "1",
+                ]
+            )
+            self.assertEqual(code, 1)
+            self.assertFalse(output.exists())
 
     def test_missing_approved_sdk_adapter_aborts_without_output_bundle(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -29,12 +29,40 @@ import compat_planner
 import compiler_batching
 import generate_semantic_routes
 import runtime_adapter_table
+import sdk_abi_recovery
 import sdk_catalog
 import win64_abi_surface
 
 
 class BulkCompatibilityError(ValueError):
     """Raised when the SDK-wide pipeline cannot be completed safely."""
+
+
+_GUEST_ABI_OPTIMIZATION_FLAGS = {
+    "-O0",
+    "-O1",
+    "-O2",
+    "-O3",
+    "-Os",
+    "-Oz",
+    "-Og",
+    "-Ofast",
+}
+
+
+def _guest_abi_clang_args(clang_args: Sequence[str]) -> tuple[str, ...]:
+    """Use a declaration-canonicalizing Clang pass unless the caller chose one."""
+    args = tuple(clang_args)
+    if any(argument in _GUEST_ABI_OPTIMIZATION_FLAGS for argument in args):
+        return args
+
+    # At -O0 Clang intentionally retains externally linked header-inline bodies as
+    # ``available_externally`` LLVM definitions when their address is observed.
+    # The SDK ABI probe needs the externally callable function type, not the body.
+    # A minimal optimization pass canonicalizes those bodies back to declarations
+    # without changing the target ABI lowering. Caller-supplied optimization flags
+    # remain authoritative when present.
+    return ("-O1", *args)
 
 
 def _write_json(path: Path, value: dict) -> None:
@@ -93,12 +121,12 @@ def run_pipeline(
     """Run all mechanical stages over the SDK and return their in-memory outputs."""
     catalog = sdk_catalog.build_sdk_catalog(tapi_manifest, header_manifest)
     inventory = sdk_catalog.build_abi_inventory(catalog)
-    guest_abi = compiler_batching.build_aapcs64_manifest(
+    guest_abi = sdk_abi_recovery.build_aapcs64_manifest(
         inventory,
         header_root=header_root,
         clang=clang,
         sdk_root=sdk_root,
-        extra_args=clang_args,
+        extra_args=_guest_abi_clang_args(clang_args),
         timeout_seconds=timeout_seconds,
         batch_size=compiler_batch_size,
     )

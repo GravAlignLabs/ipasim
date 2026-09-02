@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "local_pipeline_version": 1,
+  "purpose": "Checked-in parity marker for the local mirror of .github/workflows/theos-sdk-preflight.yml",
+  "synced_date": "2026-09-01",
+  "source_pr": 58,
+  "source_branch": "compat-theos-sdk-full-preflight",
+  "source_head_sha": "ca4a2e71b997b55d0176acb21ebdda55fd928fbd",
+  "ci_workflow_path": ".github/workflows/theos-sdk-preflight.yml",
+  "ci_workflow_blob_sha": "813832e81e5223b68fffd95d8eb4b887448853a1",
+  "theos_preflight": {
+    "run_number": 37,
+    "run_id": 33534466454,
+    "head_sha": "ca4a2e71b997b55d0176acb21ebdda55fd928fbd",
+    "status_at_sync": "completed",
+    "conclusion_at_sync": "failure",
+    "last_completed_stage": "32/32 exhaustive header shards merged; 5118 headers and 13795 typed symbols verified",
+    "first_downstream_blocker": "AAPCS64 batch 1 AppleArchive umbrella include context"
+  },
+  "github_header_cache_seed": {
+    "schema_version": 1,
+    "source_run_number": 37,
+    "source_run_id": 33534466454,
+    "source_head_sha": "ca4a2e71b997b55d0176acb21ebdda55fd928fbd",
+    "policy": "exact-key-only; no restore-prefix fallback; seed accepted only when analyzer blobs plus Clang and Python identities exactly match run 37",
+    "sdk_header_count": 5118,
+    "shard_count": 32
+  },
+  "compatibility_surface_analyzer": {
+    "run_number": 85,
+    "run_id": 33534466472,
+    "head_sha": "ca4a2e71b997b55d0176acb21ebdda55fd928fbd",
+    "status_at_sync": "completed",
+    "conclusion_at_sync": "success"
+  },
+  "theos_sdk": {
+    "repository": "theos/sdks",
+    "commit": "0222fd5413cf4b9af096f37b4621afa2688572f7",
+    "sdk": "iPhoneOS16.5.sdk"
+  },
+  "ci_parameters_mirrored": {
+    "header_shard_count": 32,
+    "header_jobs_per_shard": 2,
+    "header_progress_every": 10,
+    "clang_timeout_seconds": 120,
+    "header_shard_wall_timeout_minutes": 15,
+    "full_preflight_wall_timeout_minutes": 35,
+    "compiler_batch_size": 256
+  },
+  "catch_up_rule": "If the workflow blob SHA no longer matches, review CI changes before trusting parity and update this file when the local runner is synchronized."
+}

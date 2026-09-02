@@ -113,6 +113,24 @@ def _type_descriptor(node: dict) -> dict:
             if children
             else {"kind": "unknown", "spelling": spelling}
         )
+        # Objective-C nullability is API-contract metadata, not an AAPCS64
+        # calling-layout distinction. Older SDK compatibility headers can
+        # redeclare the same exported symbol without the newer nullability
+        # annotations. Keep those source spellings in the manifest evidence,
+        # but normalize the mechanical type tree so the declarations agree.
+        nullability_tokens = (
+            "_Nullable",
+            "_Nonnull",
+            "_Null_unspecified",
+            "__nullable",
+            "__nonnull",
+            "__null_unspecified",
+        )
+        if (
+            base.get("kind") in {"pointer", "block-pointer", "objc-pointer", "reference"}
+            and any(token in spelling for token in nullability_tokens)
+        ):
+            return base
         return {"kind": "attributed", "spelling": spelling, "base": base}
     if kind in ("AdjustedType", "DecayedType"):
         base = (
