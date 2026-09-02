@@ -7,6 +7,11 @@ surface rather than waiting for a Mach-O runtime failure:
 TAPI + Clang -> typed SDK catalog -> AAPCS64 -> Win64 carrier ABI -> libffi plan
 -> runtime adapters -> compatibility plan -> approved semantic route table.
 
+When an explicit PE host-export surface is supplied, the pipeline also produces
+a semantic migration plan that joins existing callable host exports to generated
+runtime adapters. Those matches are candidates only; semantic approval remains a
+separate, explicit, fail-closed input.
+
 The two compiler-backed ABI stages use deterministic bounded batching by default
 so SDK-wide runs do not require one monolithic Clang probe. A Mach-O import
 manifest is intentionally not an input. Semantic approval remains explicit and
@@ -28,9 +33,11 @@ import bridge_plan
 import compat_planner
 import compiler_batching
 import generate_semantic_routes
+import host_export_surface
 import runtime_adapter_table
 import sdk_abi_recovery
 import sdk_catalog
+import semantic_migration
 import win64_abi_surface
 
 
@@ -117,6 +124,7 @@ def run_pipeline(
     clang_args: Sequence[str] = (),
     timeout_seconds: int = 120,
     compiler_batch_size: int = compiler_batching.DEFAULT_COMPILER_BATCH_SIZE,
+    host_export_manifest: dict | None = None,
 ) -> dict:
     """Run all mechanical stages over the SDK and return their in-memory outputs."""
     catalog = sdk_catalog.build_sdk_catalog(tapi_manifest, header_manifest)
@@ -146,6 +154,15 @@ def run_pipeline(
         semantic_manifest,
         abi_manifest=guest_abi,
     )
+    migration = (
+        semantic_migration.build_migration_plan(
+            host_export_manifest,
+            adapters,
+            semantic_manifest,
+        )
+        if host_export_manifest is not None
+        else None
+    )
     routes_cpp = generate_semantic_routes.render_cpp(semantic_manifest)
     adapters_cpp = runtime_adapter_table.render_cpp_table(
         adapters,
@@ -159,6 +176,7 @@ def run_pipeline(
         "bridge_plan": ffi_plan,
         "runtime_adapters": adapters,
         "compatibility_plan": plan,
+        "semantic_migration": migration,
         "routes_cpp": routes_cpp,
         "adapters_cpp": adapters_cpp,
     }
@@ -175,6 +193,8 @@ def write_outputs(output_dir: Path, outputs: dict) -> None:
         "runtime_adapters": "runtime-adapters.json",
         "compatibility_plan": "compatibility-plan.json",
     }
+    if outputs.get("semantic_migration") is not None:
+        json_outputs["semantic_migration"] = "semantic-migration-plan.json"
     for key, filename in json_outputs.items():
         _write_json(output_dir / filename, outputs[key])
     (output_dir / "GeneratedSdkAdapters.inc").write_text(
@@ -195,6 +215,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--semantic-providers",
         required=True,
         help="explicit semantic-provider inventory JSON",
+    )
+    parser.add_argument(
+        "--host-export-def",
+        help=(
+            "optional explicit PE .def host-export surface; matches become "
+            "migration candidates only and never semantic approval"
+        ),
     )
     parser.add_argument(
         "--header-root",
@@ -250,10 +277,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             clang_args=args.clang_arg,
             timeout_seconds=args.timeout,
             compiler_batch_size=args.compiler_batch_size,
+            host_export_manifest=(
+                host_export_surface.parse_def_file(Path(args.host_export_def))
+                if args.host_export_def
+                else None
+            ),
         )
         write_outputs(Path(args.output_dir), outputs)
         summary = outputs["compatibility_plan"]["summary"]
         route_counts = summary.get("route_status_counts") or {}
+        migration = outputs.get("semantic_migration")
+        migration_suffix = (
+            " migration-candidates="
+            f"{migration['summary']['migration_candidate_count']}"
+            if migration is not None
+            else ""
+        )
         print(
             "[bulk-compatibility] "
             f"SDK symbols={summary['symbol_count']} "
@@ -261,6 +300,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"compiler-batch-size={args.compiler_batch_size} "
             "route-ready="
             f"{route_counts.get('approved-mechanical-route-ready', 0)}"
+            f"{migration_suffix}"
         )
         return 0
     except (
@@ -273,6 +313,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         runtime_adapter_table.RuntimeAdapterTableError,
         compat_planner.CompatibilityPlannerError,
         generate_semantic_routes.SemanticRouteError,
+        host_export_surface.HostExportSurfaceError,
+        semantic_migration.SemanticMigrationError,
         OSError,
     ) as exc:
         print(f"[bulk-compatibility] ERROR: {exc}", file=sys.stderr)
