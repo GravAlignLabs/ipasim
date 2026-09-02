@@ -39,13 +39,30 @@ target_sources (GeneratedSemanticImportRouterSmoke PRIVATE
 target_link_libraries (GeneratedSemanticImportRouterSmoke PRIVATE
     IpaSimGeneratedBridgeAdapter)
 
+add_executable (GeneratedPositionalIoRouterSmoke
+    "${CMAKE_CURRENT_LIST_DIR}/GeneratedSemanticProvider.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/GeneratedSemanticImportRouter.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/GeneratedPositionalIoRouterSmoke.cpp")
+target_compile_options (GeneratedPositionalIoRouterSmoke PRIVATE -std=c++17)
+target_sources (GeneratedPositionalIoRouterSmoke PRIVATE
+    $<TARGET_OBJECTS:ffi-win64-machdep>)
+target_link_libraries (GeneratedPositionalIoRouterSmoke PRIVATE
+    IpaSimGeneratedBridgeAdapter)
+
 add_custom_target (GeneratedSemanticImportRouterCheck
     COMMAND "$<TARGET_FILE:GeneratedSemanticImportRouterSmoke>"
             "$<TARGET_FILE:IpaSimDarwinHost>"
-    DEPENDS GeneratedSemanticImportRouterSmoke IpaSimDarwinHost
+    COMMAND "$<TARGET_FILE:GeneratedPositionalIoRouterSmoke>"
+            "$<TARGET_FILE:IpaSimDarwinHost>"
+    DEPENDS
+        GeneratedSemanticImportRouterSmoke
+        GeneratedPositionalIoRouterSmoke
+        IpaSimDarwinHost
     USES_TERMINAL)
 
 # A real selection/provider/execution failure is part of the core acceptance
 # boundary. Let it print its diagnostic and fail the normal build; CI captures
-# that output in the existing single self-updating PR diagnostic comment.
+# that output in the existing single self-updating PR diagnostic comment. The
+# two route smokes run in order inside one target so a failure in the established
+# route proof prevents the new positional proof from continuing unnecessarily.
 add_dependencies (IpaSimLibrary GeneratedSemanticImportRouterCheck)

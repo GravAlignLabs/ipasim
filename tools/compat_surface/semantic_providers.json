@@ -71,6 +71,36 @@
       "semantic_owner": "DarwinHostBridge.lseek",
       "live_profile": "GeneratedAdapterState",
       "evidence": "Darwin lseek uses the host bridge's 64-bit _lseeki64 implementation over the same tracked guest file-descriptor namespace, preserving signed 64-bit off_t width, SEEK_SET/SEEK_CUR/SEEK_END behavior, and CRT errno rather than truncating through Windows long."
+    },
+    {
+      "guest_symbol": "_pread",
+      "status": "approved",
+      "host_export": "pread",
+      "provider_module": "ipasimdarwinhost.dll",
+      "adapter_symbol": "_pread",
+      "semantic_owner": "DarwinKernelBridge.pread",
+      "live_profile": "GeneratedAdapterState",
+      "evidence": "Darwin pread accepts only tracked regular-file descriptors, rejects socket descriptors with ESPIPE, validates the complete writable guest buffer span before host I/O, reopens an independent Windows file object, and uses a signed 64-bit position so the explicit read offset cannot change the caller descriptor's current file position."
+    },
+    {
+      "guest_symbol": "_pwrite",
+      "status": "approved",
+      "host_export": "pwrite",
+      "provider_module": "ipasimdarwinhost.dll",
+      "adapter_symbol": "_pwrite",
+      "semantic_owner": "DarwinKernelBridge.pwrite",
+      "live_profile": "GeneratedAdapterState",
+      "evidence": "Darwin pwrite accepts only tracked regular-file descriptors, rejects socket descriptors with ESPIPE, validates the complete readable guest buffer span before host I/O, reopens an independent Windows file object, and uses a signed 64-bit position so the explicit write offset cannot change the caller descriptor's current file position."
+    },
+    {
+      "guest_symbol": "_write",
+      "status": "approved",
+      "host_export": "write",
+      "provider_module": "ipasimdarwinhost.dll",
+      "adapter_symbol": "_write",
+      "semantic_owner": "DarwinKernelBridge.write",
+      "live_profile": "GeneratedAdapterState",
+      "evidence": "Darwin write uses the coherent guest descriptor namespace, dispatches socket descriptors through the Winsock-backed send path, writes tracked regular-file descriptors through UCRT, preserves zero-length behavior, and validates the complete readable guest buffer span before any host API dereferences it."
     }
   ]
 }

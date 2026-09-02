@@ -28,7 +28,16 @@ SCALAR_DESCRIPTOR = {
     "_close": ("close", "DarwinHostBridge.close"),
     "_lseek": ("lseek", "DarwinHostBridge.lseek"),
 }
-APPROVED_PRODUCTION = {**PROCESS_IDENTITY, **SCALAR_DESCRIPTOR}
+POINTER_DESCRIPTOR = {
+    "_pread": ("pread", "DarwinKernelBridge.pread"),
+    "_pwrite": ("pwrite", "DarwinKernelBridge.pwrite"),
+    "_write": ("write", "DarwinKernelBridge.write"),
+}
+APPROVED_PRODUCTION = {
+    **PROCESS_IDENTITY,
+    **SCALAR_DESCRIPTOR,
+    **POINTER_DESCRIPTOR,
+}
 
 
 class SemanticProviderFixtureTests(unittest.TestCase):
@@ -118,7 +127,45 @@ class SemanticProviderFixtureTests(unittest.TestCase):
         )
         self.assertRegex(source, close_pattern)
         self.assertRegex(source, lseek_pattern)
-        self.assertNotIn("ValueTypeKind::Pointer", source)
+
+    def test_pointer_descriptor_adapters_match_full_sdk_abi(self):
+        source = PRODUCTION_ADAPTERS.read_text(encoding="utf-8")
+        write_pattern = re.compile(
+            r'AdapterRecord\{\s*"_write"\s*,\s*true\s*,\s*\{\s*'
+            r'ArgumentSpec\{\s*0\s*,\s*0\s*,\s*true\s*,\s*TypeSpec::builtin\(ValueTypeKind::UInt32\).*?'
+            r'CaptureSpec::fromRegisters\(GuestBank::Gpr, \{0\}, 4\).*?'
+            r'ArgumentSpec\{\s*1\s*,\s*1\s*,\s*true\s*,\s*TypeSpec::builtin\(ValueTypeKind::Pointer\).*?'
+            r'CaptureSpec::fromRegisters\(GuestBank::Gpr, \{1\}, 8\).*?'
+            r'ArgumentSpec\{\s*2\s*,\s*2\s*,\s*true\s*,\s*TypeSpec::builtin\(ValueTypeKind::UInt64\).*?'
+            r'CaptureSpec::fromRegisters\(GuestBank::Gpr, \{2\}, 8\).*?'
+            r'ResultSpec\{\s*TypeSpec::builtin\(ValueTypeKind::UInt64\)\s*,\s*'
+            r'CommitSpec::toRegisters\(GuestBank::Gpr, \{0\}, 8\)\}\}',
+            re.DOTALL,
+        )
+        self.assertRegex(source, write_pattern)
+
+        for guest in ("_pread", "_pwrite"):
+            positional_pattern = re.compile(
+                r'AdapterRecord\{\s*"' + re.escape(guest) + r'"\s*,\s*true\s*,\s*\{\s*'
+                r'ArgumentSpec\{\s*0\s*,\s*0\s*,\s*true\s*,\s*TypeSpec::builtin\(ValueTypeKind::UInt32\).*?'
+                r'CaptureSpec::fromRegisters\(GuestBank::Gpr, \{0\}, 4\).*?'
+                r'ArgumentSpec\{\s*1\s*,\s*1\s*,\s*true\s*,\s*TypeSpec::builtin\(ValueTypeKind::Pointer\).*?'
+                r'CaptureSpec::fromRegisters\(GuestBank::Gpr, \{1\}, 8\).*?'
+                r'ArgumentSpec\{\s*2\s*,\s*2\s*,\s*true\s*,\s*TypeSpec::builtin\(ValueTypeKind::UInt64\).*?'
+                r'CaptureSpec::fromRegisters\(GuestBank::Gpr, \{2\}, 8\).*?'
+                r'ArgumentSpec\{\s*3\s*,\s*3\s*,\s*true\s*,\s*TypeSpec::builtin\(ValueTypeKind::UInt64\).*?'
+                r'CaptureSpec::fromRegisters\(GuestBank::Gpr, \{3\}, 8\).*?'
+                r'ResultSpec\{\s*TypeSpec::builtin\(ValueTypeKind::UInt64\)\s*,\s*'
+                r'CommitSpec::toRegisters\(GuestBank::Gpr, \{0\}, 8\)\}\}',
+                re.DOTALL,
+            )
+            self.assertRegex(source, positional_pattern)
+
+        self.assertNotIn(
+            'AdapterRecord{\n            "_read",',
+            source,
+            "read must remain unapproved until socket receive semantics are complete",
+        )
 
     def test_approved_route_table_is_explicit_and_backed_by_generated_abi(self):
         generated_symbols = set(self._production_adapter_symbols())

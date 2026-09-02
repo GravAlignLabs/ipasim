@@ -17,8 +17,11 @@ scope:
   - src/IpaSimulator/GeneratedSemanticProviderAdapters.inc
   - src/IpaSimulator/ApprovedSemanticImportRoutes.inc
   - src/IpaSimulator/GeneratedSemanticImportRouterSmoke.cpp
+  - src/IpaSimulator/GeneratedPositionalIoRouterSmoke.cpp
+  - src/IpaSimulator/GeneratedSemanticImportRouter.cmake
   - tools/compat_surface/semantic_providers.json
   - tools/compat_surface/test_semantic_provider_fixture.py
+  - .github/workflows/threaded-guest-context.yml
   - .github/agent-work/pointer-io-generated-routing.yml
 
 branch: compat-pointer-io-generated-routing
@@ -27,12 +30,14 @@ base_sha: 2376b8c43f01f8e3e98ea98713783eb53229f893
 expected_pr: draft
 
 next_checkpoint: >-
-  Prove real buffer transfer through generated pointer-bearing adapters with
-  host-safe span validation and positional-I/O offset preservation. Approve only
-  provider semantics that are complete enough for production; leave any broader
-  descriptor-semantic gap explicitly unapproved instead of forcing the roadmap.
+  Migrate pread and pwrite together onto exact SDK-generated adapter records and
+  prove generated pointer gating, full-span provider validation, real positional
+  transfer, 64-bit offset preservation, and unchanged caller descriptor position.
+  Keep read explicitly unapproved until its socket receive semantics are complete.
 
 notes: >-
   Keep variadic open/fcntl, filesystem metadata, Mach, broader socket work,
   pthread/workqueue, callbacks, and guest-thread lifecycle out of this increment.
-  SDK/compiler ABI evidence does not grant semantic approval by itself.
+  SDK/compiler ABI evidence does not grant semantic approval by itself. The
+  Threaded CI workflow may reuse the exact-head Windows Core tester so a failed
+  Core SHA does not consume a second Windows compile for the same source.

@@ -15,6 +15,7 @@ namespace {
 
 using ipasim::bridge::AdapterExecutionRequirements;
 using ipasim::bridge::GeneratedSemanticImportSelection;
+using ipasim::bridge::PointerUse;
 using ipasim::bridge::SyntheticGuestState;
 using ipasim::bridge::executeSelectedGeneratedSemanticImport;
 using ipasim::bridge::getSelectedGeneratedSemanticImportRequirements;
@@ -356,6 +357,184 @@ bool proveGeneratedScalarDescriptorRoutes(HMODULE bridge) {
     return true;
 }
 
+bool proveGeneratedWriteRoute(HMODULE bridge) {
+    std::puts("[generated-semantic-import-router-smoke] pointer write route begin");
+
+    FARPROC openProc = GetProcAddress(bridge, "open");
+    FARPROC closeProc = GetProcAddress(bridge, "close");
+    FARPROC lseekProc = GetProcAddress(bridge, "lseek");
+    FARPROC readProc = GetProcAddress(bridge, "read");
+    FARPROC writeProc = GetProcAddress(bridge, "write");
+    if (!openProc || !closeProc || !lseekProc || !readProc || !writeProc) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] pointer write fixture exports are incomplete\n");
+        return false;
+    }
+
+    using OpenFunction = int (*)(const char*, int, std::uint16_t);
+    using CloseFunction = int (*)(int);
+    using LseekFunction = std::int64_t (*)(int, std::int64_t, int);
+    using ReadFunction = std::intptr_t (*)(int, void*, std::size_t);
+    auto open = reinterpret_cast<OpenFunction>(openProc);
+    auto directClose = reinterpret_cast<CloseFunction>(closeProc);
+    auto directLseek = reinterpret_cast<LseekFunction>(lseekProc);
+    auto directRead = reinterpret_cast<ReadFunction>(readProc);
+
+    constexpr int DarwinOpenReadWrite = 0x00000002;
+    constexpr int DarwinOpenCreate = 0x00000200;
+    constexpr int DarwinOpenTruncate = 0x00000400;
+    const int fd = open(
+        "/generated-semantic-route-write",
+        DarwinOpenReadWrite | DarwinOpenCreate | DarwinOpenTruncate,
+        0600);
+    if (fd < 0) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] could not create pointer write fixture\n");
+        return false;
+    }
+
+    const auto cleanup = [&]() { directClose(fd); };
+    const std::uint64_t writeAddress = addressOf(writeProc);
+    std::string error;
+    const auto selection = selectGeneratedSemanticImport(
+        "write", bridge, writeAddress, &error);
+    if (selection != GeneratedSemanticImportSelection::Selected || !error.empty()) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated write route was not selected: %s\n",
+            error.c_str());
+        cleanup();
+        return false;
+    }
+
+    AdapterExecutionRequirements requirements;
+    if (!getSelectedGeneratedSemanticImportRequirements(
+            writeAddress, requirements, &error)) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated write requirements failed: %s\n",
+            error.c_str());
+        cleanup();
+        return false;
+    }
+    if (requirements.guestStackBytes != 0 || requirements.usesSimd ||
+        !requirements.requiresPointerValidation) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated write did not require pointer validation\n");
+        cleanup();
+        return false;
+    }
+
+    constexpr char Payload[] = "generated-pointer-write";
+    constexpr std::size_t PayloadSize = sizeof(Payload) - 1;
+    const std::uint64_t payloadAddress = static_cast<std::uint64_t>(
+        reinterpret_cast<std::uintptr_t>(Payload));
+
+    const auto makeGuest = [&]() {
+        SyntheticGuestState guest;
+        guest.x[0] = static_cast<std::uint32_t>(fd);
+        guest.x[1] = payloadAddress;
+        guest.x[2] = PayloadSize;
+        return guest;
+    };
+
+    SyntheticGuestState missingValidator = makeGuest();
+    error.clear();
+    if (executeSelectedGeneratedSemanticImport(
+            writeAddress, missingValidator, {}, &error) ||
+        error.find("pointer validation is required before host execution") ==
+            std::string::npos) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated write did not fail closed without pointer validation: %s\n",
+            error.c_str());
+        cleanup();
+        return false;
+    }
+    if (directLseek(fd, 0, SEEK_CUR) != 0) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] missing pointer validator reached the write provider\n");
+        cleanup();
+        return false;
+    }
+
+    SyntheticGuestState rejectedValidator = makeGuest();
+    error.clear();
+    if (executeSelectedGeneratedSemanticImport(
+            writeAddress,
+            rejectedValidator,
+            [](std::uint64_t, PointerUse) { return false; },
+            &error) ||
+        error.find("pointer validator rejected") == std::string::npos) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated write did not honor a rejecting pointer validator: %s\n",
+            error.c_str());
+        cleanup();
+        return false;
+    }
+    if (directLseek(fd, 0, SEEK_CUR) != 0) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] rejected pointer validation still reached the write provider\n");
+        cleanup();
+        return false;
+    }
+
+    bool validatedPointer = false;
+    SyntheticGuestState writeGuest = makeGuest();
+    error.clear();
+    if (!executeSelectedGeneratedSemanticImport(
+            writeAddress,
+            writeGuest,
+            [&](std::uint64_t address, PointerUse use) {
+                validatedPointer = address == payloadAddress &&
+                    use == PointerUse::Argument;
+                return validatedPointer;
+            },
+            &error)) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated write execution failed: %s\n",
+            error.c_str());
+        cleanup();
+        return false;
+    }
+    if (!validatedPointer || writeGuest.x[0] != PayloadSize) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated write pointer/result commit was incorrect\n");
+        cleanup();
+        return false;
+    }
+
+    if (directLseek(fd, 0, SEEK_SET) != 0) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] could not rewind generated write fixture\n");
+        cleanup();
+        return false;
+    }
+    char readback[PayloadSize] = {};
+    if (directRead(fd, readback, PayloadSize) !=
+            static_cast<std::intptr_t>(PayloadSize) ||
+        std::string(readback, PayloadSize) != std::string(Payload, PayloadSize)) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated write did not transfer real file data\n");
+        cleanup();
+        return false;
+    }
+
+    cleanup();
+    std::puts("[generated-semantic-import-router-smoke] pointer write route passed");
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -394,7 +573,8 @@ int main(int argc, char** argv) {
         proveSameSpellingOtherModuleStaysOnExistingPath() &&
         proveApprovedProviderMismatchFailsClosed(bridge) &&
         proveGeneratedProcessIdentityRoutes(bridge) &&
-        proveGeneratedScalarDescriptorRoutes(bridge);
+        proveGeneratedScalarDescriptorRoutes(bridge) &&
+        proveGeneratedWriteRoute(bridge);
 
     FreeLibrary(bridge);
     if (!passed) {
