@@ -1,0 +1,32 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Replace the one-profile generated semantic import execution path with a generic live ARM64 guest-state adapter path so approved SDK-generated adapters can consume and commit real AAPCS64 register, SIMD, and guest-stack state through SysTranslator without reintroducing handwritten per-symbol ABI signatures.
+
+scope:
+  - src/IpaSimulator/GeneratedSemanticImportRouter.cpp
+  - src/IpaSimulator/GeneratedSemanticImportRouter.hpp
+  - src/IpaSimulator/GeneratedBridgeAdapter.cpp
+  - src/IpaSimulator/GeneratedBridgeAdapter.hpp
+  - src/IpaSimulator/SysTranslator.cpp
+  - src/IpaSimulator/GeneratedSemanticImportSmoke.cpp
+  - include/ipasim/Emulator.hpp
+  - src/IpaSimulator/Emulator.cpp
+  - tools/compat_surface/generate_semantic_routes.py
+  - tools/compat_surface/semantic_providers.json
+  - tools/compat_surface/test_generate_semantic_routes.py
+  - .github/agent-work/generated-live-adapter-routing.yml
+
+branch: compat-generated-live-adapter-routing
+started_utc: 2026-09-02T01:55:00Z
+updated_utc: 2026-09-02T01:55:00Z
+base_sha: 4653d1094616beb4af7cd9ffac41316baa403a4a
+expected_pr: draft
+
+next_checkpoint: >-
+  Make loader-selected approved routes execute from the generated AdapterRecord itself: expose the exact live guest state requirements, capture X0-X8/SIMD/stack from Unicorn in SysTranslator, execute through the generated libffi adapter, and commit generated results back to the live ARM64 state while preserving explicit semantic approval and fail-closed pointer/unsupported cases.
+
+notes: >-
+  This intentionally touches only the generated-semantic-import section of SysTranslator. The older compat-darwin-pthread-core branch is 314 commits behind master and its current four-commit diff does not modify SysTranslator; do not alter pthread lifecycle/callback/thread-context logic in this increment. If that branch is revived, rebase it onto current master and resolve any overlap explicitly rather than weakening either path.
