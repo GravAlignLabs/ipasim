@@ -86,5 +86,34 @@ static std::vector<ipasim::bridge::AdapterRecord> makeGeneratedSemanticProviderA
             ResultSpec{
                 TypeSpec::builtin(ValueTypeKind::UInt64),
                 CommitSpec::toRegisters(GuestBank::Gpr, {0}, 8)}},
+        AdapterRecord{
+            "_write",
+            true,
+            {
+                ArgumentSpec{
+                    0,
+                    0,
+                    true,
+                    TypeSpec::builtin(ValueTypeKind::UInt32),
+                    CaptureSpec::fromRegisters(GuestBank::Gpr, {0}, 4),
+                    false},
+                ArgumentSpec{
+                    1,
+                    1,
+                    true,
+                    TypeSpec::builtin(ValueTypeKind::Pointer),
+                    CaptureSpec::fromRegisters(GuestBank::Gpr, {1}, 8),
+                    false},
+                ArgumentSpec{
+                    2,
+                    2,
+                    true,
+                    TypeSpec::builtin(ValueTypeKind::UInt64),
+                    CaptureSpec::fromRegisters(GuestBank::Gpr, {2}, 8),
+                    false},
+            },
+            ResultSpec{
+                TypeSpec::builtin(ValueTypeKind::UInt64),
+                CommitSpec::toRegisters(GuestBank::Gpr, {0}, 8)}},
     };
 }

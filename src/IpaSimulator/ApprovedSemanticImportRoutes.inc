@@ -62,4 +62,12 @@ static constexpr ApprovedSemanticImportRoute ApprovedSemanticImportRoutes[] = {
         "DarwinHostBridge.lseek",
         LiveGuestProfile::GeneratedAdapterState,
     },
+    {
+        "_write",
+        "write",
+        L"ipasimdarwinhost.dll",
+        "_write",
+        "DarwinKernelBridge.write",
+        LiveGuestProfile::GeneratedAdapterState,
+    },
 };
