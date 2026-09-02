@@ -59,9 +59,20 @@ The SDK/compiler side may tell ipaSim **how** a function is represented and call
 
 If you are picking this project up in a new AI chat or as a new contributor, start here and then read [`AGENTS.md`](AGENTS.md) plus the active coordination claims under [`.github/agent-work/`](.github/agent-work/).
 
-**Latest merged compatibility-engine checkpoint: [PR #61 — Migrate process identity calls to generated routing](https://github.com/GravAlignLabs/ipasim/pull/61).**
+**Latest merged compatibility checkpoint: [PR #65 — Implement XNU guarded file descriptors](https://github.com/GravAlignLabs/ipasim/pull/65).** PR #65 closed the next recorded real-IPA loader boundary after generated `_read`: it implements `guarded_open_np` / `guarded_close_np` guard identity and close-policy behavior rather than aliasing those APIs to ordinary `open` / `close`. Its implementation head passed Windows ARM64 Core #304, Synthetic iOS IPA #116, and Threaded ARM64 Guest Context #49 before merge.
 
-PR #58 proved the complete pinned iPhoneOS16.5 SDK mechanical preflight. PR #59 turned existing host exports plus generated adapters into a deterministic semantic-migration planning surface without granting approval automatically. PR #60 removed the `_getpid`-specific execution profile by making `SysTranslator` capture and commit the live ARM64 state required by each generated `AdapterRecord`. PR #61 then proved the first multi-symbol production migration: `_getpid`, `_getuid`, `_geteuid`, `_getgid`, and `_getegid` now execute through the same generated route and the four credential calls were removed from `SysTranslator`'s handwritten Darwin ABI table.
+The generated-routing progression since the full SDK preflight is now:
+
+- PR #58 — complete pinned iPhoneOS16.5 SDK mechanical preflight;
+- PR #59 — deterministic semantic-migration planning from real host exports plus generated adapters;
+- PR #60 — generic live ARM64 state capture/commit for generated `AdapterRecord` execution;
+- PR #61 — process identity migration: `_getpid`, `_getuid`, `_geteuid`, `_getgid`, `_getegid`;
+- PR #62 — scalar descriptor migration: `_close`, `_lseek`;
+- PR #63 — pointer/positional output-side migration: `_write`, `_pread`, `_pwrite`, with complete guest-span validation;
+- PR #64 — real socket receive semantics plus generated `_read` routing;
+- PR #65 — XNU guarded regular-file open/close semantics for the next real runtime boundary.
+
+That leaves **11 explicitly approved generated production routes** after PR #64. `_read` was deliberately held back in PR #63 until its socket receive semantics were real; PR #64 closed that semantic gap before approval. PR #65 is intentionally different: its public SDK records are untyped, so its callable ABI is backed by authoritative XNU/libdispatch evidence and remains outside the generator-owned adapter table. APIs whose SDK records are untyped, variadic, callback-dependent, data exports, or otherwise not mechanically safe remain outside generated routing until their ABI and runtime semantics are independently established.
 
 The generated production path is now:
 
@@ -72,7 +83,9 @@ real Mach-O import resolution
         -> exact provider module/export/address verification
         -> generated AdapterRecord requirements
         -> live AAPCS64 GPR/SIMD/stack capture as required
-        -> generated libffi execution
+        -> generated pointer gate when required
+        -> real semantic provider
+        -> provider-level complete-span / API-specific validation
         -> generated result/state commit
         -> ARM64 guest execution resumes
 ```
@@ -81,12 +94,20 @@ There is also parallel Darwin pthread work. Before changing pthread, `SysTransla
 
 ## Current ARM64 work
 
-The modern ARM64 foundation began with [PR #3](https://github.com/GravAlignLabs/ipasim/pull/3). The complete SDK-wide mechanical compatibility preflight is merged, the generic live generated-adapter executor is in production, and the first five process-identity imports have been migrated away from handwritten ABI routing.
+The modern ARM64 foundation began with [PR #3](https://github.com/GravAlignLabs/ipasim/pull/3). The complete SDK-wide mechanical compatibility preflight is merged, the generic live generated-adapter executor is in production, the process-identity and core descriptor I/O families have moved off handwritten ABI routing where authoritative generated ABI evidence exists, and current runtime work follows the first genuine non-cascading boundary exposed by public fixtures or real IPA validation.
 
 The project is working on two connected layers:
 
 1. real Windows-backed Darwin/runtime implementation required by modern iOS binaries; and
 2. an SDK/compiler-driven compatibility engine that generates the mechanical ABI bridge in bulk instead of hand-writing one symbol signature at a time.
+
+### Latest runtime checkpoint — September 2, 2026
+
+The recorded real-application evidence reached `_guarded_close_np` while loading `libdispatch.dylib`. Static audit evidence also showed `libdispatch` requires `_guarded_open_np`, so PR #65 treated guarded descriptors as one coherent semantic subsystem instead of adding a one-symbol compatibility alias.
+
+Apple XNU establishes that `guarded_close_np(int fd, const guardid_t *guard)` requires the descriptor to already carry the matching 64-bit guard identity before it may close. Apple libdispatch opens its dispatch-I/O descriptors with `GUARD_CLOSE | GUARD_DUP | GUARD_SOCKET_IPC | GUARD_FILEPORT` and closes them later with the same guard value. PR #65 therefore tracks guard identity per guest descriptor, preserves `O_CLOEXEC`, blocks ordinary `close` from bypassing `GUARD_CLOSE`, and fails unsupported guarded capabilities closed.
+
+The real Run for Office IPA remains a validation target rather than a source of app-specific patches. After each compatibility checkpoint merges, the preferred next step is to run the current merged tester against the real IPA and let the first genuine failure define the next semantic boundary.
 
 ### Successful full-SDK preflight checkpoint — September 1, 2026
 
@@ -94,9 +115,9 @@ PR #58 exercises the full compatibility pipeline against `theos/sdks@0222fd5413c
 
 The authoritative physical header inventory is **5,118 headers**. CI partitions it into **32 deterministic shards** and accepts a merged header surface only when every physical header is owned exactly once. There are no bad-header ignore lists and no partial-success semantics.
 
-At commit `fbe336d0b4060766dc498f8a7757097c07c79fc3`, **Compatibility Surface Analyzer run #103 passed** and the authoritative **Theos iPhoneOS16.5 SDK Preflight run #55 passed end to end**. Subsequent semantic-scaling changes through PR #61 continue to pass the authoritative full-SDK preflight.
+At commit `fbe336d0b4060766dc498f8a7757097c07c79fc3`, **Compatibility Surface Analyzer run #103 passed** and the authoritative **Theos iPhoneOS16.5 SDK Preflight run #55 passed end to end**. Later generated-routing migrations have continued to preserve the same fail-closed SDK/compiler boundary.
 
-The successful run produced the following mechanical coverage:
+The successful run produced the following mechanical coverage snapshot:
 
 - exhaustive physical headers analyzed: **5,118**
 - TAPI symbols: **1,355,229**
@@ -106,8 +127,9 @@ The successful run produced the following mechanical coverage:
 - AAPCS64 generated candidates: **12,599**
 - Win64 cross-ABI candidates: **12,515**
 - generated runtime adapters: **10,599**
-- explicitly approved generated production routes: **5**
-- catalog rows not yet semantically approved: **1,354,452**
+- explicitly approved generated production routes at run #55: **5**
+- explicitly approved generated production routes after PR #64: **11**
+- catalog rows not yet semantically approved at run #55: **1,354,452**
 
 The large difference between the SDK catalog size and the typed C candidate count is intentional. The catalog keeps callable C exports distinct from Objective-C metadata, TLS/data records, weak/mixed metadata, untyped globals, and other non-callable evidence instead of pretending every exported SDK record can become a function adapter.
 
@@ -127,7 +149,8 @@ pinned iPhoneOS16.5.sdk
         -> compatibility planner                 PASS
         -> semantic-route comparison             PASS / fail-closed approval boundary
         -> generic live generated execution      PASS
-        -> approved production routes            PASS: 5 process-identity imports
+        -> approved production routes            PASS: 11 after PR #64
+        -> real semantic/runtime boundaries      evidence-driven, fail-closed
 ```
 
 The successful workflow published the complete generated compatibility bundle as the `theos-iphoneos16.5-sdk-compatibility` artifact in run #55. The bundle contains the TAPI surface, header signatures, SDK catalog, AAPCS64 and Win64 manifests, bridge plan, runtime adapter table, compatibility plan, generated adapter include, and approved semantic route include.
@@ -287,6 +310,10 @@ Core rules:
 - [PR #59](https://github.com/GravAlignLabs/ipasim/pull/59) — deterministic semantic migration candidates derived from real host exports plus generated adapters without granting approval
 - [PR #60](https://github.com/GravAlignLabs/ipasim/pull/60) — generic live ARM64 generated-adapter execution in `SysTranslator`
 - [PR #61](https://github.com/GravAlignLabs/ipasim/pull/61) — first multi-symbol production migration: process identity calls moved off the handwritten Darwin ABI table
+- [PR #62](https://github.com/GravAlignLabs/ipasim/pull/62) — scalar descriptor calls `_close` and `_lseek` migrated to generated routing
+- [PR #63](https://github.com/GravAlignLabs/ipasim/pull/63) — `_write`, `_pread`, and `_pwrite` migrated with complete guest-span provider validation; `_read` deliberately deferred until socket receive semantics were real
+- [PR #64](https://github.com/GravAlignLabs/ipasim/pull/64) — Winsock-backed socket receive semantics and generated `_read` migration
+- [PR #65](https://github.com/GravAlignLabs/ipasim/pull/65) — XNU guarded-fd semantic checkpoint for `guarded_open_np` / `guarded_close_np`
 
 ## Compatibility subsystems implemented so far
 
@@ -304,81 +331,38 @@ Core rules:
 
 ### Darwin/runtime work
 
-Implemented coverage includes process identity and selected process information, Mach task/time/VM behavior, ulock synchronization, libplatform memory/string primitives, a guest-visible file-descriptor namespace, regular files/FIFOs, Darwin ARM64 `stat` translation, socket/WinSock translation for the implemented boundary, selected simulator host re-exports, pthread QoS/TSD/workloop/workqueue work, and independent guest worker execution.
+Implemented coverage includes process identity and selected process information, Mach task/time/VM behavior, ulock synchronization, libplatform memory/string primitives, a coherent guest-visible file-descriptor namespace, regular files/FIFOs, Darwin ARM64 `stat` translation, socket/WinSock send and receive translation for the implemented boundaries, generated scalar and pointer-bearing descriptor I/O, XNU guarded regular-file descriptor identity/close policy merged in PR #65, selected simulator host re-exports, pthread QoS/TSD/workloop/workqueue work, and independent guest worker execution.
 
 Unsupported behavior remains explicit rather than being fabricated as success.
 
 ## Generated semantic-routing completion roadmap
 
-The current scaling phase has a concrete completion criterion: **every callable `IpaSimDarwinHost.dll` boundary that the guest can reach should either use a generated SDK-backed adapter plus explicit semantic approval, or be explicitly classified as complex/unsupported. The handwritten `DarwinHostCallSignature` table should then disappear rather than surviving as a second ABI database.**
+The scaling criterion remains: **every callable `IpaSimDarwinHost.dll` boundary that the guest can reach should either use a generated SDK-backed adapter plus explicit semantic approval, or be explicitly classified as complex/unsupported. The handwritten `DarwinHostCallSignature` table should eventually disappear rather than surviving as a second ABI database.**
 
-Planned PR numbers below describe the intended order; the exact number can shift if an unrelated PR lands first. Each PR should remain short-lived, preserve full public CI, and move a coherent semantic family rather than one symbol at a time.
+The earlier fixed PR-number roadmap is obsolete because runtime evidence changed the safe ordering. PR #63 correctly stopped before `_read`; PR #64 first implemented real socket receive semantics and only then approved generated `_read`; the next real IPA boundary then moved into XNU guarded descriptors, whose public SDK entries are untyped and therefore cannot honestly be forced into the generated adapter table.
 
-### Planned PR #62 — scalar descriptor calls
+### Completed scaling checkpoints
 
-Migrate the simplest argument-bearing descriptor operations first, starting with `close` and `lseek` where the existing Windows-backed semantics and public smokes are already strong. This PR should prove that generated production routing handles nonzero GPR arguments and a 64-bit scalar result without any handwritten `ArgCount`/`Returns` record. Keep pointer-bearing and variadic calls out of this PR.
+- **Process identity:** `_getpid`, `_getuid`, `_geteuid`, `_getgid`, `_getegid` use generated routing.
+- **Scalar descriptor I/O:** `_close` and `_lseek` use generated routing.
+- **Pointer/positional descriptor I/O:** `_write`, `_pread`, `_pwrite`, and `_read` use generated routing with the required pointer gate and provider-level span validation.
+- **Socket-aware read:** Darwin socket descriptors receive through the Winsock-backed registry; regular files retain the tracked filesystem path.
+- **Guarded descriptors:** PR #65 implements the XNU guarded-open/guarded-close semantic boundary using authoritative XNU/libdispatch evidence. These functions remain handwritten ABI entries because the pinned public SDK catalog does not provide a generator-owned callable C ABI record for them.
 
-**Exit condition:** `close` and `lseek` are explicitly approved, executed through generated adapters, covered by production smoke tests, and removed from the handwritten table.
+### Next priorities
 
-### Planned PR #63 — buffer and positional I/O
+Do **not** assign the next PR from an old number list. After PR #65, run the current merged tester against the real IPA and use the first non-cascading failure as the next semantic target. In parallel, continue retiring the handwritten Darwin ABI table in coherent families when authoritative SDK/compiler ABI evidence and real semantic providers already exist.
 
-Migrate `read`, `write`, `pread`, and `pwrite`, including the applicable `$NOCANCEL` aliases only when their exact SDK/export identities are mechanically present. This is the first production batch that should exercise generated pointer-bearing arguments. Pointer validation, byte-count behavior, 64-bit offsets, EOF/error behavior, and unchanged file-position semantics for positional I/O must remain explicit.
+Likely remaining mechanical families include fixed-signature filesystem metadata/path calls, process/time/Mach calls, guest-stack-spilled Mach IPC, libplatform primitives, fixed-signature sockets/networking, and fixed-signature synchronization/pthread calls after overlapping pthread work lands. Variadic/no-prototype functions such as `open`/`fcntl`, callback-taking APIs, untyped SDK globals, and data exports require separate architecture rather than guessed generated records.
 
-**Exit condition:** the normal buffer-I/O path is generated and semantically approved with no per-symbol ABI restatement in `SysTranslator`.
+For every migration:
 
-### Planned PR #64 — filesystem metadata and paths
-
-Migrate the implemented fixed-layout filesystem/path family such as `fstat`, `stat`, `lstat`, `readlink`, `mkfifo`, and `mknod` where the SDK-generated adapters are ready and the existing Darwin translations are defensible. Preserve Darwin structure layout and path/error semantics; do not let host structure layout leak into guest memory.
-
-**Exit condition:** implemented filesystem metadata/path exports no longer depend on handwritten host-call signatures.
-
-### Planned PR #65 — process, time, and simple Mach boundaries
-
-Migrate already implemented fixed-signature process/time/Mach calls such as `proc_pidpath`, `pid_for_task`, `mach_continuous_time`, and `mach_timebase_info` when the generated SDK records and exact host providers agree. Data exports such as `mach_task_self_` and `vm_page_size` remain data and must never enter callable routing.
-
-**Exit condition:** the straightforward process/time boundaries are generated while callable-vs-data classification remains fail-closed.
-
-### Planned PR #66 — Mach IPC and guest-stack proof
-
-Use `mach_msg_overwrite` or the next equivalent proven Mach boundary to exercise a production generated adapter whose AAPCS64 arguments extend beyond `X0`-`X7`. This PR should prove exact guest-stack capture/commit from generated requirements rather than special-casing the ninth argument in `SysTranslator`.
-
-**Exit condition:** the old handwritten nine-argument Mach routing can be removed and stack-spilled arguments are proven by executable regression tests.
-
-### Planned PR #67 — libplatform bulk primitives
-
-Migrate the implemented `_platform_*` memory/string family as a high-volume coherent batch. These are valuable because many already have direct host semantics but currently consume handwritten call signatures. Validate pointer direction, lengths, void/scalar returns, and aliases through the generated records rather than by symbol-name assumptions.
-
-**Exit condition:** the implemented libplatform primitive family is generated, approved, and absent from the handwritten ABI table.
-
-### Planned PR #68 — sockets and network calls
-
-Migrate `socket`, `connect`, `__sendto`, and other already implemented fixed-signature network boundaries whose Darwin-to-Winsock translations are covered by smoke tests. Preserve Darwin sockaddr/flag translation and guest descriptor ownership instead of treating Winsock descriptors as interchangeable native integers.
-
-**Exit condition:** implemented fixed-signature socket calls use generated ABI execution while semantic translation remains owned by the socket subsystem.
-
-### Planned PR #69 — synchronization and pthread families
-
-After any overlapping pthread/guest-thread lifecycle work lands, migrate mechanically ready ulock, pthread QoS, TSD, workloop, and workqueue entry points in semantic groups. Do not mass-approve workgroup or callback-taking functions merely because an adapter exists; functions requiring guest callbacks remain blocked on the callback architecture.
-
-**Exit condition:** fixed-signature implemented synchronization/pthread providers use generated routing, while callback-dependent or unsupported behavior remains explicitly classified.
-
-### Planned PR #70 — variadic and no-prototype runtime support
-
-Implement a compiler-evidence-driven runtime policy for variadic/no-prototype boundaries before migrating calls such as `open` or `fcntl`. The generated bridge must know which runtime arguments actually exist; hard-coding an always-three-argument interpretation would simply recreate the old table in another form.
-
-**Exit condition:** supported variadic calls have an explicit, tested ABI mechanism and unsupported forms still fail closed.
-
-### Planned PR #71 — general host-to-guest callbacks
-
-Generalize callback/closure translation so native semantic providers can safely invoke ARM64 guest function pointers using compiler/generated ABI evidence. This is required for broader pthread/workgroup/runtime APIs and must support lifetime, thread/context ownership, GPR/SIMD/stack state, and return propagation without one-off callback signatures.
-
-**Exit condition:** callback-taking semantic providers can use one general mechanism, and callback ABI metadata is not duplicated manually.
-
-### Planned PR #72 — remove the handwritten Darwin ABI table
-
-Audit the remaining `IpaSimDarwinHost.dll` callable exports against the semantic migration plan. Every reachable callable export must be either an explicitly approved generated route or an explicitly classified complex/unsupported boundary. Add a CI invariant that prevents a new handwritten Darwin host ABI entry from silently reappearing, then delete `DarwinHostCallSignature` and its lookup path from `SysTranslator`.
-
-**Exit condition:** `SysTranslator` contains no second handwritten Darwin ABI database. Generated adapter records are the mechanical source of truth; semantic approval is the policy source of truth; unsupported/complex boundaries remain visible.
+- generated ABI evidence determines call mechanics only;
+- explicit semantic approval determines whether a real provider may satisfy the import;
+- pointer-bearing providers validate complete guest-visible spans where API length is known;
+- data exports remain data;
+- missing/unsupported semantics fail closed;
+- existing public synthetic boundaries and prior generated routes are regression requirements, not optional tests.
 
 ### After the scaling phase
 
@@ -390,7 +374,8 @@ ipaSim is still an active emulator bring-up effort, not a finished modern iOS co
 
 Important remaining areas include:
 
-- execute the generated semantic-routing roadmap above until the handwritten Darwin ABI table is eliminated;
+- continue retiring the handwritten Darwin ABI table where authoritative generated ABI evidence exists;
+- keep untyped/variadic/callback-dependent boundaries explicitly separate from generator-owned ABI records until their architecture is proven;
 - expand the machine-readable semantic-provider inventory so SDK-wide rows can move deliberately from `unclassified` / `not-approved` into approved, candidate, complex, or unsupported semantic states;
 - progressively generate more production route data from that semantic inventory while preserving explicit module/export/address verification;
 - keep generated adapter records as the mechanical source of truth instead of creating another handwritten ABI database;
