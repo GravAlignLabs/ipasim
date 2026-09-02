@@ -19,6 +19,7 @@ scope:
   - src/IpaSimulator/GeneratedSemanticImportRouterSmoke.cpp
   - tools/compat_surface/semantic_providers.json
   - tools/compat_surface/test_semantic_provider_fixture.py
+  - .github/workflows/threaded-guest-context.yml
   - .github/agent-work/pointer-io-generated-routing.yml
 
 branch: compat-pointer-io-generated-routing
@@ -35,4 +36,6 @@ next_checkpoint: >-
 notes: >-
   Keep variadic open/fcntl, filesystem metadata, Mach, broader socket work,
   pthread/workqueue, callbacks, and guest-thread lifecycle out of this increment.
-  SDK/compiler ABI evidence does not grant semantic approval by itself.
+  SDK/compiler ABI evidence does not grant semantic approval by itself. The
+  Threaded CI workflow may reuse the exact-head Windows Core tester so a failed
+  Core SHA does not consume a second Windows compile for the same source.
