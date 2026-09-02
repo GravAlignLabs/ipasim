@@ -3,6 +3,8 @@
 #ifndef IPASIM_EMULATOR_HPP
 #define IPASIM_EMULATOR_HPP
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <unicorn/unicorn.h>
 #include <unicorn/arm64.h>
@@ -50,6 +52,10 @@ public:
 
   uint64_t readReg(int RegId);
   void writeReg(int RegId, uint64_t Value);
+  bool readVectorReg(int RegId, std::array<unsigned char, 16> &Value);
+  bool writeVectorReg(int RegId, const std::array<unsigned char, 16> &Value);
+  bool readMemory(uint64_t Addr, void *Buffer, std::size_t Size);
+  bool writeMemory(uint64_t Addr, const void *Buffer, std::size_t Size);
 
   // Map a shared guest-process region and record it for future CPU contexts.
   bool mapMemory(uint64_t Addr, uint64_t Size, uc_prot Perms);
