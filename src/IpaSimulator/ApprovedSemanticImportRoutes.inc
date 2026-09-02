@@ -12,6 +12,6 @@ static constexpr ApprovedSemanticImportRoute ApprovedSemanticImportRoutes[] = {
         L"ipasimdarwinhost.dll",
         "_getpid",
         "DarwinHostBridge.getpid",
-        LiveGuestProfile::NoArgumentsSInt32ToX0,
+        LiveGuestProfile::GeneratedAdapterState,
     },
 };
