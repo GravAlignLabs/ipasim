@@ -70,6 +70,11 @@ class SdkCompatibilityTests(unittest.TestCase):
             root = Path(directory)
             sdk = root / "SyntheticPublic.sdk"
             self.write_sdk(sdk)
+            host_def = root / "SyntheticHost.def"
+            host_def.write_text(
+                "LIBRARY IpaSimDarwinHost\nEXPORTS\n    getpid=darwin_getpid\n",
+                encoding="utf-8",
+            )
             output = root / "bundle"
 
             code = sdk_compatibility.main(
@@ -80,6 +85,8 @@ class SdkCompatibilityTests(unittest.TestCase):
                     str(output),
                     "--semantic-providers",
                     str(SEMANTIC_PROVIDERS),
+                    "--host-export-def",
+                    str(host_def),
                     "--header-jobs",
                     "2",
                     "--compiler-batch-size",
@@ -98,6 +105,7 @@ class SdkCompatibilityTests(unittest.TestCase):
                 "bridge-plan.json",
                 "runtime-adapters.json",
                 "compatibility-plan.json",
+                "semantic-migration-plan.json",
                 "GeneratedSdkAdapters.inc",
                 "ApprovedSemanticImportRoutes.inc",
             }
@@ -109,6 +117,7 @@ class SdkCompatibilityTests(unittest.TestCase):
             host = json.loads((output / "win64-abi.json").read_text())
             adapters = json.loads((output / "runtime-adapters.json").read_text())
             plan = json.loads((output / "compatibility-plan.json").read_text())
+            migration = json.loads((output / "semantic-migration-plan.json").read_text())
 
             self.assertEqual(tapi["summary"]["unique_symbol_count"], 1)
             self.assertEqual(headers["summary"]["unique_symbol_count"], 1)
@@ -131,6 +140,9 @@ class SdkCompatibilityTests(unittest.TestCase):
                 ],
                 1,
             )
+            self.assertEqual(migration["summary"]["already_approved_count"], 1)
+            self.assertEqual(migration["summary"]["migration_candidate_count"], 0)
+            self.assertEqual(migration["candidate_symbols"], [])
             self.assertIn(
                 '"_getpid"',
                 (output / "ApprovedSemanticImportRoutes.inc").read_text(),
