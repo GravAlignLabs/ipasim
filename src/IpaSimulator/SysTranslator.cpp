@@ -100,8 +100,6 @@ const DarwinHostCallSignature *findDarwinHostCallSignature(
       {"lstat", 2, true},
       {"pid_for_task", 2, true},
       {"proc_pidpath", 3, true},
-      {"pread", 4, true},
-      {"pwrite", 4, true},
       {"read", 3, true},
       {"readlink", 3, true},
       {"mkfifo", 2, true},
