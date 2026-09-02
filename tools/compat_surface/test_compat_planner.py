@@ -139,7 +139,7 @@ def semantic_manifest():
                 "provider_module": "ipasimdarwinhost.dll",
                 "adapter_symbol": "_alpha",
                 "semantic_owner": "Fixture.alpha",
-                "live_profile": "NoArgumentsSInt32ToX0",
+                "live_profile": "GeneratedAdapterState",
                 "evidence": "Synthetic approved provider used to prove planner classification.",
             },
             {

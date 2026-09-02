@@ -24,7 +24,7 @@ namespace ipasim::bridge {
 namespace {
 
 enum class LiveGuestProfile {
-    NoArgumentsSInt32ToX0,
+    GeneratedAdapterState,
 };
 
 struct ApprovedSemanticImportRoute {
@@ -128,25 +128,15 @@ bool validateLiveProfile(
     LiveGuestProfile profile,
     std::string* error) {
     switch (profile) {
-    case LiveGuestProfile::NoArgumentsSInt32ToX0: {
-        const CommitSpec& commit = record.result.commit;
-        if (record.requiresPointerValidation ||
-            !record.arguments.empty() ||
-            record.result.type.kind != ValueTypeKind::SInt32 ||
-            !record.result.type.elements.empty() ||
-            commit.kind != CommitKind::Registers ||
-            commit.bank != GuestBank::Gpr ||
-            commit.registers.size() != 1 ||
-            commit.registers.front() != 0 ||
-            commit.elementWidthBytes != 4) {
-            setError(
-                error,
-                "generated adapter " + record.symbol +
-                    " does not match live profile NoArgumentsSInt32ToX0");
+    case LiveGuestProfile::GeneratedAdapterState:
+        // The generated AdapterRecord is the ABI authority. The live profile no
+        // longer restates argument count, register class, stack layout, or result
+        // placement. Registration already validates those generated operations.
+        if (record.symbol.empty()) {
+            setError(error, "generated live adapter has an empty symbol");
             return false;
         }
         return true;
-    }
     }
 
     setError(error, "approved semantic route uses an unsupported live guest profile");
@@ -362,6 +352,22 @@ bool ensureProviderBoundLocked(
     return true;
 }
 
+const ApprovedSemanticImportRoute* selectedRouteLocked(
+    RouterState& state,
+    std::uint64_t address,
+    std::string* error) {
+    if (!state.adaptersReady) {
+        setError(error, "generated semantic import router is not initialized");
+        return nullptr;
+    }
+    const auto selected = state.selectedRoutes.find(address);
+    if (selected == state.selectedRoutes.end()) {
+        setError(error, "host address was not selected by the loader semantic route");
+        return nullptr;
+    }
+    return selected->second;
+}
+
 } // namespace
 
 GeneratedSemanticImportSelection selectGeneratedSemanticImport(
@@ -446,40 +452,44 @@ bool isSelectedGeneratedSemanticImport(std::uint64_t address) {
         state.selectedRoutes.find(address) != state.selectedRoutes.end();
 }
 
+bool getSelectedGeneratedSemanticImportRequirements(
+    std::uint64_t address,
+    AdapterExecutionRequirements& requirements,
+    std::string* error) {
+    clearError(error);
+    RouterState& state = routerState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const ApprovedSemanticImportRoute* route =
+        selectedRouteLocked(state, address, error);
+    if (!route) {
+        return false;
+    }
+    return state.registry.describeExecution(route->adapterSymbol, requirements, error);
+}
+
 bool executeSelectedGeneratedSemanticImport(
     std::uint64_t address,
-    std::uint64_t& guestX0,
+    SyntheticGuestState& guest,
+    const PointerValidator& pointerValidator,
     std::string* error) {
     clearError(error);
 
     RouterState& state = routerState();
     std::lock_guard<std::mutex> lock(state.mutex);
-    if (!state.adaptersReady) {
-        setError(error, "generated semantic import router is not initialized");
+    const ApprovedSemanticImportRoute* route =
+        selectedRouteLocked(state, address, error);
+    if (!route) {
         return false;
     }
-
-    const auto selected = state.selectedRoutes.find(address);
-    if (selected == state.selectedRoutes.end()) {
-        setError(error, "host address was not selected by the loader semantic route");
+    if (route->liveProfile != LiveGuestProfile::GeneratedAdapterState) {
+        setError(error, "selected semantic import does not use generated adapter state");
         return false;
     }
-    const ApprovedSemanticImportRoute& route = *selected->second;
-
-    switch (route.liveProfile) {
-    case LiveGuestProfile::NoArgumentsSInt32ToX0: {
-        SyntheticGuestState guest;
-        guest.x[0] = guestX0;
-        if (!state.registry.execute(route.adapterSymbol, guest, {}, error)) {
-            return false;
-        }
-        guestX0 = guest.x[0];
-        return true;
-    }
-    }
-
-    setError(error, "selected semantic import uses an unsupported live guest profile");
-    return false;
+    return state.registry.execute(
+        route->adapterSymbol,
+        guest,
+        pointerValidator,
+        error);
 }
 
 } // namespace ipasim::bridge

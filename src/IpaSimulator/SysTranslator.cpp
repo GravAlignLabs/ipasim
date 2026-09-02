@@ -9,8 +9,13 @@
 #include "ipasim/WrapperIndex.hpp"
 #if defined(IPASIM_MODERN_CORE)
 #include "GeneratedSemanticImportRouter.hpp"
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
+#include <array>
 #include <filesystem>
 #include <thread>
 
@@ -145,6 +150,40 @@ const DarwinHostCallSignature *findDarwinHostCallSignature(
       return &Signature;
   }
   return nullptr;
+}
+
+constexpr array<int, 8> GeneratedGuestVectorRegisters = {
+    UC_ARM64_REG_Q0, UC_ARM64_REG_Q1, UC_ARM64_REG_Q2, UC_ARM64_REG_Q3,
+    UC_ARM64_REG_Q4, UC_ARM64_REG_Q5, UC_ARM64_REG_Q6, UC_ARM64_REG_Q7,
+};
+
+bool isWritablePageProtection(DWORD Protection) {
+  const DWORD Base = Protection & 0xffu;
+  return Base == PAGE_READWRITE || Base == PAGE_WRITECOPY ||
+         Base == PAGE_EXECUTE_READWRITE || Base == PAGE_EXECUTE_WRITECOPY;
+}
+
+bool validateGeneratedLivePointer(uint64_t Address,
+                                  bridge::PointerUse Use) {
+  // Null is a legitimate value for many Darwin pointer arguments and returns;
+  // only the generated indirect-result pointer is unconditionally required to
+  // identify writable storage. Semantic providers remain responsible for their
+  // API-specific nullability rules.
+  if (Address == 0)
+    return Use != bridge::PointerUse::IndirectResult;
+
+  MEMORY_BASIC_INFORMATION Information{};
+  if (VirtualQuery(reinterpret_cast<void *>(static_cast<uintptr_t>(Address)),
+                   &Information, sizeof(Information)) == 0 ||
+      Information.State != MEM_COMMIT ||
+      (Information.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
+    return false;
+
+  if (Use == bridge::PointerUse::IndirectResult &&
+      !isWritablePageProtection(Information.Protect))
+    return false;
+
+  return true;
 }
 #endif
 
@@ -318,27 +357,88 @@ bool SysTranslator::handleFetchProtMem(uc_mem_type Type, uint64_t Addr,
   filesystem::path DLLPath(*LI.LibPath);
 
 #if defined(IPASIM_MODERN_CORE)
-  // Loader-selected generated semantic imports execute through their generated
-  // ARM64 capture/result-commit record and explicitly approved real provider.
-  // _getpid is the first production route; its live profile needs only X0.
+  // Loader-selected generated semantic imports now consume the generated
+  // AdapterRecord directly. SysTranslator snapshots live AAPCS64 state but does
+  // not restate the selected symbol's argument count, register class, stack
+  // placement, pointer status, or result ABI.
   if (bridge::isSelectedGeneratedSemanticImport(Addr)) {
-    uint64_t X0 = Emu.readReg(UC_ARM64_REG_X0);
+    bridge::AdapterExecutionRequirements Requirements;
+    string RouteError;
+    if (!bridge::getSelectedGeneratedSemanticImportRequirements(
+            Addr, Requirements, &RouteError)) {
+      Log.error() << "could not derive generated semantic import requirements at "
+                  << Dyld.dumpAddr(Addr, LI) << ": " << RouteError << Log.end();
+      return false;
+    }
+
+    bridge::SyntheticGuestState Guest;
+    for (size_t I = 0; I != Guest.x.size(); ++I)
+      Guest.x[I] = Emu.readReg(UC_ARM64_REG_X0 + static_cast<int>(I));
+
+    if (Requirements.usesSimd) {
+      for (size_t I = 0; I != GeneratedGuestVectorRegisters.size(); ++I) {
+        if (!Emu.readVectorReg(GeneratedGuestVectorRegisters[I], Guest.v[I])) {
+          Log.error() << "could not snapshot SIMD state for generated semantic import at "
+                      << Dyld.dumpAddr(Addr, LI) << Log.end();
+          return false;
+        }
+      }
+    }
+
+    const uint64_t GuestSP = Emu.readReg(UC_ARM64_REG_SP);
+    Guest.stack.resize(Requirements.guestStackBytes);
+    if (!Guest.stack.empty() &&
+        !Emu.readMemory(GuestSP, Guest.stack.data(), Guest.stack.size())) {
+      Log.error() << "could not snapshot guest stack for generated semantic import at "
+                  << Dyld.dumpAddr(Addr, LI) << Log.end();
+      return false;
+    }
 
     if constexpr (PrintEmuInfo)
       Log.info() << "calling loader-selected generated semantic provider at "
-                 << Dyld.dumpAddr(Addr, LI) << Log.end();
+                 << Dyld.dumpAddr(Addr, LI) << " with generated live state: stack="
+                 << Requirements.guestStackBytes << " simd="
+                 << (Requirements.usesSimd ? "yes" : "no") << " pointers="
+                 << (Requirements.requiresPointerValidation ? "yes" : "no")
+                 << Log.end();
 
-    continueOutsideEmulation([this, Addr, X0]() mutable {
-      string RouteError;
-      if (!bridge::executeSelectedGeneratedSemanticImport(
-              Addr, X0, &RouteError)) {
-        Log.error() << "generated semantic provider execution failed at "
-                    << Dyld.dumpAddr(Addr) << ": " << RouteError << Log.end();
-        return;
-      }
-      Emu.writeReg(UC_ARM64_REG_X0, X0);
-      returnToEmulation();
-    });
+    continueOutsideEmulation(
+        [this, Addr, GuestSP, Guest = std::move(Guest), Requirements]() mutable {
+          string ExecutionError;
+          const bridge::PointerValidator PointerValidator =
+              Requirements.requiresPointerValidation
+                  ? bridge::PointerValidator(validateGeneratedLivePointer)
+                  : bridge::PointerValidator{};
+          if (!bridge::executeSelectedGeneratedSemanticImport(
+                  Addr, Guest, PointerValidator, &ExecutionError)) {
+            Log.error() << "generated semantic provider execution failed at "
+                        << Dyld.dumpAddr(Addr) << ": " << ExecutionError
+                        << Log.end();
+            return;
+          }
+
+          for (size_t I = 0; I != Guest.x.size(); ++I)
+            Emu.writeReg(UC_ARM64_REG_X0 + static_cast<int>(I), Guest.x[I]);
+
+          if (Requirements.usesSimd) {
+            for (size_t I = 0; I != GeneratedGuestVectorRegisters.size(); ++I) {
+              if (!Emu.writeVectorReg(GeneratedGuestVectorRegisters[I], Guest.v[I])) {
+                Log.error() << "could not commit SIMD state for generated semantic import at "
+                            << Dyld.dumpAddr(Addr) << Log.end();
+                return;
+              }
+            }
+          }
+
+          if (!Guest.stack.empty() &&
+              !Emu.writeMemory(GuestSP, Guest.stack.data(), Guest.stack.size())) {
+            Log.error() << "could not commit guest stack for generated semantic import at "
+                        << Dyld.dumpAddr(Addr) << Log.end();
+            return;
+          }
+
+          returnToEmulation();
+        });
 
     Emu.ignoreNextError();
     return false;
@@ -346,8 +446,8 @@ bool SysTranslator::handleFetchProtMem(uc_mem_type Type, uint64_t Addr,
 
   // IpaSimDarwinHost.dll is an explicit native semantic bridge, not a generated
   // WinObjC wrapper. Non-migrated target-proven integer/pointer signatures stay
-  // on the existing path while generated routing expands one symbol at a time.
-  // Arguments 0..7 come from X0..X7 and argument 8 (the ninth
+  // on the existing path until semantic approval moves them to generated
+  // routing. Arguments 0..7 come from X0..X7 and argument 8 (the ninth
   // mach_msg_overwrite parameter) comes from the guest stack.
   if (DLLPath.filename().string() == "IpaSimDarwinHost.dll") {
     const DarwinHostCallSignature *Signature =

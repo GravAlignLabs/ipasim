@@ -33,11 +33,13 @@ _ALLOWED_STATUSES = {
     "unsupported",
 }
 
-# Keep this set synchronized with GeneratedSemanticImportRouter.cpp. Adding a
-# profile is a runtime-capability change and must not happen merely because a
-# manifest names a new string.
+# Keep this set synchronized with GeneratedSemanticImportRouter.cpp. The live
+# profile names a runtime execution mechanism, not a handwritten ABI signature.
+# GeneratedAdapterState means SysTranslator captures the live AAPCS64 state
+# required by the selected generated AdapterRecord and lets that record drive
+# argument capture, libffi invocation, and result commit.
 _ALLOWED_LIVE_PROFILES = {
-    "NoArgumentsSInt32ToX0",
+    "GeneratedAdapterState",
 }
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

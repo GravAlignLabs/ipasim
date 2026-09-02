@@ -13,8 +13,11 @@
 
 namespace {
 
+using ipasim::bridge::AdapterExecutionRequirements;
 using ipasim::bridge::GeneratedSemanticImportSelection;
+using ipasim::bridge::SyntheticGuestState;
 using ipasim::bridge::executeSelectedGeneratedSemanticImport;
+using ipasim::bridge::getSelectedGeneratedSemanticImportRequirements;
 using ipasim::bridge::isSelectedGeneratedSemanticImport;
 using ipasim::bridge::selectGeneratedSemanticImport;
 
@@ -130,7 +133,7 @@ bool proveApprovedProviderMismatchFailsClosed(HMODULE bridge) {
 }
 
 bool proveGeneratedGetpidRoute(HMODULE bridge) {
-    std::puts("[generated-semantic-import-router-smoke] table-driven getpid route begin");
+    std::puts("[generated-semantic-import-router-smoke] adapter-driven getpid route begin");
 
     FARPROC getpid = GetProcAddress(bridge, "getpid");
     if (!getpid) {
@@ -154,8 +157,26 @@ bool proveGeneratedGetpidRoute(HMODULE bridge) {
         return false;
     }
 
-    std::uint64_t guestX0 = ~std::uint64_t{0};
-    if (!executeSelectedGeneratedSemanticImport(address, guestX0, &error)) {
+    AdapterExecutionRequirements requirements;
+    if (!getSelectedGeneratedSemanticImportRequirements(
+            address, requirements, &error)) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated _getpid requirements failed: %s\n",
+            error.c_str());
+        return false;
+    }
+    if (requirements.guestStackBytes != 0 || requirements.usesSimd ||
+        requirements.requiresPointerValidation) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] _getpid requirements were not derived from its no-argument generated adapter\n");
+        return false;
+    }
+
+    SyntheticGuestState guest;
+    guest.x[0] = ~std::uint64_t{0};
+    if (!executeSelectedGeneratedSemanticImport(address, guest, {}, &error)) {
         std::fprintf(
             stderr,
             "[generated-semantic-import-router-smoke] generated _getpid execution failed: %s\n",
@@ -164,16 +185,16 @@ bool proveGeneratedGetpidRoute(HMODULE bridge) {
     }
 
     const auto expected = static_cast<std::uint32_t>(_getpid());
-    if (guestX0 != expected) {
+    if (guest.x[0] != expected) {
         std::fprintf(
             stderr,
             "[generated-semantic-import-router-smoke] expected guest x0=%lu, got %llu\n",
             static_cast<unsigned long>(expected),
-            static_cast<unsigned long long>(guestX0));
+            static_cast<unsigned long long>(guest.x[0]));
         return false;
     }
 
-    std::puts("[generated-semantic-import-router-smoke] table-driven getpid route passed");
+    std::puts("[generated-semantic-import-router-smoke] adapter-driven getpid route passed");
     return true;
 }
 

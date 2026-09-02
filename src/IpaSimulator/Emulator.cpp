@@ -33,6 +33,63 @@ void Emulator::writeReg(int RegId, uint64_t Value) {
   callUC(uc_reg_write(UC, RegId, &Value));
 }
 
+bool Emulator::readVectorReg(int RegId,
+                             std::array<unsigned char, 16> &Value) {
+  Value.fill(0);
+  const uc_err Error = uc_reg_read(UC, RegId, Value.data());
+  if (Error != UC_ERR_OK) {
+    Log.error() << "couldn't read ARM64 vector register " << RegId << ": "
+                << uc_strerror(Error) << Log.end();
+    return false;
+  }
+  return true;
+}
+
+bool Emulator::writeVectorReg(int RegId,
+                              const std::array<unsigned char, 16> &Value) {
+  const uc_err Error = uc_reg_write(UC, RegId, Value.data());
+  if (Error != UC_ERR_OK) {
+    Log.error() << "couldn't write ARM64 vector register " << RegId << ": "
+                << uc_strerror(Error) << Log.end();
+    return false;
+  }
+  return true;
+}
+
+bool Emulator::readMemory(uint64_t Addr, void *Buffer, std::size_t Size) {
+  if (Size == 0)
+    return true;
+  if (!Buffer) {
+    Log.error("cannot read guest memory into a null buffer");
+    return false;
+  }
+  const uc_err Error = uc_mem_read(UC, Addr, Buffer, Size);
+  if (Error != UC_ERR_OK) {
+    Log.error() << "couldn't read guest memory at 0x" << to_hex_string(Addr)
+                << " of size 0x" << to_hex_string(Size) << ": "
+                << uc_strerror(Error) << Log.end();
+    return false;
+  }
+  return true;
+}
+
+bool Emulator::writeMemory(uint64_t Addr, const void *Buffer, std::size_t Size) {
+  if (Size == 0)
+    return true;
+  if (!Buffer) {
+    Log.error("cannot write guest memory from a null buffer");
+    return false;
+  }
+  const uc_err Error = uc_mem_write(UC, Addr, Buffer, Size);
+  if (Error != UC_ERR_OK) {
+    Log.error() << "couldn't write guest memory at 0x" << to_hex_string(Addr)
+                << " of size 0x" << to_hex_string(Size) << ": "
+                << uc_strerror(Error) << Log.end();
+    return false;
+  }
+  return true;
+}
+
 bool Emulator::mapMemoryImpl(uint64_t Addr, uint64_t Size, uc_prot Perms) {
   uc_err Error = uc_mem_map_ptr(UC, Addr, Size, Perms,
                                 reinterpret_cast<void *>(Addr));

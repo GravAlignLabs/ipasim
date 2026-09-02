@@ -164,6 +164,68 @@ bool bindAll(AdapterRegistry& registry) {
         bindControlled(registry, "_auto_indirect_store", asHostFunction(hostStoreIndirect));
 }
 
+bool proveExecutionRequirements(AdapterRegistry& registry) {
+    std::puts("[generated-bridge-adapter-smoke] live requirements begin");
+
+    std::string error;
+    AdapterExecutionRequirements mixed;
+    if (!registry.describeExecution("_auto_mixed", mixed, &error) ||
+        !mixed.usesSimd || mixed.guestStackBytes != 0 ||
+        mixed.requiresPointerValidation) {
+        std::fprintf(
+            stderr,
+            "[generated-bridge-adapter-smoke] mixed adapter requirements were not derived correctly: %s\n",
+            error.c_str());
+        return false;
+    }
+
+    AdapterExecutionRequirements pointer;
+    if (!registry.describeExecution("_auto_identity_pointer", pointer, &error) ||
+        !pointer.requiresPointerValidation) {
+        std::fprintf(
+            stderr,
+            "[generated-bridge-adapter-smoke] pointer requirement was not preserved: %s\n",
+            error.c_str());
+        return false;
+    }
+
+    AdapterRecord stackAdapter;
+    stackAdapter.symbol = "_requirements_stack_probe";
+    stackAdapter.arguments.push_back(ArgumentSpec{
+        0,
+        -1,
+        false,
+        TypeSpec::builtin(ValueTypeKind::UInt64),
+        CaptureSpec::fromStack(24),
+        false,
+    });
+    stackAdapter.result = ResultSpec{
+        TypeSpec::builtin(ValueTypeKind::Void),
+        CommitSpec::none(),
+    };
+    if (!registry.registerAdapter(std::move(stackAdapter), &error)) {
+        std::fprintf(
+            stderr,
+            "[generated-bridge-adapter-smoke] stack requirement adapter registration failed: %s\n",
+            error.c_str());
+        return false;
+    }
+
+    AdapterExecutionRequirements stack;
+    if (!registry.describeExecution("_requirements_stack_probe", stack, &error) ||
+        stack.guestStackBytes != 32 || stack.usesSimd ||
+        stack.requiresPointerValidation) {
+        std::fprintf(
+            stderr,
+            "[generated-bridge-adapter-smoke] stack requirement expected 32 bytes: %s\n",
+            error.c_str());
+        return false;
+    }
+
+    std::puts("[generated-bridge-adapter-smoke] live requirements passed");
+    return true;
+}
+
 bool proveScalarAndMixed(AdapterRegistry& registry) {
     std::puts("[generated-bridge-adapter-smoke] scalar/mixed execution begin");
 
@@ -334,6 +396,7 @@ int main() {
     AdapterRegistry registry;
     if (!proveRegistryPolicy(registry) ||
         !bindAll(registry) ||
+        !proveExecutionRequirements(registry) ||
         !proveScalarAndMixed(registry) ||
         !proveAggregateRepacking(registry) ||
         !provePointerGate(registry) ||
