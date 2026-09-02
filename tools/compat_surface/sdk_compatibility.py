@@ -3,7 +3,8 @@
 
 This is orchestration only. Existing analyzers remain authoritative for TAPI,
 header signatures, AAPCS64/Win64 ABI lowering, bridge plans, runtime adapters,
-compatibility planning, and explicit semantic-provider approval.
+compatibility planning, explicit semantic-provider approval, and migration
+candidate planning from the repository's explicit PE host-export surface.
 
 Header analysis may be performed in deterministic shards and supplied back to
 this command. Sharded input is accepted only after proving that the shard set
@@ -11,7 +12,9 @@ covers the exact requested SDK header inventory once, with no gaps, overlaps,
 or target drift. The downstream compatibility pipeline is otherwise unchanged.
 
 The command intentionally fails closed. A TAPI/header/compiler/semantic-provider
-error aborts the run before the output bundle is materialized.
+error aborts the run before the output bundle is materialized. Host export and
+generated-adapter matches are emitted only as migration candidates; they never
+become semantic approval automatically.
 """
 from __future__ import annotations
 
@@ -31,14 +34,22 @@ import compat_planner
 import compiler_batching
 import generate_semantic_routes
 import header_surface
+import host_export_surface
 import runtime_adapter_table
 import sdk_catalog
 import sdk_header_exhaustive as sdk_header_surface
+import semantic_migration
 import tbd_surface
 import win64_abi_surface
 
 
 DEFAULT_SEMANTIC_PROVIDERS = Path(__file__).with_name("semantic_providers.json")
+DEFAULT_HOST_EXPORT_DEF = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "IpaSimulator"
+    / "DarwinHostBridge.def"
+)
 
 
 class SdkCompatibilityError(ValueError):
@@ -192,6 +203,7 @@ def run_sdk_pipeline(
     *,
     sdk_root: Path,
     semantic_providers: Path = DEFAULT_SEMANTIC_PROVIDERS,
+    host_export_def: Path | None = DEFAULT_HOST_EXPORT_DEF,
     relative_headers: Sequence[str] = (),
     header_manifests: Sequence[Path] = (),
     tapi_targets: Sequence[str] | None = None,
@@ -234,6 +246,11 @@ def run_sdk_pipeline(
     semantic_manifest = generate_semantic_routes.load_manifest(
         semantic_providers
     )
+    host_export_manifest = (
+        host_export_surface.parse_def_file(host_export_def)
+        if host_export_def is not None
+        else None
+    )
     bulk = bulk_compatibility.run_pipeline(
         tapi_manifest=tapi_manifest,
         header_manifest=header_manifest,
@@ -245,6 +262,7 @@ def run_sdk_pipeline(
         clang_args=clang_args,
         timeout_seconds=timeout_seconds,
         compiler_batch_size=compiler_batch_size,
+        host_export_manifest=host_export_manifest,
     )
     return {
         "tapi_manifest": tapi_manifest,
@@ -299,6 +317,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--semantic-providers",
         default=str(DEFAULT_SEMANTIC_PROVIDERS),
         help="explicit semantic-provider inventory JSON",
+    )
+    parser.add_argument(
+        "--host-export-def",
+        default=str(DEFAULT_HOST_EXPORT_DEF),
+        help=(
+            "explicit PE .def host-export surface used only to identify "
+            "semantic migration candidates"
+        ),
     )
     parser.add_argument(
         "--relative-header",
@@ -357,6 +383,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         outputs = run_sdk_pipeline(
             sdk_root=Path(args.sdk_root),
             semantic_providers=Path(args.semantic_providers),
+            host_export_def=Path(args.host_export_def) if args.host_export_def else None,
             relative_headers=args.relative_header,
             header_manifests=[Path(item) for item in args.header_manifest],
             tapi_targets=args.tapi_targets,
@@ -371,6 +398,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         write_outputs(Path(args.output_dir), outputs)
         summary = outputs["compatibility_plan"]["summary"]
         route_counts = summary.get("route_status_counts") or {}
+        migration = outputs.get("semantic_migration")
+        migration_suffix = (
+            " migration-candidates="
+            f"{migration['summary']['migration_candidate_count']}"
+            if migration is not None
+            else ""
+        )
         print(
             "[sdk-compatibility] "
             f"TAPI={outputs['tapi_manifest']['summary']['unique_symbol_count']} "
@@ -379,6 +413,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"typed-C={summary['typed_c_candidate_count']} "
             "route-ready="
             f"{route_counts.get('approved-mechanical-route-ready', 0)}"
+            f"{migration_suffix}"
         )
         return 0
     except (
@@ -395,6 +430,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         runtime_adapter_table.RuntimeAdapterTableError,
         compat_planner.CompatibilityPlannerError,
         generate_semantic_routes.SemanticRouteError,
+        host_export_surface.HostExportSurfaceError,
+        semantic_migration.SemanticMigrationError,
         OSError,
     ) as exc:
         print(f"[sdk-compatibility] ERROR: {exc}", file=sys.stderr)
