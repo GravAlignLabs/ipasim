@@ -19,22 +19,26 @@ scope:
   - src/IpaSimulator/CMakeLists.txt
   - .github/agent-work/darwin-pthread-core.yml
 
-branch: compat-darwin-pthread-core
+branch: compat-darwin-pthread-core-v2
 started_utc: 2026-08-31T04:48:00Z
-base_sha: 960ca890cf93a4564e346bc02ad942ba9933623c
-expected_pr: tbd
+updated_utc: 2026-09-02T21:55:00Z
+base_sha: fa2cc3475886725dcb6b06fdabf11bdc32c785e2
+expected_pr: draft
 
 next_checkpoint: >-
-  Rebase the existing pthread-core implementation onto current master, preserve
-  exact 64-byte Darwin pthread_attr behavior, guest pthread identity/lifetime
-  state, independent ARM64 worker execution, destructor/exit cleanup, and the
-  libdispatch pthread import neighborhood with executable smoke tests.
+  Rebase the narrow pthread-core implementation onto current master, audit the
+  old branch against current fail-closed rules, remove the fabricated
+  pthread_get_stackaddr_np result, preserve exact 64-byte Darwin pthread_attr
+  behavior and independent ARM64 worker execution, then identify any additional
+  routing/stack-introspection scope that must be acquired before opening a draft
+  PR.
 
 notes: >-
-  SysTranslator.cpp is deliberately released from this claim as of 2026-09-02
-  so generated semantic-routing migration can continue without overlap. The
-  current pthread branch has no SysTranslator diff. If later callback-affinity
-  work genuinely requires SysTranslator, rebase first and acquire a fresh narrow
-  claim rather than relying on this historical reservation. Do not implement
-  pthread_create as a synchronous main-engine callback. Preserve truthful
-  error/lifetime behavior.
+  The historical compat-darwin-pthread-core branch is retained as implementation
+  evidence but is 379 commits behind current master and must not be merged
+  directly. SysTranslator.cpp remains deliberately outside this claim until the
+  rebased implementation proves it is required; if guest call routing or stack
+  affinity requires it, update this claim narrowly before editing. Do not
+  implement pthread_create as a synchronous main-engine callback. Preserve
+  truthful error/lifetime behavior, do not fabricate stack or scheduler state,
+  and keep the current generated routing and descriptor work intact.
