@@ -40,6 +40,13 @@ std::vector<int> listDescriptors();
 int connectSocket(int Descriptor, const void *Address,
                   std::uint32_t AddressLength);
 
+// Receive bytes from a Darwin socket descriptor through its real Winsock
+// backing object. This is the receive-side primitive used by read(2): no peer
+// address or message flags are invented, short reads and orderly EOF are
+// returned exactly as Winsock reports them, and request sizes are capped to the
+// single-call int width accepted by recv().
+std::intptr_t receive(int Descriptor, void *Buffer, std::size_t Length);
+
 // Darwin sendto(2) ABI. Address points to a Darwin sockaddr layout (one-byte
 // length followed by one-byte family), so implementations must translate it
 // before calling Winsock rather than reinterpret_casting it as sockaddr.

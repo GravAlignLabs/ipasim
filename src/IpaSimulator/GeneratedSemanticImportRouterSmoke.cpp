@@ -5,6 +5,7 @@
 #endif
 #include <windows.h>
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -29,15 +30,15 @@ std::uint64_t addressOf(FARPROC proc) {
 bool proveUnapprovedSymbolStaysOnExistingPath(HMODULE bridge) {
     std::puts("[generated-semantic-import-router-smoke] unapproved route begin");
 
-    FARPROC read = GetProcAddress(bridge, "read");
-    if (!read) {
-        std::fprintf(stderr, "[generated-semantic-import-router-smoke] bridge read export is missing\n");
+    FARPROC open = GetProcAddress(bridge, "open");
+    if (!open) {
+        std::fprintf(stderr, "[generated-semantic-import-router-smoke] bridge open export is missing\n");
         return false;
     }
 
     std::string error;
     const auto selection = selectGeneratedSemanticImport(
-        "read", bridge, addressOf(read), &error);
+        "open", bridge, addressOf(open), &error);
     if (selection != GeneratedSemanticImportSelection::NotCandidate || !error.empty()) {
         std::fprintf(
             stderr,
@@ -45,7 +46,7 @@ bool proveUnapprovedSymbolStaysOnExistingPath(HMODULE bridge) {
             error.c_str());
         return false;
     }
-    if (isSelectedGeneratedSemanticImport(addressOf(read))) {
+    if (isSelectedGeneratedSemanticImport(addressOf(open))) {
         std::fprintf(stderr, "[generated-semantic-import-router-smoke] unapproved address was selected\n");
         return false;
     }
@@ -312,7 +313,7 @@ bool proveGeneratedScalarDescriptorRoutes(HMODULE bridge) {
     SyntheticGuestState seekGuest;
     seekGuest.x[0] = static_cast<std::uint32_t>(fd);
     seekGuest.x[1] = LargeOffset;
-    seekGuest.x[2] = 0; // SEEK_SET on Darwin and UCRT.
+    seekGuest.x[2] = 0;
     if (!executeSelectedGeneratedSemanticImport(
             lseekAddress, seekGuest, {}, &error)) {
         std::fprintf(
@@ -535,6 +536,224 @@ bool proveGeneratedWriteRoute(HMODULE bridge) {
     return true;
 }
 
+bool proveGeneratedReadRoute(HMODULE bridge) {
+    std::puts("[generated-semantic-import-router-smoke] pointer read route begin");
+
+    FARPROC openProc = GetProcAddress(bridge, "open");
+    FARPROC closeProc = GetProcAddress(bridge, "close");
+    FARPROC lseekProc = GetProcAddress(bridge, "lseek");
+    FARPROC readProc = GetProcAddress(bridge, "read");
+    FARPROC writeProc = GetProcAddress(bridge, "write");
+    FARPROC errorProc = GetProcAddress(bridge, "__error");
+    if (!openProc || !closeProc || !lseekProc || !readProc || !writeProc ||
+        !errorProc) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] pointer read fixture exports are incomplete\n");
+        return false;
+    }
+
+    using OpenFunction = int (*)(const char*, int, std::uint16_t);
+    using CloseFunction = int (*)(int);
+    using LseekFunction = std::int64_t (*)(int, std::int64_t, int);
+    using WriteFunction = std::intptr_t (*)(int, const void*, std::size_t);
+    using ErrorFunction = int* (*)();
+    auto open = reinterpret_cast<OpenFunction>(openProc);
+    auto directClose = reinterpret_cast<CloseFunction>(closeProc);
+    auto directLseek = reinterpret_cast<LseekFunction>(lseekProc);
+    auto directWrite = reinterpret_cast<WriteFunction>(writeProc);
+    int* hostErrno = reinterpret_cast<ErrorFunction>(errorProc)();
+    if (!hostErrno) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] read fixture could not access provider errno\n");
+        return false;
+    }
+
+    constexpr int DarwinOpenReadWrite = 0x00000002;
+    constexpr int DarwinOpenCreate = 0x00000200;
+    constexpr int DarwinOpenTruncate = 0x00000400;
+    const int fd = open(
+        "/generated-semantic-route-read",
+        DarwinOpenReadWrite | DarwinOpenCreate | DarwinOpenTruncate,
+        0600);
+    if (fd < 0) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] could not create pointer read fixture\n");
+        return false;
+    }
+    const auto cleanup = [&]() { directClose(fd); };
+
+    constexpr char Payload[] = "generated-pointer-read";
+    constexpr std::size_t PayloadSize = sizeof(Payload) - 1;
+    if (directWrite(fd, Payload, PayloadSize) !=
+            static_cast<std::intptr_t>(PayloadSize) ||
+        directLseek(fd, 0, SEEK_SET) != 0) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] could not seed pointer read fixture\n");
+        cleanup();
+        return false;
+    }
+
+    const std::uint64_t readAddress = addressOf(readProc);
+    std::string error;
+    const auto selection = selectGeneratedSemanticImport(
+        "read", bridge, readAddress, &error);
+    if (selection != GeneratedSemanticImportSelection::Selected || !error.empty()) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated read route was not selected: %s\n",
+            error.c_str());
+        cleanup();
+        return false;
+    }
+
+    AdapterExecutionRequirements requirements;
+    if (!getSelectedGeneratedSemanticImportRequirements(
+            readAddress, requirements, &error) ||
+        requirements.guestStackBytes != 0 || requirements.usesSimd ||
+        !requirements.requiresPointerValidation) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated read requirements did not match the SDK pointer-bearing record: %s\n",
+            error.c_str());
+        cleanup();
+        return false;
+    }
+
+    char buffer[PayloadSize] = {};
+    const std::uint64_t bufferAddress = static_cast<std::uint64_t>(
+        reinterpret_cast<std::uintptr_t>(buffer));
+    const auto makeGuest = [&]() {
+        SyntheticGuestState guest;
+        guest.x[0] = static_cast<std::uint32_t>(fd);
+        guest.x[1] = bufferAddress;
+        guest.x[2] = PayloadSize;
+        return guest;
+    };
+
+    SyntheticGuestState missingValidator = makeGuest();
+    error.clear();
+    if (executeSelectedGeneratedSemanticImport(
+            readAddress, missingValidator, {}, &error) ||
+        error.find("pointer validation is required before host execution") ==
+            std::string::npos || directLseek(fd, 0, SEEK_CUR) != 0) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated read did not fail closed before provider execution without pointer validation: %s\n",
+            error.c_str());
+        cleanup();
+        return false;
+    }
+
+    SyntheticGuestState rejectedValidator = makeGuest();
+    error.clear();
+    if (executeSelectedGeneratedSemanticImport(
+            readAddress,
+            rejectedValidator,
+            [](std::uint64_t, PointerUse) { return false; },
+            &error) ||
+        error.find("pointer validator rejected") == std::string::npos ||
+        directLseek(fd, 0, SEEK_CUR) != 0) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated read did not fail closed before provider execution when pointer validation rejected the address: %s\n",
+            error.c_str());
+        cleanup();
+        return false;
+    }
+
+    SYSTEM_INFO systemInfo{};
+    GetSystemInfo(&systemInfo);
+    const std::size_t pageSize = systemInfo.dwPageSize;
+    auto* crossing = static_cast<unsigned char*>(VirtualAlloc(
+        nullptr, pageSize * 2, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (!crossing) {
+        std::fprintf(stderr, "[generated-semantic-import-router-smoke] could not allocate read span fixture\n");
+        cleanup();
+        return false;
+    }
+    DWORD oldProtection = 0;
+    if (!VirtualProtect(crossing + pageSize, pageSize, PAGE_NOACCESS,
+                        &oldProtection)) {
+        VirtualFree(crossing, 0, MEM_RELEASE);
+        cleanup();
+        return false;
+    }
+    const std::uint64_t crossingAddress = static_cast<std::uint64_t>(
+        reinterpret_cast<std::uintptr_t>(crossing + pageSize - 1));
+    SyntheticGuestState crossingGuest;
+    crossingGuest.x[0] = static_cast<std::uint32_t>(fd);
+    crossingGuest.x[1] = crossingAddress;
+    crossingGuest.x[2] = 2;
+    *hostErrno = 0;
+    error.clear();
+    const bool crossingExecuted = executeSelectedGeneratedSemanticImport(
+        readAddress,
+        crossingGuest,
+        [&](std::uint64_t address, PointerUse use) {
+            return address == crossingAddress && use == PointerUse::Argument;
+        },
+        &error);
+    VirtualFree(crossing, 0, MEM_RELEASE);
+    if (!crossingExecuted || crossingGuest.x[0] != ~std::uint64_t{0} ||
+        *hostErrno != EFAULT || directLseek(fd, 0, SEEK_CUR) != 0) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated read did not reject a full span crossing into PAGE_NOACCESS before host I/O\n");
+        cleanup();
+        return false;
+    }
+
+    SyntheticGuestState zeroLength;
+    zeroLength.x[0] = static_cast<std::uint32_t>(fd);
+    zeroLength.x[1] = 0;
+    zeroLength.x[2] = 0;
+    error.clear();
+    if (!executeSelectedGeneratedSemanticImport(
+            readAddress,
+            zeroLength,
+            [](std::uint64_t address, PointerUse use) {
+                return address == 0 && use == PointerUse::Argument;
+            },
+            &error) || zeroLength.x[0] != 0 ||
+        directLseek(fd, 0, SEEK_CUR) != 0) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated read changed zero-length/null behavior\n");
+        cleanup();
+        return false;
+    }
+
+    bool validatedPointer = false;
+    SyntheticGuestState readGuest = makeGuest();
+    error.clear();
+    if (!executeSelectedGeneratedSemanticImport(
+            readAddress,
+            readGuest,
+            [&](std::uint64_t address, PointerUse use) {
+                validatedPointer = address == bufferAddress &&
+                    use == PointerUse::Argument;
+                return validatedPointer;
+            },
+            &error) ||
+        !validatedPointer || readGuest.x[0] != PayloadSize ||
+        std::string(buffer, PayloadSize) != std::string(Payload, PayloadSize) ||
+        directLseek(fd, 0, SEEK_CUR) != static_cast<std::int64_t>(PayloadSize)) {
+        std::fprintf(
+            stderr,
+            "[generated-semantic-import-router-smoke] generated read did not transfer real file data with the expected result commit\n");
+        cleanup();
+        return false;
+    }
+
+    cleanup();
+    std::puts("[generated-semantic-import-router-smoke] pointer read route passed");
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -574,7 +793,8 @@ int main(int argc, char** argv) {
         proveApprovedProviderMismatchFailsClosed(bridge) &&
         proveGeneratedProcessIdentityRoutes(bridge) &&
         proveGeneratedScalarDescriptorRoutes(bridge) &&
-        proveGeneratedWriteRoute(bridge);
+        proveGeneratedWriteRoute(bridge) &&
+        proveGeneratedReadRoute(bridge);
 
     FreeLibrary(bridge);
     if (!passed) {

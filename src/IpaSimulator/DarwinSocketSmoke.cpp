@@ -154,6 +154,71 @@ int main(int ArgC, char **ArgV) {
     return fail("connected Darwin TCP socket did not carry payload");
   }
 
+  // Prove the receive side over the same Darwin descriptor. A real Winsock peer
+  // sends bytes in the opposite direction; receive() must return the exact short
+  // read result and then report orderly stream shutdown as EOF (0).
+  constexpr char ReversePayload[] = "ipasim-darwin-receive";
+  const int ReverseSent = ::send(
+      Accepted, ReversePayload, static_cast<int>(sizeof(ReversePayload) - 1), 0);
+  if (ReverseSent != static_cast<int>(sizeof(ReversePayload) - 1)) {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("Winsock peer could not send reverse-direction TCP payload");
+  }
+
+  char ReverseReceived[64] = {};
+  const std::intptr_t ReverseReceivedBytes =
+      receive(Client, ReverseReceived, sizeof(ReverseReceived));
+  if (ReverseReceivedBytes !=
+          static_cast<std::intptr_t>(sizeof(ReversePayload) - 1) ||
+      std::memcmp(ReverseReceived, ReversePayload,
+                  sizeof(ReversePayload) - 1) != 0) {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("Darwin receive did not return the reverse-direction TCP payload");
+  }
+
+  errno = 0;
+  if (receive(Client, nullptr, 0) != 0) {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("zero-length Darwin receive did not preserve null-buffer success");
+  }
+
+  errno = 0;
+  if (receive(Client, nullptr, 1) != -1 || errno != EFAULT) {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("Darwin receive null/nonzero buffer did not report EFAULT");
+  }
+
+  char InvalidBuffer = 0;
+  errno = 0;
+  if (receive(0x7ffffffe, &InvalidBuffer, 1) != -1 || errno != EBADF) {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("Darwin receive invalid descriptor did not report EBADF");
+  }
+
+  if (::shutdown(Accepted, SD_SEND) == SOCKET_ERROR) {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("could not orderly-shutdown Winsock peer send side");
+  }
+  char EofSentinel = 'Z';
+  if (receive(Client, &EofSentinel, 1) != 0 || EofSentinel != 'Z') {
+    ::closesocket(Accepted);
+    ::closesocket(Listener);
+    closeSocket(Client);
+    return fail("Darwin receive did not report orderly TCP shutdown as EOF");
+  }
+
   ::closesocket(Accepted);
   ::closesocket(Listener);
   if (closeSocket(Client) != 0)
@@ -234,13 +299,22 @@ int main(int ArgC, char **ArgV) {
   if (!DarwinHost)
     return fail("could not load Darwin host bridge");
 
+  using SocketFunction = int (*)(int, int, int);
   using Connect = int (*)(int, const void *, std::uint32_t);
+  using CloseFunction = int (*)(int);
+  using ReadFunction = std::intptr_t (*)(int, void *, std::size_t);
   using Identity = std::uint32_t (*)();
   using SendTo = std::intptr_t (*)(int, const void *, std::size_t, int,
                                    const void *, std::uint32_t);
   using DarwinError = int *(*)();
+  auto HostSocket =
+      reinterpret_cast<SocketFunction>(GetProcAddress(DarwinHost, "socket"));
   auto HostConnect =
       reinterpret_cast<Connect>(GetProcAddress(DarwinHost, "connect"));
+  auto HostClose =
+      reinterpret_cast<CloseFunction>(GetProcAddress(DarwinHost, "close"));
+  auto HostRead =
+      reinterpret_cast<ReadFunction>(GetProcAddress(DarwinHost, "read"));
   auto WrongHostConnect = GetProcAddress(DarwinHost, "_connect");
   auto HostGetUid = reinterpret_cast<Identity>(GetProcAddress(DarwinHost, "getuid"));
   auto HostGetEuid = reinterpret_cast<Identity>(GetProcAddress(DarwinHost, "geteuid"));
@@ -250,8 +324,9 @@ int main(int ArgC, char **ArgV) {
       GetProcAddress(DarwinHost, "__sendto"));
   auto HostError =
       reinterpret_cast<DarwinError>(GetProcAddress(DarwinHost, "__error"));
-  if (!HostConnect || WrongHostConnect || !HostGetUid || !HostGetEuid ||
-      !HostGetGid || !HostGetEgid || !HostSendTo || !HostError) {
+  if (!HostSocket || !HostConnect || !HostClose || !HostRead ||
+      WrongHostConnect || !HostGetUid || !HostGetEuid || !HostGetGid ||
+      !HostGetEgid || !HostSendTo || !HostError) {
     FreeLibrary(DarwinHost);
     return fail("normalized socket/credential PE exports were incorrect");
   }
@@ -267,6 +342,131 @@ int main(int ArgC, char **ArgV) {
       HostGetGid() != ExpectedGid || HostGetEgid() != ExpectedGid) {
     FreeLibrary(DarwinHost);
     return fail("Darwin credential exports did not match Windows token SIDs");
+  }
+
+  // The DLL has its own descriptor registry, so prove the exported read provider
+  // through DLL-owned socket/connect/close entry points rather than reusing the
+  // smoke executable's adapter registry. This is the exact provider generated
+  // routing will invoke after semantic approval.
+  int HostReadClient = HostSocket(DarwinAfInet, DarwinSockStream, IPPROTO_TCP);
+  if (HostReadClient == -1) {
+    FreeLibrary(DarwinHost);
+    return fail("Darwin host bridge could not create read-provider socket");
+  }
+
+  SOCKET HostReadListener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (HostReadListener == INVALID_SOCKET) {
+    HostClose(HostReadClient);
+    FreeLibrary(DarwinHost);
+    return fail("could not create read-provider loopback listener");
+  }
+
+  sockaddr_in HostReadListenerAddress{};
+  HostReadListenerAddress.sin_family = AF_INET;
+  HostReadListenerAddress.sin_port = 0;
+  HostReadListenerAddress.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (::bind(HostReadListener,
+             reinterpret_cast<const sockaddr *>(&HostReadListenerAddress),
+             sizeof(HostReadListenerAddress)) == SOCKET_ERROR ||
+      ::listen(HostReadListener, 1) == SOCKET_ERROR) {
+    ::closesocket(HostReadListener);
+    HostClose(HostReadClient);
+    FreeLibrary(DarwinHost);
+    return fail("could not bind/listen for exported Darwin read provider");
+  }
+
+  int HostReadListenerAddressLength = sizeof(HostReadListenerAddress);
+  if (::getsockname(
+          HostReadListener,
+          reinterpret_cast<sockaddr *>(&HostReadListenerAddress),
+          &HostReadListenerAddressLength) == SOCKET_ERROR) {
+    ::closesocket(HostReadListener);
+    HostClose(HostReadClient);
+    FreeLibrary(DarwinHost);
+    return fail("could not query exported read-provider listener address");
+  }
+
+  const DarwinSockaddrIn HostReadDarwinAddress =
+      makeDarwinLoopback(HostReadListenerAddress.sin_port);
+  if (HostConnect(HostReadClient, &HostReadDarwinAddress,
+                  sizeof(HostReadDarwinAddress)) != 0) {
+    ::closesocket(HostReadListener);
+    HostClose(HostReadClient);
+    FreeLibrary(DarwinHost);
+    return fail("exported Darwin socket/connect could not establish read fixture");
+  }
+
+  SOCKET HostReadPeer = ::accept(HostReadListener, nullptr, nullptr);
+  if (HostReadPeer == INVALID_SOCKET) {
+    ::closesocket(HostReadListener);
+    HostClose(HostReadClient);
+    FreeLibrary(DarwinHost);
+    return fail("read-provider loopback listener did not accept connection");
+  }
+
+  constexpr char HostReadPayload[] = "ipasim-host-read-provider";
+  if (::send(HostReadPeer, HostReadPayload,
+             static_cast<int>(sizeof(HostReadPayload) - 1), 0) !=
+      static_cast<int>(sizeof(HostReadPayload) - 1)) {
+    ::closesocket(HostReadPeer);
+    ::closesocket(HostReadListener);
+    HostClose(HostReadClient);
+    FreeLibrary(DarwinHost);
+    return fail("Winsock peer could not feed exported Darwin read provider");
+  }
+
+  if (HostRead(HostReadClient, nullptr, 0) != 0) {
+    ::closesocket(HostReadPeer);
+    ::closesocket(HostReadListener);
+    HostClose(HostReadClient);
+    FreeLibrary(DarwinHost);
+    return fail("exported Darwin read changed zero-length/null behavior");
+  }
+
+  char HostReadBuffer[64] = {};
+  const std::intptr_t HostReadBytes =
+      HostRead(HostReadClient, HostReadBuffer, sizeof(HostReadBuffer));
+  if (HostReadBytes !=
+          static_cast<std::intptr_t>(sizeof(HostReadPayload) - 1) ||
+      std::memcmp(HostReadBuffer, HostReadPayload,
+                  sizeof(HostReadPayload) - 1) != 0) {
+    ::closesocket(HostReadPeer);
+    ::closesocket(HostReadListener);
+    HostClose(HostReadClient);
+    FreeLibrary(DarwinHost);
+    return fail("exported Darwin read did not receive real TCP payload");
+  }
+
+  if (::shutdown(HostReadPeer, SD_SEND) == SOCKET_ERROR) {
+    ::closesocket(HostReadPeer);
+    ::closesocket(HostReadListener);
+    HostClose(HostReadClient);
+    FreeLibrary(DarwinHost);
+    return fail("could not orderly-shutdown exported read-provider peer");
+  }
+  char HostReadEofSentinel = 'R';
+  if (HostRead(HostReadClient, &HostReadEofSentinel, 1) != 0 ||
+      HostReadEofSentinel != 'R') {
+    ::closesocket(HostReadPeer);
+    ::closesocket(HostReadListener);
+    HostClose(HostReadClient);
+    FreeLibrary(DarwinHost);
+    return fail("exported Darwin read did not preserve socket EOF semantics");
+  }
+
+  ::closesocket(HostReadPeer);
+  ::closesocket(HostReadListener);
+  if (HostClose(HostReadClient) != 0) {
+    FreeLibrary(DarwinHost);
+    return fail("exported Darwin close did not release read-provider socket");
+  }
+
+  char HostInvalidReadBuffer = 0;
+  *HostError() = 0;
+  if (HostRead(0x7ffffffe, &HostInvalidReadBuffer, 1) != -1 ||
+      *HostError() != EBADF) {
+    FreeLibrary(DarwinHost);
+    return fail("exported Darwin read invalid-descriptor errno contract changed");
   }
 
   *HostError() = 0;
@@ -285,6 +485,6 @@ int main(int ArgC, char **ArgV) {
   }
 
   FreeLibrary(DarwinHost);
-  std::printf("Darwin socket + credential smoke passed: normalized PE exports, Windows token identity, and real loopback TCP/UDP traffic validated.\n");
+  std::printf("Darwin socket + credential smoke passed: normalized PE exports, Windows token identity, real loopback TCP send/receive, exported read semantics, and UDP traffic validated.\n");
   return 0;
 }

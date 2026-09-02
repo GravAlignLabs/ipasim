@@ -401,6 +401,41 @@ int connectSocket(int Descriptor, const void *Address,
   return 0;
 }
 
+std::intptr_t receive(int Descriptor, void *Buffer, std::size_t Length) {
+  if (!Buffer && Length != 0) {
+    errno = EFAULT;
+    return -1;
+  }
+  // Preserve the existing Darwin read(2) zero-length contract: no descriptor
+  // lookup or host call is required when the caller requests no bytes.
+  if (Length == 0)
+    return 0;
+
+  const std::shared_ptr<SocketState> State = lookupSocket(Descriptor);
+  if (!State) {
+    errno = EBADF;
+    return -1;
+  }
+
+  const int HostLength = static_cast<int>(
+      (std::min)(Length, static_cast<std::size_t>(INT_MAX)));
+
+  std::lock_guard<std::mutex> OperationGuard(State->OperationMutex);
+  if (State->Handle == INVALID_SOCKET) {
+    errno = EBADF;
+    return -1;
+  }
+
+  const int Result =
+      ::recv(State->Handle, static_cast<char *>(Buffer), HostLength, 0);
+  if (Result == SOCKET_ERROR) {
+    setErrnoFromWinsock(WSAGetLastError());
+    return -1;
+  }
+  // Winsock returns 0 for an orderly stream shutdown, matching Darwin read EOF.
+  return static_cast<std::intptr_t>(Result);
+}
+
 std::intptr_t sendTo(int Descriptor, const void *Buffer, std::size_t Length,
                      int Flags, const void *Address,
                      std::uint32_t AddressLength) {
