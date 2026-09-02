@@ -5,6 +5,7 @@
 // point must have a real Windows semantic equivalent or a real compatibility
 // subsystem and is added only when the target reaches that boundary.
 
+#include "DarwinGuestMemory.hpp"
 #include "DarwinSocketAdapter.hpp"
 #include "FifoAdapter.hpp"
 #include "MachIpc.hpp"
@@ -239,13 +240,13 @@ __declspec(dllexport) int close(int Fd) {
   return Result;
 }
 
-// Darwin read operates on the same descriptor namespace as open/close/lseek.
-// UCRT _read accepts a 32-bit request count; POSIX permits a successful read to
-// return fewer bytes than requested, so cap a single host call at INT_MAX rather
-// than splitting one Darwin read into multiple operations with different short-
-// read/blocking semantics. The C identifier is intentionally distinct because
-// UCRT already declares read with a different source-level return type; the .def
-// file exports this function under the required PE name `read`.
+// Darwin read shares the same guest descriptor namespace as open/close/write.
+// Socket descriptors receive through the Winsock-backed registry; tracked file
+// descriptors retain the existing UCRT _read path. Validate the complete
+// writable guest-visible span before either host API can dereference it. UCRT
+// and Winsock both accept 32-bit request sizes, so one Darwin read is capped at
+// INT_MAX rather than split into multiple host calls with different short-read
+// or blocking behavior. DarwinHostBridge.def exports this function as `read`.
 intptr_t darwin_read(int Fd, void *Buffer, size_t Count) {
   if (!Buffer && Count != 0) {
     errno = EFAULT;
@@ -253,6 +254,20 @@ intptr_t darwin_read(int Fd, void *Buffer, size_t Count) {
   }
   if (Count == 0)
     return 0;
+
+  if (!ipasim::darwinmem::writableSpan(Buffer, Count)) {
+    errno = EFAULT;
+    return -1;
+  }
+
+  if (ipasim::darwinsock::isSocketDescriptor(Fd))
+    return ipasim::darwinsock::receive(Fd, Buffer, Count);
+
+  if (!ipasim::darwinfs::isOpenNodeDescriptor(Fd)) {
+    errno = EBADF;
+    return -1;
+  }
+
   const unsigned int HostCount = static_cast<unsigned int>(
       std::min(Count, static_cast<size_t>(INT_MAX)));
   return static_cast<intptr_t>(_read(Fd, Buffer, HostCount));
