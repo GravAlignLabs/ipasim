@@ -7,11 +7,43 @@
 // exact live PE module/export before a route is selected.
 static constexpr ApprovedSemanticImportRoute ApprovedSemanticImportRoutes[] = {
     {
+        "_getegid",
+        "getegid",
+        L"ipasimdarwinhost.dll",
+        "_getegid",
+        "DarwinCredentialAdapter.getegid",
+        LiveGuestProfile::GeneratedAdapterState,
+    },
+    {
+        "_geteuid",
+        "geteuid",
+        L"ipasimdarwinhost.dll",
+        "_geteuid",
+        "DarwinCredentialAdapter.geteuid",
+        LiveGuestProfile::GeneratedAdapterState,
+    },
+    {
+        "_getgid",
+        "getgid",
+        L"ipasimdarwinhost.dll",
+        "_getgid",
+        "DarwinCredentialAdapter.getgid",
+        LiveGuestProfile::GeneratedAdapterState,
+    },
+    {
         "_getpid",
         "getpid",
         L"ipasimdarwinhost.dll",
         "_getpid",
         "DarwinHostBridge.getpid",
+        LiveGuestProfile::GeneratedAdapterState,
+    },
+    {
+        "_getuid",
+        "getuid",
+        L"ipasimdarwinhost.dll",
+        "_getuid",
+        "DarwinCredentialAdapter.getuid",
         LiveGuestProfile::GeneratedAdapterState,
     },
 };
