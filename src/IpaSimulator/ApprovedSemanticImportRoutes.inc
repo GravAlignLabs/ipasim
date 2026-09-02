@@ -7,6 +7,14 @@
 // exact live PE module/export before a route is selected.
 static constexpr ApprovedSemanticImportRoute ApprovedSemanticImportRoutes[] = {
     {
+        "_close",
+        "close",
+        L"ipasimdarwinhost.dll",
+        "_close",
+        "DarwinHostBridge.close",
+        LiveGuestProfile::GeneratedAdapterState,
+    },
+    {
         "_getegid",
         "getegid",
         L"ipasimdarwinhost.dll",
@@ -44,6 +52,14 @@ static constexpr ApprovedSemanticImportRoute ApprovedSemanticImportRoutes[] = {
         L"ipasimdarwinhost.dll",
         "_getuid",
         "DarwinCredentialAdapter.getuid",
+        LiveGuestProfile::GeneratedAdapterState,
+    },
+    {
+        "_lseek",
+        "lseek",
+        L"ipasimdarwinhost.dll",
+        "_lseek",
+        "DarwinHostBridge.lseek",
         LiveGuestProfile::GeneratedAdapterState,
     },
 };
