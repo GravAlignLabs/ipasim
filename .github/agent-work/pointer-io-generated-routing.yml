@@ -1,0 +1,35 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Migrate pointer-bearing Darwin file I/O calls from SysTranslator's handwritten
+  DarwinHostCallSignature table onto the generic live generated-adapter route,
+  beginning with read, write, pread, and pwrite. Preserve explicit semantic
+  approval, exact IpaSimDarwinHost.dll provider identity, runtime guest-pointer
+  validation, 64-bit count/offset/result widths, and existing descriptor semantics.
+
+scope:
+  - src/IpaSimulator/SysTranslator.cpp
+  - src/IpaSimulator/GeneratedSemanticProviderAdapters.inc
+  - src/IpaSimulator/ApprovedSemanticImportRoutes.inc
+  - src/IpaSimulator/GeneratedSemanticImportRouterSmoke.cpp
+  - tools/compat_surface/semantic_providers.json
+  - tools/compat_surface/test_semantic_provider_fixture.py
+  - .github/agent-work/pointer-io-generated-routing.yml
+
+branch: compat-pointer-io-generated-routing
+started_utc: 2026-09-02T12:40:00Z
+base_sha: 2376b8c43f01f8e3e98ea98713783eb53229f893
+expected_pr: draft
+
+next_checkpoint: >-
+  Prove real buffer transfer through generated read/write/pread/pwrite adapters,
+  including runtime pointer validation, positional I/O offset behavior, and
+  preservation of Darwin 64-bit size/result carriers, then remove their
+  handwritten SysTranslator signatures.
+
+notes: >-
+  Keep variadic open/fcntl, filesystem metadata, Mach, sockets, pthread/workqueue,
+  callbacks, and guest-thread lifecycle out of this increment. SDK/compiler ABI
+  evidence does not grant semantic approval by itself.
