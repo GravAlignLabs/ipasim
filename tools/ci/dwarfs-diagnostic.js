@@ -31,14 +31,21 @@ module.exports = async function run({ github, context, core }) {
 
   const { owner, repo } = context.repo;
   const issue_number = context.issue.number;
-  const comments = await github.paginate(
-    github.rest.issues.listComments,
-    { owner, repo, issue_number, per_page: 100 }
-  );
-  const existing = comments.find(comment => comment.body && comment.body.includes(marker));
-  if (existing) {
-    await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
-  } else {
-    await github.rest.issues.createComment({ owner, repo, issue_number, body });
+  try {
+    const comments = await github.paginate(
+      github.rest.issues.listComments,
+      { owner, repo, issue_number, per_page: 100 }
+    );
+    const existing = comments.find(comment => comment.body && comment.body.includes(marker));
+    if (existing) {
+      await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+    } else {
+      await github.rest.issues.createComment({ owner, repo, issue_number, body });
+    }
+  } catch (error) {
+    // Diagnostic transport is auxiliary. Preserve the real build/runtime result
+    // and leave the complete evidence in the job log/step summary if GitHub's
+    // comment API or token policy rejects this write.
+    core.warning(`Could not publish the persistent DwarFS PR diagnostic: ${error.message}`);
   }
 };
