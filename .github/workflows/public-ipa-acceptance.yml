@@ -30,6 +30,11 @@ permissions:
   issues: write
   pull-requests: write
 
+env:
+  AWS_IPA_COMMIT: 58e48234db510bd4fbf643643e8808c5d6a13845
+  AWS_IPA_BLOB: 06a33a39286ffd7c9d300c5924750b6f97c4e346
+  AWS_IPA_SIZE: '2138167'
+
 jobs:
   public-loader:
     name: Run pinned AWS sample IPA without RuntimeRoot
@@ -43,14 +48,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Run public IPA acceptance
+      - name: Run pinned public loader boundary
         id: acceptance
         continue-on-error: true
         shell: pwsh
-        env:
-          AWS_IPA_COMMIT: 58e48234db510bd4fbf643643e8808c5d6a13845
-          AWS_IPA_BLOB: 06a33a39286ffd7c9d300c5924750b6f97c4e346
-          AWS_IPA_SIZE: '2138167'
         run: |
           $ErrorActionPreference = 'Stop'
           $summary = Join-Path $env:RUNNER_TEMP 'public-ipa-summary.txt'
@@ -60,17 +61,21 @@ jobs:
           $status = 'failure'
           $probeExit = 'not-run'
           $firstError = ''
+          $runtimeBoundary = ''
           $loaderStop = ''
           $failure = ''
+
+          $expectedFirstError = 'Error: unsupported ARM64 relocation.'
+          $expectedRuntimeBoundary = 'Error: iOS runtime root is not configured for dependency /System/Library/Frameworks/AVFoundation.framework/AVFoundation.'
+          $expectedLoaderStop = '[ipasim-probe] loader stopped with code 2 before app execution.'
 
           try {
             $build = Join-Path $env:GITHUB_WORKSPACE 'tester\windows\latest\BUILD.txt'
             $testerZip = Join-Path $env:GITHUB_WORKSPACE 'tester\windows\latest\ipasim-ipa-tester.zip'
-            if (-not (Test-Path -LiteralPath $build -PathType Leaf)) {
-              throw "Published tester provenance is missing: $build"
-            }
-            if (-not (Test-Path -LiteralPath $testerZip -PathType Leaf)) {
-              throw "Published tester ZIP is missing: $testerZip"
+            foreach ($path in @($build, $testerZip)) {
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                throw "Published tester input is missing: $path"
+              }
             }
 
             $zipLine = Get-Content -LiteralPath $build |
@@ -100,9 +105,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               throw "AWS sample IPA download failed with curl exit code $LASTEXITCODE."
             }
-            if (-not (Test-Path -LiteralPath $ipa -PathType Leaf)) {
-              throw 'AWS sample IPA was not downloaded.'
-            }
+            if (-not (Test-Path -LiteralPath $ipa -PathType Leaf)) { throw 'AWS sample IPA was not downloaded.' }
             $size = (Get-Item -LiteralPath $ipa).Length
             if ($size -ne [int64]$env:AWS_IPA_SIZE) {
               throw "AWS sample IPA size mismatch: expected $env:AWS_IPA_SIZE, got $size"
@@ -119,16 +122,8 @@ jobs:
             if (Test-Path -LiteralPath $expanded) { Remove-Item -LiteralPath $expanded -Recurse -Force }
             Expand-Archive -LiteralPath $ipaZip -DestinationPath $expanded -Force
 
-            $app = Join-Path $expanded 'Payload\AWSDeviceFarmiOSReferenceApp.app'
-            $image = Join-Path $app 'AWSDeviceFarmiOSReferenceApp'
+            $image = Join-Path $expanded 'Payload\AWSDeviceFarmiOSReferenceApp.app\AWSDeviceFarmiOSReferenceApp'
             if (-not (Test-Path -LiteralPath $image -PathType Leaf)) {
-              $payloadListing = if (Test-Path -LiteralPath (Join-Path $expanded 'Payload')) {
-                (Get-ChildItem -LiteralPath (Join-Path $expanded 'Payload') -Recurse |
-                  Select-Object -ExpandProperty FullName) -join "`n"
-              } else {
-                '<Payload missing>'
-              }
-              $payloadListing | Out-File -LiteralPath $log -Append -Encoding utf8
               throw "Pinned IPA does not contain the expected executable: $image"
             }
 
@@ -143,13 +138,23 @@ jobs:
             }
 
             $firstError = @($lines | Where-Object { "$_" -match '^Error:' } | Select-Object -First 1) -join ''
+            $runtimeBoundary = @($lines | Where-Object { "$_" -eq $expectedRuntimeBoundary } | Select-Object -First 1) -join ''
             $loaderStop = @($lines | Where-Object { "$_" -match '\[ipasim-probe\].*loader stopped' } | Select-Object -First 1) -join ''
 
             if ($code -lt 0) {
               throw "IpaProbe crashed while processing the pinned public IPA (exit $code)."
             }
-            if ($code -ne 0 -and -not $loaderStop) {
-              throw "IpaProbe returned nonzero exit $code without an explicit loader-stop diagnostic."
+            if ($code -ne 2) {
+              throw "Pinned AWS public loader exit changed: expected 2, got $code."
+            }
+            if ($firstError -ne $expectedFirstError) {
+              throw "Pinned AWS first loader error changed: expected '$expectedFirstError', got '$firstError'."
+            }
+            if ($runtimeBoundary -ne $expectedRuntimeBoundary) {
+              throw "Pinned AWS RuntimeRoot dependency boundary changed: expected '$expectedRuntimeBoundary'."
+            }
+            if ($loaderStop -ne $expectedLoaderStop) {
+              throw "Pinned AWS loader-stop diagnostic changed: expected '$expectedLoaderStop', got '$loaderStop'."
             }
 
             $status = 'pass'
@@ -164,6 +169,7 @@ jobs:
               "status=$status",
               "probe_exit=$probeExit",
               "first_error=$firstError",
+              "runtime_boundary=$runtimeBoundary",
               "loader_stop=$loaderStop",
               "failure=$failure",
               "upstream_commit=$env:AWS_IPA_COMMIT",
@@ -172,6 +178,7 @@ jobs:
           }
 
           if ($status -ne 'pass') { exit 1 }
+          exit 0
 
       - name: Publish public IPA diagnostic
         if: always()
@@ -202,9 +209,7 @@ jobs:
             });
             const existing = comments.find(c => c.body && c.body.includes(marker));
             if (existing) {
-              await github.rest.issues.updateComment({
-                owner, repo, comment_id: existing.id, body
-              });
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
             } else {
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
@@ -230,9 +235,6 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 45
     env:
-      AWS_IPA_COMMIT: 58e48234db510bd4fbf643643e8808c5d6a13845
-      AWS_IPA_BLOB: 06a33a39286ffd7c9d300c5924750b6f97c4e346
-      AWS_IPA_SIZE: '2138167'
       RUNTIME_ARCHIVE_URL: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_URL }}
       RUNTIME_ARCHIVE_SHA256: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_SHA256 }}
       RUNTIME_ARCHIVE_PASSWORD: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_PASSWORD }}
@@ -281,7 +283,6 @@ jobs:
               throw "Published tester input is missing: $path"
             }
           }
-
           $line = Get-Content -LiteralPath $build |
             Where-Object { $_ -like 'zip_sha256=*' } |
             Select-Object -First 1
@@ -292,7 +293,6 @@ jobs:
           if ($actual -ne $expected) {
             throw "Published tester SHA256 mismatch: expected $expected, got $actual."
           }
-
           $extract = Join-Path $env:RUNNER_TEMP 'trusted-public-ipa-tester'
           if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
           Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
@@ -345,7 +345,6 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive'
           $archive = Join-Path $dir 'RuntimeRoot.7z'
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
-
           $curlArgs = @('-L', '--fail', '--silent', '--show-error')
           if ($env:RUNTIME_ARCHIVE_AUTH_HEADER) {
             $curlArgs += @('-H', $env:RUNTIME_ARCHIVE_AUTH_HEADER)
@@ -385,20 +384,16 @@ jobs:
           $extract = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-expanded'
           if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
           New-Item -ItemType Directory -Path $extract -Force | Out-Null
-
           $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
           if (-not (Test-Path -LiteralPath $sevenZip -PathType Leaf)) {
             throw '7-Zip is not available on this GitHub-hosted Windows runner.'
           }
-
           & $sevenZip x $archive "-o$extract" "-p$env:RUNTIME_ARCHIVE_PASSWORD" -y | Out-Host
           if ($LASTEXITCODE -ne 0) {
             throw "RuntimeRoot extraction failed with 7-Zip exit code $LASTEXITCODE."
           }
-
-          $candidates = @((Join-Path $extract 'RuntimeRoot'), $extract)
           $runtimeRoot = $null
-          foreach ($candidate in $candidates) {
+          foreach ($candidate in @((Join-Path $extract 'RuntimeRoot'), $extract)) {
             if ((Test-Path -LiteralPath (Join-Path $candidate 'System') -PathType Container) -and
                 (Test-Path -LiteralPath (Join-Path $candidate 'usr') -PathType Container)) {
               $runtimeRoot = (Resolve-Path -LiteralPath $candidate).Path
@@ -423,17 +418,14 @@ jobs:
           $ipa = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.ipa'
           $log = Join-Path $env:RUNNER_TEMP 'trusted-public-ipa-acceptance.log'
           $wrapper = Join-Path $env:RUNNER_TEMP 'run-trusted-public-ipa.cmd'
-
           @"
           @echo off
           call "$testCmd" "$ipa" "$env:RUNTIME_ROOT"
           exit /b %ERRORLEVEL%
           "@ | Set-Content -LiteralPath $wrapper -Encoding ascii
-
           Write-Host 'Running the exact published tester path:'
           Write-Host '  Test-Ipa.cmd "<AWSDeviceFarmSample.ipa>" "<RuntimeRoot>"'
           Write-Host ''
-
           'continue' | & cmd.exe /d /c $wrapper 2>&1 | Tee-Object -FilePath $log
           $exitCode = $LASTEXITCODE
           "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
@@ -447,7 +439,7 @@ jobs:
           RUNTIME_CACHE_HIT: ${{ steps.runtime_cache.outputs.cache-hit }}
           TESTER_SHA: ${{ steps.tester.outputs.sha256 }}
         run: |
-          $summary = @(
+          @(
             '## Trusted public IPA full-runtime acceptance',
             '',
             '- Workload: pinned AWS Device Farm sample IPA',
@@ -457,8 +449,7 @@ jobs:
             "- Encrypted RuntimeRoot archive cache hit: $env:RUNTIME_CACHE_HIT",
             '',
             'Only the encrypted RuntimeRoot archive is cached. Plaintext exists only in runner.temp and is never uploaded as an artifact.'
-          )
-          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Upload trusted acceptance console log
         if: always()
