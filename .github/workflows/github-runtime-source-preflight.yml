@@ -68,29 +68,41 @@ jobs:
           runtime_json="$RUNNER_TEMP/simctl-runtimes.json"
           xcrun simctl list runtimes --json > "$runtime_json"
 
-          runtime_bundle="$(python3 - "$runtime_json" "$RUNTIME_IOS_BUILD" <<'PY'
+          runtime_record="$(python3 - "$runtime_json" "$RUNTIME_IOS_VERSION" "$RUNTIME_IOS_BUILD" <<'PY'
           import json
           import sys
 
-          path, target_build = sys.argv[1], sys.argv[2]
+          path, target_version, target_build = sys.argv[1], sys.argv[2], sys.argv[3]
           with open(path, 'r', encoding='utf-8') as handle:
               data = json.load(handle)
 
           for runtime in data.get('runtimes', []):
               if runtime.get('buildversion') != target_build:
                   continue
+              if runtime.get('version') != target_version:
+                  continue
               if runtime.get('isAvailable') is False:
                   continue
               bundle = runtime.get('bundlePath') or runtime.get('dataPath')
-              if bundle:
-                  print(bundle)
-                  sys.exit(0)
+              if not bundle:
+                  continue
+              identifier = runtime.get('identifier') or ''
+              print('\t'.join((bundle, runtime.get('version', ''), runtime.get('buildversion', ''), identifier)))
+              sys.exit(0)
 
-          print(f'iOS simulator runtime build {target_build} was not found in simctl JSON.', file=sys.stderr)
+          print(
+              f'iOS simulator runtime {target_version} build {target_build} was not found as an available simctl runtime.',
+              file=sys.stderr,
+          )
           sys.exit(1)
           PY
           )"
 
+          IFS=$'\t' read -r runtime_bundle runtime_version runtime_build runtime_identifier <<< "$runtime_record"
+          if [[ "$runtime_version" != "$RUNTIME_IOS_VERSION" || "$runtime_build" != "$RUNTIME_IOS_BUILD" ]]; then
+            echo "ERROR: simctl runtime identity changed: expected $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD), got $runtime_version ($runtime_build)"
+            exit 1
+          fi
           if [[ ! -d "$runtime_bundle" ]]; then
             echo "ERROR: simctl returned a runtime bundle that is not a directory: $runtime_bundle"
             exit 1
@@ -102,24 +114,28 @@ jobs:
             exit 1
           fi
 
+          bundle_cf_version='unavailable'
           plist="$runtime_bundle/Contents/Info.plist"
-          actual_build=''
           if [[ -f "$plist" ]]; then
-            actual_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist" 2>/dev/null || true)"
-          fi
-          if [[ -n "$actual_build" && "$actual_build" != "$RUNTIME_IOS_BUILD" ]]; then
-            echo "ERROR: simulator bundle build changed: expected $RUNTIME_IOS_BUILD, got $actual_build"
-            exit 1
+            bundle_cf_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist" 2>/dev/null || echo 'unavailable')"
           fi
 
-          echo "Pinned iOS simulator runtime validated: $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)"
+          echo "Pinned iOS simulator runtime validated from simctl: $runtime_version ($runtime_build)"
+          echo "Runtime identifier: ${runtime_identifier:-<none>}"
           echo "Runtime bundle: $runtime_bundle"
+          echo "Simulator bundle CFBundleVersion (package metadata only): $bundle_cf_version"
           echo 'RuntimeRoot exposes System and usr.'
 
           {
             echo "runtime_bundle=$runtime_bundle"
+            echo "runtime_version=$runtime_version"
+            echo "runtime_build=$runtime_build"
+            echo "runtime_identifier=$runtime_identifier"
+            echo "bundle_cf_version=$bundle_cf_version"
             echo "iphoneos_sdk_version=$iphoneos_version"
+            echo "iphoneos_sdk_path=$iphoneos_path"
             echo "iphonesimulator_sdk_version=$iphonesimulator_version"
+            echo "iphonesimulator_sdk_path=$iphonesimulator_path"
           } >> "$GITHUB_OUTPUT"
 
       - name: Publish source preflight summary
@@ -127,19 +143,31 @@ jobs:
         shell: bash
         env:
           RUNTIME_BUNDLE: ${{ steps.discovery.outputs.runtime_bundle }}
+          RUNTIME_VERSION: ${{ steps.discovery.outputs.runtime_version }}
+          RUNTIME_BUILD: ${{ steps.discovery.outputs.runtime_build }}
+          RUNTIME_IDENTIFIER: ${{ steps.discovery.outputs.runtime_identifier }}
+          BUNDLE_CF_VERSION: ${{ steps.discovery.outputs.bundle_cf_version }}
           IPHONEOS_VERSION: ${{ steps.discovery.outputs.iphoneos_sdk_version }}
+          IPHONEOS_PATH: ${{ steps.discovery.outputs.iphoneos_sdk_path }}
           IPHONESIM_VERSION: ${{ steps.discovery.outputs.iphonesimulator_sdk_version }}
+          IPHONESIM_PATH: ${{ steps.discovery.outputs.iphonesimulator_sdk_path }}
         run: |
           {
             echo '## GitHub iOS runtime source preflight'
             echo
             echo "- Expected Xcode: $RUNTIME_XCODE_PATH"
             echo "- Expected iOS runtime: $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)"
+            echo "- Observed simctl runtime: ${RUNTIME_VERSION:-<unavailable>} (${RUNTIME_BUILD:-<unavailable>})"
+            echo "- Runtime identifier: ${RUNTIME_IDENTIFIER:-<unavailable>}"
             echo "- Runtime bundle: ${RUNTIME_BUNDLE:-<unavailable>}"
+            echo "- Bundle CFBundleVersion (package metadata): ${BUNDLE_CF_VERSION:-<unavailable>}"
             echo "- iphoneos SDK: ${IPHONEOS_VERSION:-<unavailable>}"
+            echo "- iphoneos path: ${IPHONEOS_PATH:-<unavailable>}"
             echo "- iphonesimulator SDK: ${IPHONESIM_VERSION:-<unavailable>}"
+            echo "- iphonesimulator path: ${IPHONESIM_PATH:-<unavailable>}"
             echo "- Discovery outcome: ${{ steps.discovery.outcome }}"
             echo
+            echo 'Runtime OS build identity comes from simctl buildversion; CFBundleVersion is recorded only as simulator bundle package metadata.'
             echo 'This job is secret-free and does not package, cache, or upload RuntimeRoot/SDK contents.'
           } >> "$GITHUB_STEP_SUMMARY"
 
