@@ -14,6 +14,12 @@ on:
       - 'tests/public-ipas/**'
       - 'tester/windows/latest/**'
   workflow_dispatch:
+    inputs:
+      runtime_cache_key:
+        description: 'Encrypted RuntimeRoot cache version used by trusted master acceptance'
+        required: false
+        default: 'runtime-root-v1'
+        type: string
 
 concurrency:
   group: public-third-party-ipa-${{ github.event.pull_request.number || github.ref }}
@@ -25,8 +31,9 @@ permissions:
   pull-requests: write
 
 jobs:
-  acceptance:
-    name: Run pinned AWS sample IPA through published tester
+  public-loader:
+    name: Run pinned AWS sample IPA without RuntimeRoot
+    if: github.event_name == 'pull_request'
     runs-on: windows-2025
     timeout-minutes: 20
 
@@ -57,9 +64,6 @@ jobs:
           $failure = ''
 
           try {
-            # Verify and extract the exact green tester snapshot committed to this
-            # ipaSim revision. BUILD.txt is the provenance contract published by
-            # Publish Windows Tester to Master.
             $build = Join-Path $env:GITHUB_WORKSPACE 'tester\windows\latest\BUILD.txt'
             $testerZip = Join-Path $env:GITHUB_WORKSPACE 'tester\windows\latest\ipasim-ipa-tester.zip'
             if (-not (Test-Path -LiteralPath $build -PathType Leaf)) {
@@ -90,9 +94,6 @@ jobs:
               throw "Published tester does not contain IpaProbe.exe: $probe"
             }
 
-            # Download the immutable Apache-2.0 AWS Device Farm sample IPA. The
-            # Git blob hash verifies the exact bytes without trusting a mutable
-            # branch name or an unverified redirect.
             $ipa = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.ipa'
             $ipaUrl = "https://raw.githubusercontent.com/aws-samples/aws-device-farm-sample-app-for-ios/$env:AWS_IPA_COMMIT/prebuilt/prebuiltSampleApp.ipa"
             & curl.exe -L --fail --silent --show-error $ipaUrl -o $ipa
@@ -112,8 +113,6 @@ jobs:
               throw "AWS sample IPA Git blob mismatch: expected $env:AWS_IPA_BLOB, got $actualBlob"
             }
 
-            # Expand the real IPA and run its actual device Mach-O. This app is
-            # intentionally not rewritten to point at ipaSim host DLLs.
             $ipaZip = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.zip'
             $expanded = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample-expanded'
             Copy-Item -LiteralPath $ipa -Destination $ipaZip -Force
@@ -153,10 +152,6 @@ jobs:
               throw "IpaProbe returned nonzero exit $code without an explicit loader-stop diagnostic."
             }
 
-            # Discovery contract for the first run: a normal explicit loader
-            # boundary is acceptable because no proprietary Apple RuntimeRoot is
-            # present. This will be tightened to the exact observed boundary in
-            # this PR after the first run.
             $status = 'pass'
           }
           catch {
@@ -179,7 +174,7 @@ jobs:
           if ($status -ne 'pass') { exit 1 }
 
       - name: Publish public IPA diagnostic
-        if: always() && github.event_name == 'pull_request'
+        if: always()
         uses: actions/github-script@v7
         env:
           SUMMARY_PATH: ${{ runner.temp }}/public-ipa-summary.txt
@@ -228,3 +223,250 @@ jobs:
         if: steps.acceptance.outcome == 'failure'
         shell: pwsh
         run: throw 'Public third-party IPA acceptance failed; see the updated PR diagnostic comment and uploaded log.'
+
+  trusted-runtime:
+    name: Run pinned AWS sample IPA with ephemeral RuntimeRoot
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master')
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      AWS_IPA_COMMIT: 58e48234db510bd4fbf643643e8808c5d6a13845
+      AWS_IPA_BLOB: 06a33a39286ffd7c9d300c5924750b6f97c4e346
+      AWS_IPA_SIZE: '2138167'
+      RUNTIME_ARCHIVE_URL: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_URL }}
+      RUNTIME_ARCHIVE_SHA256: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_SHA256 }}
+      RUNTIME_ARCHIVE_PASSWORD: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_PASSWORD }}
+      RUNTIME_ARCHIVE_AUTH_HEADER: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_AUTH_HEADER }}
+
+    steps:
+      - name: Check out trusted master
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve trusted RuntimeRoot cache version
+        id: runtime_key
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $key = '${{ inputs.runtime_cache_key }}'.Trim()
+          if (-not $key) { $key = 'runtime-root-v1' }
+          if ($key.Length -gt 100 -or $key -notmatch '^[A-Za-z0-9._-]+$') {
+            throw 'runtime_cache_key must be <=100 characters and contain only letters, numbers, dot, underscore, or dash.'
+          }
+          "key=$key" >> $env:GITHUB_OUTPUT
+          Write-Host "Encrypted RuntimeRoot cache version: $key"
+
+      - name: Verify trusted runtime configuration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:RUNTIME_ARCHIVE_PASSWORD) {
+            throw 'Repository secret IPASIM_RUNTIME_ARCHIVE_PASSWORD is not configured.'
+          }
+          $runtimeSha = $env:RUNTIME_ARCHIVE_SHA256.Trim().ToLowerInvariant()
+          if ($runtimeSha -notmatch '^[0-9a-f]{64}$') {
+            throw 'Repository secret IPASIM_RUNTIME_ARCHIVE_SHA256 must be exactly 64 hexadecimal characters.'
+          }
+
+      - name: Verify published tester and extract it
+        id: tester
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $build = Join-Path $env:GITHUB_WORKSPACE 'tester\windows\latest\BUILD.txt'
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'tester\windows\latest\ipasim-ipa-tester.zip'
+          foreach ($path in @($build, $zip)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Published tester input is missing: $path"
+            }
+          }
+
+          $line = Get-Content -LiteralPath $build |
+            Where-Object { $_ -like 'zip_sha256=*' } |
+            Select-Object -First 1
+          if (-not $line) { throw 'Published BUILD.txt does not contain zip_sha256.' }
+          $expected = ($line -split '=', 2)[1].Trim().ToLowerInvariant()
+          if ($expected -notmatch '^[0-9a-f]{64}$') { throw 'Published tester zip_sha256 is invalid.' }
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "Published tester SHA256 mismatch: expected $expected, got $actual."
+          }
+
+          $extract = Join-Path $env:RUNNER_TEMP 'trusted-public-ipa-tester'
+          if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
+          Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+          foreach ($name in @('Test-Ipa.cmd', 'Test-Ipa.ps1', 'IpaProbe.exe', 'Arm64Smoke.exe')) {
+            $path = Join-Path $extract $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Published tester is incomplete: $path"
+            }
+          }
+          "sha256=$expected" >> $env:GITHUB_OUTPUT
+          Write-Host "Published tester SHA256 verified: $expected"
+
+      - name: Download and verify pinned AWS IPA
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ipa = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.ipa'
+          $url = "https://raw.githubusercontent.com/aws-samples/aws-device-farm-sample-app-for-ios/$env:AWS_IPA_COMMIT/prebuilt/prebuiltSampleApp.ipa"
+          & curl.exe -L --fail --silent --show-error $url -o $ipa
+          if ($LASTEXITCODE -ne 0) {
+            throw "AWS sample IPA download failed with curl exit code $LASTEXITCODE."
+          }
+          if (-not (Test-Path -LiteralPath $ipa -PathType Leaf)) { throw 'AWS sample IPA was not downloaded.' }
+          $size = (Get-Item -LiteralPath $ipa).Length
+          if ($size -ne [int64]$env:AWS_IPA_SIZE) {
+            throw "AWS sample IPA size mismatch: expected $env:AWS_IPA_SIZE, got $size"
+          }
+          $actualBlob = (& git hash-object -- $ipa).Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0) { throw 'git hash-object failed for the AWS sample IPA.' }
+          if ($actualBlob -ne $env:AWS_IPA_BLOB) {
+            throw "AWS sample IPA Git blob mismatch: expected $env:AWS_IPA_BLOB, got $actualBlob"
+          }
+          Write-Host "Pinned AWS IPA verified at upstream blob $actualBlob."
+
+      - name: Restore encrypted RuntimeRoot archive cache
+        id: runtime_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}\ipasim-runtime-archive
+          key: ipasim-encrypted-runtime-${{ steps.runtime_key.outputs.key }}
+
+      - name: Download encrypted RuntimeRoot archive on cache miss
+        if: steps.runtime_cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:RUNTIME_ARCHIVE_URL) {
+            throw 'Encrypted RuntimeRoot cache missed and repository secret IPASIM_RUNTIME_ARCHIVE_URL is not configured.'
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive'
+          $archive = Join-Path $dir 'RuntimeRoot.7z'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+
+          $curlArgs = @('-L', '--fail', '--silent', '--show-error')
+          if ($env:RUNTIME_ARCHIVE_AUTH_HEADER) {
+            $curlArgs += @('-H', $env:RUNTIME_ARCHIVE_AUTH_HEADER)
+          }
+          $curlArgs += @($env:RUNTIME_ARCHIVE_URL, '-o', $archive)
+          & curl.exe @curlArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Encrypted RuntimeRoot download failed with curl exit code $LASTEXITCODE."
+          }
+
+      - name: Verify encrypted RuntimeRoot archive SHA256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive\RuntimeRoot.7z'
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw 'RuntimeRoot.7z is missing.' }
+          $expected = $env:RUNTIME_ARCHIVE_SHA256.Trim().ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "Encrypted RuntimeRoot SHA256 mismatch: expected $expected, got $actual."
+          }
+          Write-Host "Encrypted RuntimeRoot SHA256 verified: $actual"
+
+      - name: Save encrypted RuntimeRoot archive cache
+        if: steps.runtime_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}\ipasim-runtime-archive
+          key: ipasim-encrypted-runtime-${{ steps.runtime_key.outputs.key }}
+
+      - name: Extract ephemeral RuntimeRoot
+        id: runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive\RuntimeRoot.7z'
+          $extract = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-expanded'
+          if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
+          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          if (-not (Test-Path -LiteralPath $sevenZip -PathType Leaf)) {
+            throw '7-Zip is not available on this GitHub-hosted Windows runner.'
+          }
+
+          & $sevenZip x $archive "-o$extract" "-p$env:RUNTIME_ARCHIVE_PASSWORD" -y | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            throw "RuntimeRoot extraction failed with 7-Zip exit code $LASTEXITCODE."
+          }
+
+          $candidates = @((Join-Path $extract 'RuntimeRoot'), $extract)
+          $runtimeRoot = $null
+          foreach ($candidate in $candidates) {
+            if ((Test-Path -LiteralPath (Join-Path $candidate 'System') -PathType Container) -and
+                (Test-Path -LiteralPath (Join-Path $candidate 'usr') -PathType Container)) {
+              $runtimeRoot = (Resolve-Path -LiteralPath $candidate).Path
+              break
+            }
+          }
+          if (-not $runtimeRoot) {
+            throw 'Extracted RuntimeRoot does not expose System and usr at its top level.'
+          }
+          "runtime_root=$runtimeRoot" >> $env:GITHUB_OUTPUT
+          Write-Host 'RuntimeRoot extracted into ephemeral runner storage and validated.'
+
+      - name: Run exact Test-Ipa.cmd against pinned AWS IPA
+        id: acceptance
+        shell: pwsh
+        env:
+          RUNTIME_ROOT: ${{ steps.runtime.outputs.runtime_root }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tester = Join-Path $env:RUNNER_TEMP 'trusted-public-ipa-tester'
+          $testCmd = Join-Path $tester 'Test-Ipa.cmd'
+          $ipa = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.ipa'
+          $log = Join-Path $env:RUNNER_TEMP 'trusted-public-ipa-acceptance.log'
+          $wrapper = Join-Path $env:RUNNER_TEMP 'run-trusted-public-ipa.cmd'
+
+          @"
+          @echo off
+          call "$testCmd" "$ipa" "$env:RUNTIME_ROOT"
+          exit /b %ERRORLEVEL%
+          "@ | Set-Content -LiteralPath $wrapper -Encoding ascii
+
+          Write-Host 'Running the exact published tester path:'
+          Write-Host '  Test-Ipa.cmd "<AWSDeviceFarmSample.ipa>" "<RuntimeRoot>"'
+          Write-Host ''
+
+          'continue' | & cmd.exe /d /c $wrapper 2>&1 | Tee-Object -FilePath $log
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Publish trusted acceptance summary
+        if: always()
+        shell: pwsh
+        env:
+          TEST_EXIT: ${{ steps.acceptance.outputs.exit_code }}
+          RUNTIME_CACHE_HIT: ${{ steps.runtime_cache.outputs.cache-hit }}
+          TESTER_SHA: ${{ steps.tester.outputs.sha256 }}
+        run: |
+          $summary = @(
+            '## Trusted public IPA full-runtime acceptance',
+            '',
+            '- Workload: pinned AWS Device Farm sample IPA',
+            '- Exact test path: `Test-Ipa.cmd <IPA> <RuntimeRoot>`',
+            "- Test exit code: $env:TEST_EXIT",
+            "- Published tester SHA256: $env:TESTER_SHA",
+            "- Encrypted RuntimeRoot archive cache hit: $env:RUNTIME_CACHE_HIT",
+            '',
+            'Only the encrypted RuntimeRoot archive is cached. Plaintext exists only in runner.temp and is never uploaded as an artifact.'
+          )
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload trusted acceptance console log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trusted-public-ipa-acceptance-log-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}\trusted-public-ipa-acceptance.log
+            ${{ github.workspace }}\tester\windows\latest\BUILD.txt
