@@ -1,0 +1,230 @@
+name: Public third-party IPA acceptance
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/public-ipa-acceptance.yml'
+      - 'tests/public-ipas/**'
+      - 'tester/windows/latest/**'
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/public-ipa-acceptance.yml'
+      - 'tests/public-ipas/**'
+      - 'tester/windows/latest/**'
+  workflow_dispatch:
+
+concurrency:
+  group: public-third-party-ipa-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  acceptance:
+    name: Run pinned AWS sample IPA through published tester
+    runs-on: windows-2025
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out ipaSim
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run public IPA acceptance
+        id: acceptance
+        continue-on-error: true
+        shell: pwsh
+        env:
+          AWS_IPA_COMMIT: 58e48234db510bd4fbf643643e8808c5d6a13845
+          AWS_IPA_BLOB: 06a33a39286ffd7c9d300c5924750b6f97c4e346
+          AWS_IPA_SIZE: '2138167'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $summary = Join-Path $env:RUNNER_TEMP 'public-ipa-summary.txt'
+          $log = Join-Path $env:RUNNER_TEMP 'public-ipa-ipasim.log'
+          New-Item -ItemType File -Path $log -Force | Out-Null
+
+          $status = 'failure'
+          $probeExit = 'not-run'
+          $firstError = ''
+          $loaderStop = ''
+          $failure = ''
+
+          try {
+            # Verify and extract the exact green tester snapshot committed to this
+            # ipaSim revision. BUILD.txt is the provenance contract published by
+            # Publish Windows Tester to Master.
+            $build = Join-Path $env:GITHUB_WORKSPACE 'tester\windows\latest\BUILD.txt'
+            $testerZip = Join-Path $env:GITHUB_WORKSPACE 'tester\windows\latest\ipasim-ipa-tester.zip'
+            if (-not (Test-Path -LiteralPath $build -PathType Leaf)) {
+              throw "Published tester provenance is missing: $build"
+            }
+            if (-not (Test-Path -LiteralPath $testerZip -PathType Leaf)) {
+              throw "Published tester ZIP is missing: $testerZip"
+            }
+
+            $zipLine = Get-Content -LiteralPath $build |
+              Where-Object { $_ -like 'zip_sha256=*' } |
+              Select-Object -First 1
+            if (-not $zipLine) { throw 'BUILD.txt does not contain zip_sha256.' }
+            $expectedTesterSha = ($zipLine -split '=', 2)[1].Trim().ToLowerInvariant()
+            if ($expectedTesterSha -notmatch '^[0-9a-f]{64}$') {
+              throw "Invalid tester SHA256 in BUILD.txt: $expectedTesterSha"
+            }
+            $actualTesterSha = (Get-FileHash -LiteralPath $testerZip -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualTesterSha -ne $expectedTesterSha) {
+              throw "Tester ZIP SHA256 mismatch: expected $expectedTesterSha, got $actualTesterSha"
+            }
+
+            $tester = Join-Path $env:RUNNER_TEMP 'public-ipa-tester'
+            if (Test-Path -LiteralPath $tester) { Remove-Item -LiteralPath $tester -Recurse -Force }
+            Expand-Archive -LiteralPath $testerZip -DestinationPath $tester -Force
+            $probe = Join-Path $tester 'IpaProbe.exe'
+            if (-not (Test-Path -LiteralPath $probe -PathType Leaf)) {
+              throw "Published tester does not contain IpaProbe.exe: $probe"
+            }
+
+            # Download the immutable Apache-2.0 AWS Device Farm sample IPA. The
+            # Git blob hash verifies the exact bytes without trusting a mutable
+            # branch name or an unverified redirect.
+            $ipa = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.ipa'
+            $ipaUrl = "https://raw.githubusercontent.com/aws-samples/aws-device-farm-sample-app-for-ios/$env:AWS_IPA_COMMIT/prebuilt/prebuiltSampleApp.ipa"
+            & curl.exe -L --fail --silent --show-error $ipaUrl -o $ipa
+            if ($LASTEXITCODE -ne 0) {
+              throw "AWS sample IPA download failed with curl exit code $LASTEXITCODE."
+            }
+            if (-not (Test-Path -LiteralPath $ipa -PathType Leaf)) {
+              throw 'AWS sample IPA was not downloaded.'
+            }
+            $size = (Get-Item -LiteralPath $ipa).Length
+            if ($size -ne [int64]$env:AWS_IPA_SIZE) {
+              throw "AWS sample IPA size mismatch: expected $env:AWS_IPA_SIZE, got $size"
+            }
+            $actualBlob = (& git hash-object -- $ipa).Trim().ToLowerInvariant()
+            if ($LASTEXITCODE -ne 0) { throw 'git hash-object failed for the AWS sample IPA.' }
+            if ($actualBlob -ne $env:AWS_IPA_BLOB) {
+              throw "AWS sample IPA Git blob mismatch: expected $env:AWS_IPA_BLOB, got $actualBlob"
+            }
+
+            # Expand the real IPA and run its actual device Mach-O. This app is
+            # intentionally not rewritten to point at ipaSim host DLLs.
+            $ipaZip = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.zip'
+            $expanded = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample-expanded'
+            Copy-Item -LiteralPath $ipa -Destination $ipaZip -Force
+            if (Test-Path -LiteralPath $expanded) { Remove-Item -LiteralPath $expanded -Recurse -Force }
+            Expand-Archive -LiteralPath $ipaZip -DestinationPath $expanded -Force
+
+            $app = Join-Path $expanded 'Payload\AWSDeviceFarmiOSReferenceApp.app'
+            $image = Join-Path $app 'AWSDeviceFarmiOSReferenceApp'
+            if (-not (Test-Path -LiteralPath $image -PathType Leaf)) {
+              $payloadListing = if (Test-Path -LiteralPath (Join-Path $expanded 'Payload')) {
+                (Get-ChildItem -LiteralPath (Join-Path $expanded 'Payload') -Recurse |
+                  Select-Object -ExpandProperty FullName) -join "`n"
+              } else {
+                '<Payload missing>'
+              }
+              $payloadListing | Out-File -LiteralPath $log -Append -Encoding utf8
+              throw "Pinned IPA does not contain the expected executable: $image"
+            }
+
+            Write-Host "Running public IPA image: $image"
+            $lines = @(& $probe $image 2>&1)
+            $code = $LASTEXITCODE
+            $probeExit = "$code"
+            foreach ($line in $lines) {
+              $text = "$line"
+              Write-Host $text
+              $text | Out-File -LiteralPath $log -Append -Encoding utf8
+            }
+
+            $firstError = @($lines | Where-Object { "$_" -match '^Error:' } | Select-Object -First 1) -join ''
+            $loaderStop = @($lines | Where-Object { "$_" -match '\[ipasim-probe\].*loader stopped' } | Select-Object -First 1) -join ''
+
+            if ($code -lt 0) {
+              throw "IpaProbe crashed while processing the pinned public IPA (exit $code)."
+            }
+            if ($code -ne 0 -and -not $loaderStop) {
+              throw "IpaProbe returned nonzero exit $code without an explicit loader-stop diagnostic."
+            }
+
+            # Discovery contract for the first run: a normal explicit loader
+            # boundary is acceptable because no proprietary Apple RuntimeRoot is
+            # present. This will be tightened to the exact observed boundary in
+            # this PR after the first run.
+            $status = 'pass'
+          }
+          catch {
+            $failure = $_.Exception.Message
+            $failure | Out-File -LiteralPath $log -Append -Encoding utf8
+            Write-Error $failure
+          }
+          finally {
+            @(
+              "status=$status",
+              "probe_exit=$probeExit",
+              "first_error=$firstError",
+              "loader_stop=$loaderStop",
+              "failure=$failure",
+              "upstream_commit=$env:AWS_IPA_COMMIT",
+              "upstream_blob=$env:AWS_IPA_BLOB"
+            ) | Set-Content -LiteralPath $summary -Encoding utf8
+          }
+
+          if ($status -ne 'pass') { exit 1 }
+
+      - name: Publish public IPA diagnostic
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          SUMMARY_PATH: ${{ runner.temp }}/public-ipa-summary.txt
+          LOG_PATH: ${{ runner.temp }}/public-ipa-ipasim.log
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ipasim-public-ipa-diagnostic -->';
+            const summary = fs.existsSync(process.env.SUMMARY_PATH)
+              ? fs.readFileSync(process.env.SUMMARY_PATH, 'utf8').trim()
+              : 'summary unavailable';
+            const log = fs.existsSync(process.env.LOG_PATH)
+              ? fs.readFileSync(process.env.LOG_PATH, 'utf8')
+              : '';
+            const tail = log.split(/\r?\n/).slice(-80).join('\n').slice(-8000);
+            const body = `${marker}\n## Public third-party IPA acceptance\n\n` +
+              `Pinned workload: AWS Device Farm sample app (Apache-2.0)\n\n` +
+              `\`\`\`text\n${summary}\n\`\`\`\n\n` +
+              `### ipaSim log tail\n\`\`\`text\n${tail || '<empty>'}\n\`\`\``;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Upload public IPA acceptance log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-third-party-ipa-diagnostic
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/public-ipa-summary.txt
+            ${{ runner.temp }}/public-ipa-ipasim.log
+
+      - name: Fail after diagnostic publication
+        if: steps.acceptance.outcome == 'failure'
+        shell: pwsh
+        run: throw 'Public third-party IPA acceptance failed; see the updated PR diagnostic comment and uploaded log.'
