@@ -1,0 +1,262 @@
+name: RuntimeRoot DwarFS Reader
+
+on:
+  pull_request:
+    paths:
+      - 'include/ipasim/DwarfsReaderBridgeApi.h'
+      - 'include/ipasim/DwarfsRuntimeRootStore.hpp'
+      - 'src/IpaSimulator/DwarfsReaderBridge.cpp'
+      - 'src/IpaSimulator/DwarfsRuntimeRootStore.cpp'
+      - 'src/IpaSimulator/DwarfsRuntimeRootStoreSmoke.cpp'
+      - 'src/IpaSimulator/dwarfs-reader/**'
+      - '.github/workflows/runtime-root-dwarfs-reader.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build-fixture:
+    name: Build Darwin-only DwarFS fixture
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build fixture image
+        id: fixture
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOG="$RUNNER_TEMP/dwarfs-fixture.log"
+          exec > >(tee "$LOG") 2>&1
+
+          DWARFS_VERSION=0.15.7
+          DWARFS_SHA=baa03026e7d2c195fdb78bf261cd7d20f620b20685f8a3e26162ba9d652b0d78
+          DWARFS="$RUNNER_TEMP/dwarfs-universal-${DWARFS_VERSION}-Linux-x86_64"
+          FIXTURE_ROOT="$RUNNER_TEMP/runtime-root-fixture"
+          FIXTURE_IMAGE="$RUNNER_TEMP/runtime-root-illegal-name.dwarfs"
+
+          curl --fail --location --retry 3 \
+            "https://github.com/mhx/dwarfs/releases/download/v${DWARFS_VERSION}/dwarfs-universal-${DWARFS_VERSION}-Linux-x86_64" \
+            --output "$DWARFS"
+          echo "${DWARFS_SHA}  ${DWARFS}" | sha256sum --check --strict
+          chmod +x "$DWARFS"
+
+          mkdir -p "$FIXTURE_ROOT/System/Library/Frameworks/UIKit.framework/Versions/A:"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("${{ runner.temp }}") / "runtime-root-fixture" / "System" / "Library" / "Frameworks" / "UIKit.framework" / "Versions" / "A:" / "UIKit"
+          path.write_bytes(bytes([0x49, 0x50, 0x41, 0x53, 0x69, 0x6d, 0x00, 0xff, 0x2f, 0x3a, 0x7f]))
+          PY
+
+          "$DWARFS" --tool=mkdwarfs \
+            -i "$FIXTURE_ROOT" \
+            -o "$FIXTURE_IMAGE" \
+            --log-level=warn
+
+          "$DWARFS" --tool=dwarfsck "$FIXTURE_IMAGE" -l | tee "$RUNNER_TEMP/dwarfs-fixture-list.txt"
+          grep -F 'System/Library/Frameworks/UIKit.framework/Versions/A:/UIKit' "$RUNNER_TEMP/dwarfs-fixture-list.txt"
+
+          cp "$FIXTURE_IMAGE" "$GITHUB_WORKSPACE/runtime-root-illegal-name.dwarfs"
+
+      - name: Upload fixture
+        if: steps.fixture.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-root-dwarfs-fixture
+          path: runtime-root-illegal-name.dwarfs
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Publish fixture diagnostic
+        if: steps.fixture.outcome == 'failure' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          DIAGNOSTIC_LOG: ${{ runner.temp }}/dwarfs-fixture.log
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ipasim-dwarfs-reader-diagnostic -->';
+            const path = process.env.DIAGNOSTIC_LOG;
+            const text = fs.existsSync(path) ? fs.readFileSync(path, 'utf8') : 'fixture log was not produced';
+            const lines = text.split(/\r?\n/);
+            const useful = lines.filter(line => /error|fatal|failed|sha256|dwarfs|mkdwarfs/i.test(line)).slice(-80);
+            const tail = lines.slice(-80);
+            const body = `${marker}\n## RuntimeRoot DwarFS reader diagnostic\n\n**Fixture generation failed** on \`${context.sha}\`.\n\n### Useful output\n\`\`\`text\n${(useful.length ? useful : tail).join('\n').slice(-12000)}\n\`\`\`\n\nThe workflow still fails normally after publishing this diagnostic.`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Fail after fixture diagnostic
+        if: steps.fixture.outcome == 'failure'
+        shell: bash
+        run: exit 1
+
+  reader-smoke:
+    name: Windows in-image reader smoke
+    needs: build-fixture
+    runs-on: windows-2025
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download fixture
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-root-dwarfs-fixture
+          path: ${{ runner.temp }}\fixture
+
+      - name: Set MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\vcpkg-bincache
+          key: dwarfs-v0.15.7-vcpkg-62159a45-x64-windows-static-v1
+
+      - name: Build and run DwarFS reader smoke
+        id: smoke
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Log = Join-Path $env:RUNNER_TEMP 'dwarfs-reader-smoke.log'
+          Start-Transcript -Path $Log -Force | Out-Null
+          try {
+            function Invoke-Native {
+              param([Parameter(Mandatory=$true)][string]$Exe,
+                    [Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
+              & $Exe @Arguments
+              if ($LASTEXITCODE -ne 0) {
+                throw "$Exe failed with exit code $LASTEXITCODE"
+              }
+            }
+
+            $DwarfsVersion = '0.15.7'
+            $DwarfsSha = '42a22273df41026bf6eb6fd6001797213388430cae5a4b1b08dfaebacf5b1d61'
+            $Package = Join-Path $env:RUNNER_TEMP "dwarfs-$DwarfsVersion-Windows-AMD64.7z"
+            $PackageDir = Join-Path $env:RUNNER_TEMP 'dwarfs-package'
+
+            Invoke-WebRequest \
+              -Uri "https://github.com/mhx/dwarfs/releases/download/v$DwarfsVersion/dwarfs-$DwarfsVersion-Windows-AMD64.7z" \
+              -OutFile $Package
+            $ActualSha = (Get-FileHash -Algorithm SHA256 $Package).Hash.ToLowerInvariant()
+            if ($ActualSha -ne $DwarfsSha) {
+              throw "DwarFS package SHA-256 mismatch: expected $DwarfsSha got $ActualSha"
+            }
+
+            New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
+            Invoke-Native 7z x $Package "-o$PackageDir" -y
+
+            Write-Host 'DwarFS package top-level contents:'
+            Get-ChildItem -Path $PackageDir -Depth 2 | Select-Object FullName, Length | Format-Table -AutoSize
+
+            $Config = Get-ChildItem -Path $PackageDir -Filter dwarfs-config.cmake -Recurse -File | Select-Object -First 1
+            if ($null -eq $Config) {
+              throw 'Official DwarFS Windows package does not contain dwarfs-config.cmake; cannot consume it as a reader SDK.'
+            }
+            $DwarfsPrefix = $Config.Directory.Parent.Parent.Parent.FullName
+            Write-Host "Using DwarFS CMake package: $($Config.FullName)"
+            Write-Host "DwarFS prefix: $DwarfsPrefix"
+
+            $VcpkgRoot = Join-Path $env:RUNNER_TEMP 'vcpkg-dwarfs'
+            New-Item -ItemType Directory -Force -Path $VcpkgRoot | Out-Null
+            Invoke-Native git -C $VcpkgRoot init
+            Invoke-Native git -C $VcpkgRoot remote add origin https://github.com/microsoft/vcpkg.git
+            Invoke-Native git -C $VcpkgRoot fetch --depth=1 origin 62159a45e18f3a9ac0548628dcaf74fcb60c6ff9
+            Invoke-Native git -C $VcpkgRoot checkout --detach FETCH_HEAD
+            Invoke-Native (Join-Path $VcpkgRoot 'bootstrap-vcpkg.bat') -disableMetrics
+
+            $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $env:RUNNER_TEMP 'vcpkg-bincache'
+            New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+            $Vcpkg = Join-Path $VcpkgRoot 'vcpkg.exe'
+            $Packages = @(
+              'fmt',
+              'boost-chrono',
+              'boost-filesystem',
+              'boost-program-options',
+              'boost-process',
+              'libressl',
+              'libarchive',
+              'xxhash',
+              'zstd',
+              'lz4',
+              'liblzma',
+              'brotli',
+              'libflac',
+              'nlohmann-json',
+              'pkgconf'
+            )
+            Invoke-Native $Vcpkg install @Packages --triplet x64-windows-static --clean-after-build
+
+            $BuildDir = Join-Path $env:RUNNER_TEMP 'ipasim-dwarfs-reader-build'
+            $Toolchain = Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake'
+            Invoke-Native cmake \
+              -S "$env:GITHUB_WORKSPACE\src\IpaSimulator\dwarfs-reader" \
+              -B $BuildDir \
+              -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" \
+              -DVCPKG_TARGET_TRIPLET=x64-windows-static \
+              "-DCMAKE_PREFIX_PATH=$DwarfsPrefix"
+            Invoke-Native cmake --build $BuildDir --target DwarfsRuntimeRootStoreSmoke
+
+            $Bridge = Join-Path $BuildDir 'bin\IpaSimDwarfsReader.dll'
+            $Smoke = Join-Path $BuildDir 'bin\DwarfsRuntimeRootStoreSmoke.exe'
+            $Fixture = Join-Path $env:RUNNER_TEMP 'fixture\runtime-root-illegal-name.dwarfs'
+            foreach ($Required in @($Bridge, $Smoke, $Fixture)) {
+              if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {
+                throw "required reader-smoke input is missing: $Required"
+              }
+            }
+
+            Invoke-Native $Smoke $Bridge $Fixture
+          }
+          finally {
+            Stop-Transcript | Out-Null
+          }
+
+      - name: Publish DwarFS reader result
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          DIAGNOSTIC_LOG: ${{ runner.temp }}/dwarfs-reader-smoke.log
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ipasim-dwarfs-reader-diagnostic -->';
+            const passed = process.env.SMOKE_OUTCOME === 'success';
+            const path = process.env.DIAGNOSTIC_LOG;
+            const text = fs.existsSync(path) ? fs.readFileSync(path, 'utf8') : 'reader smoke log was not produced';
+            const lines = text.split(/\r?\n/);
+            const useful = lines.filter(line => /error|fatal|failed|cannot|missing|mismatch|dwarfs|vcpkg|cmake|smoke/i.test(line)).slice(-100);
+            const tail = lines.slice(-100);
+            const excerpt = (useful.length ? useful : tail).join('\n').slice(-14000);
+            const status = passed ? '✅ Windows in-image reader smoke passed' : '❌ Windows in-image reader smoke failed';
+            const body = `${marker}\n## RuntimeRoot DwarFS reader diagnostic\n\n${status} on \`${context.sha}\`.\n\n${passed ? 'The bridge read the Darwin-only internal pathname directly from the DwarFS image without mounting or extracting it.' : '### Next actionable output\n```text\n' + excerpt + '\n```\n\nThe workflow still fails normally after publishing this diagnostic.'}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else if (!passed) {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Fail after publishing diagnostic
+        if: steps.smoke.outcome == 'failure'
+        shell: pwsh
+        run: exit 1
