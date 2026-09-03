@@ -8,7 +8,6 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
-#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -97,12 +96,13 @@ public:
         Error = "DwarFS reader bridge is missing required ABI exports";
         return nullptr;
       }
-      if (Abi() != IPASIM_DWARFS_READER_ABI_VERSION) {
-        const uint32_t Actual = Abi();
+
+      const uint32_t ActualAbi = Abi();
+      if (ActualAbi != IPASIM_DWARFS_READER_ABI_VERSION) {
         FreeLibrary(Module);
         Error = "DwarFS reader bridge ABI mismatch: expected " +
                 std::to_string(IPASIM_DWARFS_READER_ABI_VERSION) + ", got " +
-                std::to_string(Actual);
+                std::to_string(ActualAbi);
         return nullptr;
       }
 
@@ -123,7 +123,7 @@ public:
         ImageIdentity = ImagePath;
 
       return std::unique_ptr<DwarfsRuntimeRootStore>(new DwarfsRuntimeRootStore(
-          Module, Handle, Open, Read, Free, Close, std::move(ImageIdentity)));
+          Module, Handle, Read, Free, Close, std::move(ImageIdentity)));
     } catch (const std::exception &Ex) {
       Error = std::string("cannot initialize DwarFS RuntimeRoot store: ") +
               Ex.what();
@@ -184,7 +184,8 @@ public:
     }
 
     try {
-      Data.assign(RawData, RawData + RawSize);
+      if (RawSize != 0)
+        Data.assign(RawData, RawData + RawSize);
     } catch (const std::exception &Ex) {
       if (RawData != nullptr)
         Free(RawData);
@@ -199,17 +200,15 @@ public:
 
 private:
   DwarfsRuntimeRootStore(HMODULE Module, IpaSimDwarfsReaderHandle Handle,
-                         IpaSimDwarfsReaderOpenFn Open,
                          IpaSimDwarfsReaderReadFn Read,
                          IpaSimDwarfsReaderFreeFn Free,
                          IpaSimDwarfsReaderCloseFn Close,
                          std::string ImageIdentity)
-      : Module(Module), Handle(Handle), Open(Open), Read(Read), Free(Free),
-        Close(Close), ImageIdentity(std::move(ImageIdentity)) {}
+      : Module(Module), Handle(Handle), Read(Read), Free(Free), Close(Close),
+        ImageIdentity(std::move(ImageIdentity)) {}
 
   HMODULE Module = nullptr;
   IpaSimDwarfsReaderHandle Handle = nullptr;
-  IpaSimDwarfsReaderOpenFn Open = nullptr;
   IpaSimDwarfsReaderReadFn Read = nullptr;
   IpaSimDwarfsReaderFreeFn Free = nullptr;
   IpaSimDwarfsReaderCloseFn Close = nullptr;
