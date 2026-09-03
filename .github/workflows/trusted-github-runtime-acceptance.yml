@@ -1,0 +1,459 @@
+name: Trusted GitHub-hosted RuntimeRoot acceptance
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/trusted-github-runtime-acceptance.yml'
+      - '.github/workflows/public-ipa-acceptance.yml'
+      - 'tests/public-ipas/**'
+      - 'tester/windows/latest/**'
+
+concurrency:
+  group: trusted-github-runtime-acceptance
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  AWS_IPA_COMMIT: 58e48234db510bd4fbf643643e8808c5d6a13845
+  AWS_IPA_BLOB: 06a33a39286ffd7c9d300c5924750b6f97c4e346
+  AWS_IPA_SIZE: '2138167'
+  RUNTIME_XCODE_PATH: /Applications/Xcode_16.4.app
+  RUNTIME_IOS_VERSION: '18.5'
+  RUNTIME_IOS_BUILD: 22F77
+  RUNTIME_CACHE_KEY: ipasim-encrypted-github-runtime-macos15-xcode16.4-ios18.5-22F77-v1
+
+jobs:
+  runtime-source:
+    name: Cache pinned GitHub-hosted iOS RuntimeRoot
+    runs-on: macos-15
+    timeout-minutes: 60
+    outputs:
+      archive_sha256: ${{ steps.archive.outputs.archive_sha256 }}
+      runtime_bundle: ${{ steps.discovery.outputs.runtime_bundle }}
+      iphoneos_sdk_version: ${{ steps.discovery.outputs.iphoneos_sdk_version }}
+      iphonesimulator_sdk_version: ${{ steps.discovery.outputs.iphonesimulator_sdk_version }}
+
+    steps:
+      - name: Discover pinned runtime and SDKs
+        id: discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/github-runtime-source.log"
+          : > "$log"
+          exec > >(tee -a "$log") 2>&1
+
+          if [[ ! -d "$RUNTIME_XCODE_PATH" ]]; then
+            echo "ERROR: pinned Xcode is not installed on this GitHub runner: $RUNTIME_XCODE_PATH"
+            exit 1
+          fi
+
+          sudo xcode-select -s "$RUNTIME_XCODE_PATH/Contents/Developer"
+          echo 'Selected Xcode:'
+          xcodebuild -version
+
+          iphoneos_path="$(xcrun --sdk iphoneos --show-sdk-path)"
+          iphoneos_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          iphonesimulator_path="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          iphonesimulator_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+
+          echo "iphoneos SDK: $iphoneos_version"
+          echo "iphoneos path: $iphoneos_path"
+          echo "iphonesimulator SDK: $iphonesimulator_version"
+          echo "iphonesimulator path: $iphonesimulator_path"
+
+          if [[ "$iphoneos_version" != "$RUNTIME_IOS_VERSION" ]]; then
+            echo "ERROR: pinned iphoneos SDK changed: expected $RUNTIME_IOS_VERSION, got $iphoneos_version"
+            exit 1
+          fi
+          if [[ "$iphonesimulator_version" != "$RUNTIME_IOS_VERSION" ]]; then
+            echo "ERROR: pinned iphonesimulator SDK changed: expected $RUNTIME_IOS_VERSION, got $iphonesimulator_version"
+            exit 1
+          fi
+
+          runtime_json="$RUNNER_TEMP/simctl-runtimes.json"
+          xcrun simctl list runtimes --json > "$runtime_json"
+
+          runtime_bundle="$(python3 - "$runtime_json" "$RUNTIME_IOS_BUILD" <<'PY'
+          import json
+          import sys
+
+          path, target_build = sys.argv[1], sys.argv[2]
+          with open(path, 'r', encoding='utf-8') as handle:
+              data = json.load(handle)
+
+          for runtime in data.get('runtimes', []):
+              if runtime.get('buildversion') != target_build:
+                  continue
+              if runtime.get('isAvailable') is False:
+                  continue
+              bundle = runtime.get('bundlePath') or runtime.get('dataPath')
+              if bundle:
+                  print(bundle)
+                  sys.exit(0)
+
+          print(f'iOS simulator runtime build {target_build} was not found in simctl JSON.', file=sys.stderr)
+          sys.exit(1)
+          PY
+          )"
+
+          if [[ ! -d "$runtime_bundle" ]]; then
+            echo "ERROR: simctl returned a runtime bundle that is not a directory: $runtime_bundle"
+            exit 1
+          fi
+
+          runtime_root="$runtime_bundle/Contents/Resources/RuntimeRoot"
+          if [[ ! -d "$runtime_root/System" || ! -d "$runtime_root/usr" ]]; then
+            echo "ERROR: GitHub-hosted simulator RuntimeRoot does not expose System and usr: $runtime_root"
+            exit 1
+          fi
+
+          plist="$runtime_bundle/Contents/Info.plist"
+          actual_build=''
+          if [[ -f "$plist" ]]; then
+            actual_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist" 2>/dev/null || true)"
+          fi
+          if [[ -n "$actual_build" && "$actual_build" != "$RUNTIME_IOS_BUILD" ]]; then
+            echo "ERROR: simulator bundle build changed: expected $RUNTIME_IOS_BUILD, got $actual_build"
+            exit 1
+          fi
+
+          seven_zip="$(command -v 7z || command -v 7zz || true)"
+          if [[ -z "$seven_zip" ]]; then
+            echo 'ERROR: 7-Zip is not available on this GitHub-hosted macOS runner.'
+            exit 1
+          fi
+
+          echo "Pinned iOS simulator runtime validated: $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)"
+          echo "Runtime bundle: $runtime_bundle"
+          echo "7-Zip: $seven_zip"
+
+          {
+            echo "runtime_bundle=$runtime_bundle"
+            echo "runtime_root=$runtime_root"
+            echo "seven_zip=$seven_zip"
+            echo "iphoneos_sdk_version=$iphoneos_version"
+            echo "iphonesimulator_sdk_version=$iphonesimulator_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify RuntimeRoot encryption secret
+        shell: bash
+        env:
+          RUNTIME_ARCHIVE_PASSWORD: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUNTIME_ARCHIVE_PASSWORD:-}" ]]; then
+            echo 'ERROR: repository secret IPASIM_RUNTIME_ARCHIVE_PASSWORD is not configured.' >&2
+            exit 1
+          fi
+          echo 'RuntimeRoot encryption secret is configured.'
+
+      - name: Restore encrypted GitHub-hosted RuntimeRoot cache
+        id: runtime_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ipasim-runtime-archive
+          key: ${{ env.RUNTIME_CACHE_KEY }}
+          enableCrossOsArchive: true
+
+      - name: Package GitHub-hosted RuntimeRoot on cache miss
+        if: steps.runtime_cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          RUNTIME_ROOT: ${{ steps.discovery.outputs.runtime_root }}
+          SEVEN_ZIP: ${{ steps.discovery.outputs.seven_zip }}
+          RUNTIME_ARCHIVE_PASSWORD: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          archive_dir="$RUNNER_TEMP/ipasim-runtime-archive"
+          archive="$archive_dir/RuntimeRoot.7z"
+          mkdir -p "$archive_dir"
+
+          runtime_parent="$(dirname "$RUNTIME_ROOT")"
+          runtime_leaf="$(basename "$RUNTIME_ROOT")"
+          echo "Creating encrypted RuntimeRoot archive from GitHub-hosted iOS $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)."
+          (
+            cd "$runtime_parent"
+            "$SEVEN_ZIP" a -t7z "$archive" "$runtime_leaf" -mhe=on -mx=1 "-p${RUNTIME_ARCHIVE_PASSWORD}"
+          )
+
+          if [[ ! -s "$archive" ]]; then
+            echo 'ERROR: RuntimeRoot.7z was not created.' >&2
+            exit 1
+          fi
+          echo 'Encrypted RuntimeRoot archive created:'
+          ls -lh "$archive"
+
+      - name: Verify encrypted RuntimeRoot archive
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/ipasim-runtime-archive/RuntimeRoot.7z"
+          if [[ ! -f "$archive" ]]; then
+            echo 'ERROR: encrypted RuntimeRoot cache/archive is missing RuntimeRoot.7z.' >&2
+            exit 1
+          fi
+
+          sha="$(shasum -a 256 "$archive" | awk '{print tolower($1)}')"
+          if [[ ! "$sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "ERROR: invalid encrypted RuntimeRoot SHA-256: $sha" >&2
+            exit 1
+          fi
+          echo "Encrypted RuntimeRoot SHA-256: $sha"
+          echo "archive_sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Save encrypted GitHub-hosted RuntimeRoot cache
+        if: steps.runtime_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ipasim-runtime-archive
+          key: ${{ env.RUNTIME_CACHE_KEY }}
+          enableCrossOsArchive: true
+
+      - name: Publish RuntimeRoot source summary
+        if: always()
+        shell: bash
+        env:
+          ARCHIVE_SHA: ${{ steps.archive.outputs.archive_sha256 }}
+          CACHE_HIT: ${{ steps.runtime_cache.outputs.cache-hit }}
+          RUNTIME_BUNDLE: ${{ steps.discovery.outputs.runtime_bundle }}
+          IPHONEOS_VERSION: ${{ steps.discovery.outputs.iphoneos_sdk_version }}
+          IPHONESIM_VERSION: ${{ steps.discovery.outputs.iphonesimulator_sdk_version }}
+        run: |
+          {
+            echo '## Trusted GitHub-hosted iOS RuntimeRoot source'
+            echo
+            echo "- Pinned Xcode: $RUNTIME_XCODE_PATH"
+            echo "- Pinned runtime: iOS $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)"
+            echo "- Runtime bundle: ${RUNTIME_BUNDLE:-<unavailable>}"
+            echo "- iphoneos SDK: ${IPHONEOS_VERSION:-<unavailable>}"
+            echo "- iphonesimulator SDK: ${IPHONESIM_VERSION:-<unavailable>}"
+            echo "- Encrypted cache key: $RUNTIME_CACHE_KEY"
+            echo "- Encrypted cache hit: ${CACHE_HIT:-n/a}"
+            echo "- Encrypted archive SHA-256: ${ARCHIVE_SHA:-n/a}"
+            echo
+            echo 'Only the encrypted RuntimeRoot archive is cached. SDK contents and plaintext RuntimeRoot files are not uploaded as artifacts.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload RuntimeRoot source diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trusted-github-runtime-source-log-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: ${{ runner.temp }}/github-runtime-source.log
+
+  trusted-runtime:
+    name: Run pinned AWS sample IPA with GitHub-hosted RuntimeRoot
+    needs: runtime-source
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      RUNTIME_ARCHIVE_PASSWORD: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_PASSWORD }}
+      EXPECTED_RUNTIME_SHA256: ${{ needs.runtime-source.outputs.archive_sha256 }}
+
+    steps:
+      - name: Check out trusted master
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Verify trusted runtime source contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:RUNTIME_ARCHIVE_PASSWORD) {
+            throw 'Repository secret IPASIM_RUNTIME_ARCHIVE_PASSWORD is not configured.'
+          }
+          $expected = $env:EXPECTED_RUNTIME_SHA256.Trim().ToLowerInvariant()
+          if ($expected -notmatch '^[0-9a-f]{64}$') {
+            throw "GitHub-hosted runtime source did not provide a valid archive SHA256: '$expected'."
+          }
+          Write-Host "Runtime cache key: $env:RUNTIME_CACHE_KEY"
+          Write-Host "Expected encrypted RuntimeRoot SHA256: $expected"
+
+      - name: Verify published tester and extract it
+        id: tester
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $build = Join-Path $env:GITHUB_WORKSPACE 'tester\windows\latest\BUILD.txt'
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'tester\windows\latest\ipasim-ipa-tester.zip'
+          foreach ($path in @($build, $zip)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Published tester input is missing: $path"
+            }
+          }
+          $line = Get-Content -LiteralPath $build |
+            Where-Object { $_ -like 'zip_sha256=*' } |
+            Select-Object -First 1
+          if (-not $line) { throw 'Published BUILD.txt does not contain zip_sha256.' }
+          $expected = ($line -split '=', 2)[1].Trim().ToLowerInvariant()
+          if ($expected -notmatch '^[0-9a-f]{64}$') { throw 'Published tester zip_sha256 is invalid.' }
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "Published tester SHA256 mismatch: expected $expected, got $actual."
+          }
+          $extract = Join-Path $env:RUNNER_TEMP 'trusted-public-ipa-tester'
+          if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
+          Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+          foreach ($name in @('Test-Ipa.cmd', 'Test-Ipa.ps1', 'IpaProbe.exe', 'Arm64Smoke.exe')) {
+            $path = Join-Path $extract $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Published tester is incomplete: $path"
+            }
+          }
+          "sha256=$expected" >> $env:GITHUB_OUTPUT
+          Write-Host "Published tester SHA256 verified: $expected"
+
+      - name: Download and verify pinned AWS IPA
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ipa = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.ipa'
+          $url = "https://raw.githubusercontent.com/aws-samples/aws-device-farm-sample-app-for-ios/$env:AWS_IPA_COMMIT/prebuilt/prebuiltSampleApp.ipa"
+          & curl.exe -L --fail --silent --show-error $url -o $ipa
+          if ($LASTEXITCODE -ne 0) {
+            throw "AWS sample IPA download failed with curl exit code $LASTEXITCODE."
+          }
+          if (-not (Test-Path -LiteralPath $ipa -PathType Leaf)) { throw 'AWS sample IPA was not downloaded.' }
+          $size = (Get-Item -LiteralPath $ipa).Length
+          if ($size -ne [int64]$env:AWS_IPA_SIZE) {
+            throw "AWS sample IPA size mismatch: expected $env:AWS_IPA_SIZE, got $size"
+          }
+          $actualBlob = (& git hash-object -- $ipa).Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0) { throw 'git hash-object failed for the AWS sample IPA.' }
+          if ($actualBlob -ne $env:AWS_IPA_BLOB) {
+            throw "AWS sample IPA Git blob mismatch: expected $env:AWS_IPA_BLOB, got $actualBlob"
+          }
+          Write-Host "Pinned AWS IPA verified at upstream blob $actualBlob."
+
+      - name: Restore encrypted GitHub-hosted RuntimeRoot cache
+        id: runtime_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}\ipasim-runtime-archive
+          key: ${{ env.RUNTIME_CACHE_KEY }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Verify encrypted RuntimeRoot archive SHA256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive\RuntimeRoot.7z'
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw 'RuntimeRoot.7z is missing after the cross-OS cache restore.'
+          }
+          $expected = $env:EXPECTED_RUNTIME_SHA256.Trim().ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "Encrypted RuntimeRoot SHA256 mismatch after cross-OS restore: expected $expected, got $actual."
+          }
+          Write-Host "Encrypted RuntimeRoot SHA256 verified: $actual"
+
+      - name: Extract ephemeral RuntimeRoot
+        id: runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive\RuntimeRoot.7z'
+          $extract = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-expanded'
+          if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
+          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          if (-not (Test-Path -LiteralPath $sevenZip -PathType Leaf)) {
+            throw '7-Zip is not available on this GitHub-hosted Windows runner.'
+          }
+          & $sevenZip x $archive "-o$extract" "-p$env:RUNTIME_ARCHIVE_PASSWORD" -y | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            throw "RuntimeRoot extraction failed with 7-Zip exit code $LASTEXITCODE."
+          }
+          $runtimeRoot = $null
+          foreach ($candidate in @((Join-Path $extract 'RuntimeRoot'), $extract)) {
+            if ((Test-Path -LiteralPath (Join-Path $candidate 'System') -PathType Container) -and
+                (Test-Path -LiteralPath (Join-Path $candidate 'usr') -PathType Container)) {
+              $runtimeRoot = (Resolve-Path -LiteralPath $candidate).Path
+              break
+            }
+          }
+          if (-not $runtimeRoot) {
+            throw 'Extracted RuntimeRoot does not expose System and usr at its top level.'
+          }
+          "runtime_root=$runtimeRoot" >> $env:GITHUB_OUTPUT
+          Write-Host 'RuntimeRoot extracted into ephemeral runner storage and validated.'
+
+      - name: Run exact Test-Ipa.cmd against pinned AWS IPA
+        id: acceptance
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RUNTIME_ROOT: ${{ steps.runtime.outputs.runtime_root }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tester = Join-Path $env:RUNNER_TEMP 'trusted-public-ipa-tester'
+          $testCmd = Join-Path $tester 'Test-Ipa.cmd'
+          $ipa = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.ipa'
+          $log = Join-Path $env:RUNNER_TEMP 'trusted-public-ipa-acceptance.log'
+          $wrapper = Join-Path $env:RUNNER_TEMP 'run-trusted-public-ipa.cmd'
+          @"
+          @echo off
+          call "$testCmd" "$ipa" "$env:RUNTIME_ROOT"
+          exit /b %ERRORLEVEL%
+          "@ | Set-Content -LiteralPath $wrapper -Encoding ascii
+          Write-Host 'Running the exact published tester path:'
+          Write-Host '  Test-Ipa.cmd "<AWSDeviceFarmSample.ipa>" "<RuntimeRoot>"'
+          Write-Host ''
+          'continue' | & cmd.exe /d /c $wrapper 2>&1 | Tee-Object -FilePath $log
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Publish trusted acceptance summary
+        if: always()
+        shell: pwsh
+        env:
+          TEST_EXIT: ${{ steps.acceptance.outputs.exit_code }}
+          RUNTIME_CACHE_HIT: ${{ steps.runtime_cache.outputs.cache-hit }}
+          RUNTIME_SHA: ${{ env.EXPECTED_RUNTIME_SHA256 }}
+          TESTER_SHA: ${{ steps.tester.outputs.sha256 }}
+          IPHONEOS_SDK: ${{ needs.runtime-source.outputs.iphoneos_sdk_version }}
+          IPHONESIM_SDK: ${{ needs.runtime-source.outputs.iphonesimulator_sdk_version }}
+        run: |
+          @(
+            '## Trusted public IPA full-runtime acceptance',
+            '',
+            '- Workload: pinned AWS Device Farm sample IPA',
+            "- Runtime source: GitHub-hosted iOS $env:RUNTIME_IOS_VERSION ($env:RUNTIME_IOS_BUILD)",
+            "- iphoneos SDK observed: $env:IPHONEOS_SDK",
+            "- iphonesimulator SDK observed: $env:IPHONESIM_SDK",
+            '- Exact test path: `Test-Ipa.cmd <IPA> <RuntimeRoot>`',
+            "- Test exit code: $env:TEST_EXIT",
+            "- Published tester SHA256: $env:TESTER_SHA",
+            "- Encrypted RuntimeRoot SHA256: $env:RUNTIME_SHA",
+            "- Cross-OS RuntimeRoot cache hit: $env:RUNTIME_CACHE_HIT",
+            '',
+            'Only the encrypted RuntimeRoot archive is cached. Plaintext exists only in runner.temp and is never uploaded as an artifact.'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload trusted acceptance console log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trusted-public-ipa-acceptance-log-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}\trusted-public-ipa-acceptance.log
+            ${{ github.workspace }}\tester\windows\latest\BUILD.txt
+
+      - name: Fail after trusted diagnostic publication
+        if: steps.acceptance.outcome == 'failure'
+        shell: pwsh
+        run: throw 'Trusted public IPA acceptance failed; see the workflow summary and uploaded console log.'
