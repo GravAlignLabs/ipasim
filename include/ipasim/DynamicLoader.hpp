@@ -46,6 +46,22 @@ public:
   LoadedLibrary *load(const std::string &Path);
   bool setRuntimeRoot(const std::string &Path);
 
+  // Install an already-validated immutable RuntimeRoot source. This is an
+  // explicit storage-provider boundary, not a fallback: callers decide which
+  // concrete RuntimeRootStore to construct before crossing into the loader.
+  bool setRuntimeRootStore(std::unique_ptr<RuntimeRootStore> Store) {
+#if defined(IPASIM_MODERN_CORE)
+    RuntimeStore = std::move(Store);
+    FailedLoads.clear();
+    ReportedFailedLoadRetries.clear();
+    ReportedRequiredDependencyPropagation = false;
+    return true;
+#else
+    (void)Store;
+    return false;
+#endif
+  }
+
   LoadedLibrary *loadOrdinal(LoadedDylib &Image, int Ordinal);
   uint64_t resolveSymbol(LoadedDylib &Image, int Ordinal,
                          const std::string &Name, bool WeakImport = false);
