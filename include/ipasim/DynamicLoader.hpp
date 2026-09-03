@@ -96,7 +96,8 @@ private:
   bool canSegmentsSlide(LIEF::MachO::Binary &Bin);
   BinaryPath resolvePath(const std::string &Path);
   LoadedLibrary *loadMachO(const std::string &Path,
-                           const std::vector<std::uint8_t> *Data = nullptr);
+                           const std::vector<std::uint8_t> *Data = nullptr,
+                           const std::string *Identity = nullptr);
   LoadedLibrary *loadPE(const std::string &Path);
   void handleMachOs(size_t HdrOffset, size_t HandlerOffset);
   void recordSharedMemory(uint64_t Address, uint64_t Size,
