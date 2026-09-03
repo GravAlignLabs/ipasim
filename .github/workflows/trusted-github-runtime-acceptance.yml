@@ -24,7 +24,7 @@ env:
   RUNTIME_XCODE_PATH: /Applications/Xcode_16.4.app
   RUNTIME_IOS_VERSION: '18.5'
   RUNTIME_IOS_BUILD: 22F77
-  RUNTIME_CACHE_KEY: ipasim-encrypted-github-runtime-macos15-xcode16.4-ios18.5-22F77-v1
+  RUNTIME_CACHE_KEY: ipasim-encrypted-github-runtime-macos15-xcode16.4-ios18.5-22F77-v2
 
 jobs:
   runtime-source:
@@ -190,23 +190,31 @@ jobs:
           RUNTIME_ARCHIVE_PASSWORD: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_PASSWORD }}
         run: |
           set -euo pipefail
+          log="$RUNNER_TEMP/github-runtime-source.log"
+          exec > >(tee -a "$log") 2>&1
+
           archive_dir="$RUNNER_TEMP/ipasim-runtime-archive"
           archive="$archive_dir/RuntimeRoot.7z"
           mkdir -p "$archive_dir"
+          rm -f "$archive"
 
           runtime_parent="$(dirname "$RUNTIME_ROOT")"
           runtime_leaf="$(basename "$RUNTIME_ROOT")"
           echo "Creating encrypted RuntimeRoot archive from GitHub-hosted iOS $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)."
+          echo 'Packaging the complete RuntimeRoot with elevated read access; no runtime paths are excluded.'
           (
             cd "$runtime_parent"
-            "$SEVEN_ZIP" a -t7z "$archive" "$runtime_leaf" -mhe=on -mx=1 "-p${RUNTIME_ARCHIVE_PASSWORD}"
+            sudo "$SEVEN_ZIP" a -t7z "$archive" "$runtime_leaf" -mhe=on -mx=1 "-p${RUNTIME_ARCHIVE_PASSWORD}"
           )
 
           if [[ ! -s "$archive" ]]; then
             echo 'ERROR: RuntimeRoot.7z was not created.' >&2
             exit 1
           fi
-          echo 'Encrypted RuntimeRoot archive created:'
+
+          sudo chown "$(id -u):$(id -g)" "$archive"
+          chmod 600 "$archive"
+          echo 'Encrypted RuntimeRoot archive created from the complete RuntimeRoot:'
           ls -lh "$archive"
 
       - name: Verify encrypted RuntimeRoot archive
@@ -270,7 +278,8 @@ jobs:
             echo "- Encrypted archive SHA-256: ${ARCHIVE_SHA:-n/a}"
             echo
             echo 'Runtime OS build identity comes from simctl buildversion; CFBundleVersion is package metadata only.'
-            echo 'Only the encrypted RuntimeRoot archive is cached. SDK contents and plaintext RuntimeRoot files are not uploaded as artifacts.'
+            echo 'Only the encrypted RuntimeRoot archive is cached. The complete RuntimeRoot is packaged with elevated read access; no runtime paths are excluded.'
+            echo 'SDK contents and plaintext RuntimeRoot files are not uploaded as artifacts.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload RuntimeRoot source diagnostic log
