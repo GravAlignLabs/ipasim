@@ -44,6 +44,7 @@ env:
   DWARFS_UNIVERSAL_SHA256: baa03026e7d2c195fdb78bf261cd7d20f620b20685f8a3e26162ba9d652b0d78
   VCPKG_BASELINE: 62159a45e18f3a9ac0548628dcaf74fcb60c6ff9
   RUNTIME_DWARFS_CACHE_KEY: ipasim-github-runtime-macos15-xcode16.4-ios18.5-22F77-dwarfs0157-v1
+  RUNTIME_DIRECTORY_CACHE_KEY: ipasim-github-runtime-macos15-xcode16.4-ios18.5-22F77-zstd-v2
 
 jobs:
   build-fixture:
@@ -280,13 +281,13 @@ jobs:
         run: exit 1
 
   windows-acceptance:
-    name: Run pinned AWS IPA directly from DwarFS RuntimeRoot
+    name: Compare DwarFS and directory RuntimeRoot loader boundaries
     needs:
       - reader-smoke
       - runtime-image
       - resolve-core-tester
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Check out ipaSim
         uses: actions/checkout@v4
@@ -317,7 +318,17 @@ jobs:
           key: ${{ env.RUNTIME_DWARFS_CACHE_KEY }}
           enableCrossOsArchive: true
 
-      - name: Run exact-head probe against full DwarFS RuntimeRoot
+      - name: Restore trusted directory RuntimeRoot baseline cache
+        id: directory_runtime_cache_windows
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ipasim-runtime-archive
+          key: ${{ env.RUNTIME_DIRECTORY_CACHE_KEY }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Compare exact-head DwarFS and directory RuntimeRoot loader boundaries
         id: acceptance
         if: always()
         continue-on-error: true
@@ -329,20 +340,23 @@ jobs:
             -ExpectedImageSize '${{ needs.runtime-image.outputs.image_size }}' `
             -TesterRoot "$env:GITHUB_WORKSPACE\tester" `
             -ReaderBridge "$env:GITHUB_WORKSPACE\reader-bridge\IpaSimDwarfsReader.dll" `
+            -DirectoryArchive "$env:GITHUB_WORKSPACE\ipasim-runtime-archive\RuntimeRoot.tar.zst" `
             -Log "$env:RUNNER_TEMP\runtime-dwarfs-acceptance.log"
 
-      - name: Publish full DwarFS acceptance result
+      - name: Publish full RuntimeRoot parity result
         if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         env:
-          DIAGNOSTIC_STAGE: Full DwarFS RuntimeRoot Windows acceptance
+          DIAGNOSTIC_STAGE: Full RuntimeRoot DwarFS vs directory parity
           DIAGNOSTIC_OUTCOME: ${{ steps.acceptance.outcome }}
           DIAGNOSTIC_REPORT_SUCCESS: 'true'
           DIAGNOSTIC_LOG: ${{ runner.temp }}/runtime-dwarfs-acceptance.log
           DIAGNOSTIC_SUCCESS_BODY: >-
-            The complete pinned iOS 18.5 (22F77) RuntimeRoot remained one DwarFS image.
-            The exact-head Windows probe read required RuntimeRoot bytes directly from that image;
-            no RuntimeRoot mount, extraction, path exclusion, or path rewriting was used.
+            The complete pinned iOS 18.5 (22F77) RuntimeRoot remained one DwarFS image
+            for the image-backed probe, and the same exact-head Windows Core tester plus
+            pinned public AWS IPA reached the same loader result through the trusted
+            extracted-directory RuntimeRoot baseline. The DwarFS path used no RuntimeRoot
+            mount, extraction, path exclusion, or path rewriting.
         with:
           script: |
             const run = require(process.env.GITHUB_WORKSPACE + '/tools/ci/dwarfs-diagnostic.js');
@@ -353,17 +367,18 @@ jobs:
         shell: pwsh
         run: |
           @"
-          ## Windows DwarFS RuntimeRoot acceptance
+          ## Windows RuntimeRoot backend parity
 
           - Exact-head Core run: ${{ needs.resolve-core-tester.outputs.run_id }}
-          - RuntimeRoot cache hit: ${{ steps.runtime_cache_windows.outputs.cache-hit }}
-          - RuntimeRoot SHA-256: ${{ needs.runtime-image.outputs.image_sha256 }}
-          - RuntimeRoot bytes: ${{ needs.runtime-image.outputs.image_size }}
-          - RuntimeRoot extraction: none
-          - Probe outcome: ${{ steps.acceptance.outcome }}
+          - DwarFS RuntimeRoot cache hit: ${{ steps.runtime_cache_windows.outputs.cache-hit }}
+          - Directory baseline cache hit: ${{ steps.directory_runtime_cache_windows.outputs.cache-hit }}
+          - DwarFS RuntimeRoot SHA-256: ${{ needs.runtime-image.outputs.image_sha256 }}
+          - DwarFS RuntimeRoot bytes: ${{ needs.runtime-image.outputs.image_size }}
+          - DwarFS RuntimeRoot extraction: none
+          - Parity outcome: ${{ steps.acceptance.outcome }}
           "@ | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
 
-      - name: Fail after publishing DwarFS acceptance diagnostic
+      - name: Fail after publishing RuntimeRoot parity diagnostic
         if: steps.acceptance.outcome == 'failure'
         shell: pwsh
         run: exit 1
