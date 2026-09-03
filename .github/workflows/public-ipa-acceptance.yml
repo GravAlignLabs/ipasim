@@ -212,10 +212,16 @@ jobs:
         shell: pwsh
         run: |
           $summary = Join-Path $env:RUNNER_TEMP 'public-ipa-summary.txt'
+          $summaryText = if (Test-Path -LiteralPath $summary) {
+            Get-Content -LiteralPath $summary -Raw
+          }
+          else {
+            'summary unavailable'
+          }
           @(
             '## Public third-party IPA acceptance',
             '',
-            (if (Test-Path -LiteralPath $summary) { Get-Content -LiteralPath $summary -Raw } else { 'summary unavailable' })
+            $summaryText
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Upload public IPA acceptance log
