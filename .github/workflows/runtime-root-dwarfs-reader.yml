@@ -76,7 +76,7 @@ jobs:
             const path = process.env.DIAGNOSTIC_LOG;
             const text = fs.existsSync(path) ? fs.readFileSync(path, 'utf8') : 'fixture log was not produced';
             const lines = text.split(/\r?\n/);
-            const useful = lines.filter(line => /error|fatal|failed|sha256|dwarfs|mkdwarfs/i.test(line)).slice(-80);
+            const useful = lines.filter(line => /error|fatal|failed|exception|sha256|dwarfs|mkdwarfs/i.test(line)).slice(-80);
             const tail = lines.slice(-80);
             const body = `${marker}\n## RuntimeRoot DwarFS reader diagnostic\n\n**Fixture generation failed** on \`${context.sha}\`.\n\n### Useful output\n\`\`\`text\n${(useful.length ? useful : tail).join('\n').slice(-12000)}\n\`\`\`\n\nThe workflow still fails normally after publishing this diagnostic.`;
             const { owner, repo } = context.repo;
@@ -119,7 +119,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}\vcpkg-bincache
-          key: dwarfs-v0.15.7-vcpkg-62159a45-x64-windows-static-v1
+          key: dwarfs-v0.15.7-source-vcpkg-62159a45-x64-windows-static-v1
 
       - name: Build and run DwarFS reader smoke
         id: smoke
@@ -140,31 +140,30 @@ jobs:
             }
 
             $DwarfsVersion = '0.15.7'
-            $DwarfsSha = '42a22273df41026bf6eb6fd6001797213388430cae5a4b1b08dfaebacf5b1d61'
-            $Package = Join-Path $env:RUNNER_TEMP "dwarfs-$DwarfsVersion-Windows-AMD64.7z"
-            $PackageDir = Join-Path $env:RUNNER_TEMP 'dwarfs-package'
-
-            Invoke-WebRequest -Uri "https://github.com/mhx/dwarfs/releases/download/v$DwarfsVersion/dwarfs-$DwarfsVersion-Windows-AMD64.7z" -OutFile $Package
-            $ActualSha = (Get-FileHash -Algorithm SHA256 $Package).Hash.ToLowerInvariant()
-            if ($ActualSha -ne $DwarfsSha) {
-              throw "DwarFS package SHA-256 mismatch: expected $DwarfsSha got $ActualSha"
-            }
-
-            New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
-            Invoke-Native 7z x $Package "-o$PackageDir" -y
-
-            Write-Host 'DwarFS package top-level contents:'
-            Get-ChildItem -Path $PackageDir -Depth 2 | Select-Object FullName, Length | Format-Table -AutoSize
-
-            $Config = Get-ChildItem -Path $PackageDir -Filter dwarfs-config.cmake -Recurse -File | Select-Object -First 1
-            if ($null -eq $Config) {
-              throw 'Official DwarFS Windows package does not contain dwarfs-config.cmake; cannot consume it as a reader SDK.'
-            }
-            $DwarfsPrefix = $Config.Directory.Parent.Parent.Parent.FullName
-            Write-Host "Using DwarFS CMake package: $($Config.FullName)"
-            Write-Host "DwarFS prefix: $DwarfsPrefix"
-
+            $DwarfsSourceSha = '363c7fdbf7bad490a6b8d63186da8643c1aeb17ca54cce1193d7b0ebc57bc6bd'
+            $SourceArchive = Join-Path $env:RUNNER_TEMP "dwarfs-$DwarfsVersion.tar.xz"
+            $SourceRoot = Join-Path $env:RUNNER_TEMP 'dwarfs-source'
+            $DwarfsBuild = Join-Path $env:RUNNER_TEMP 'dwarfs-build'
+            $DwarfsPrefix = Join-Path $env:RUNNER_TEMP 'dwarfs-prefix'
             $VcpkgRoot = Join-Path $env:RUNNER_TEMP 'vcpkg-dwarfs'
+            $VcpkgInstalled = Join-Path $env:RUNNER_TEMP 'vcpkg-install-dwarfs'
+
+            Invoke-WebRequest -Uri "https://github.com/mhx/dwarfs/releases/download/v$DwarfsVersion/dwarfs-$DwarfsVersion.tar.xz" -OutFile $SourceArchive
+            $ActualSourceSha = (Get-FileHash -Algorithm SHA256 $SourceArchive).Hash.ToLowerInvariant()
+            if ($ActualSourceSha -ne $DwarfsSourceSha) {
+              throw "DwarFS source SHA-256 mismatch: expected $DwarfsSourceSha got $ActualSourceSha"
+            }
+
+            New-Item -ItemType Directory -Force -Path $SourceRoot | Out-Null
+            Invoke-Native tar -xf $SourceArchive -C $SourceRoot
+            $DwarfsSource = Get-ChildItem -Path $SourceRoot -Filter CMakeLists.txt -Recurse -File |
+              Where-Object { Test-Path (Join-Path $_.Directory.FullName 'vcpkg.json') } |
+              Select-Object -First 1 -ExpandProperty DirectoryName
+            if ([string]::IsNullOrWhiteSpace($DwarfsSource)) {
+              throw 'Pinned DwarFS source archive did not contain the expected CMake/vcpkg project root.'
+            }
+            Write-Host "DwarFS source: $DwarfsSource"
+
             New-Item -ItemType Directory -Force -Path $VcpkgRoot | Out-Null
             Invoke-Native git -C $VcpkgRoot init
             Invoke-Native git -C $VcpkgRoot remote add origin https://github.com/microsoft/vcpkg.git
@@ -174,38 +173,55 @@ jobs:
 
             $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $env:RUNNER_TEMP 'vcpkg-bincache'
             New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
-            $Vcpkg = Join-Path $VcpkgRoot 'vcpkg.exe'
-            $Packages = @(
-              'fmt',
-              'boost-chrono',
-              'boost-filesystem',
-              'boost-program-options',
-              'boost-process',
-              'libressl',
-              'libarchive',
-              'xxhash',
-              'zstd',
-              'lz4',
-              'liblzma',
-              'brotli',
-              'libflac',
-              'nlohmann-json',
-              'pkgconf'
+            $Toolchain = Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake'
+
+            $DwarfsConfigure = @(
+              '-S', $DwarfsSource,
+              '-B', $DwarfsBuild,
+              '-G', 'Ninja',
+              '-DCMAKE_BUILD_TYPE=Release',
+              "-DCMAKE_INSTALL_PREFIX=$DwarfsPrefix",
+              "-DCMAKE_TOOLCHAIN_FILE=$Toolchain",
+              '-DVCPKG_TARGET_TRIPLET=x64-windows-static',
+              "-DVCPKG_INSTALLED_DIR=$VcpkgInstalled",
+              '-DWITH_LIBDWARFS=ON',
+              '-DWITH_TOOLS=OFF',
+              '-DWITH_FUSE_DRIVER=OFF',
+              '-DWITH_DESKTOP_INTEGRATION=OFF',
+              '-DWITH_TESTS=OFF',
+              '-DWITH_BENCHMARKS=OFF',
+              '-DWITH_ALL_BENCHMARKS=OFF',
+              '-DWITH_FUZZ=OFF',
+              '-DWITH_MAN_OPTION=OFF',
+              '-DWITH_UNIVERSAL_BINARY=OFF',
+              '-DWITH_FUSE_EXTRACT_BINARY=OFF',
+              '-DWITH_PXATTR=OFF',
+              '-DWITH_EXAMPLE=OFF',
+              '-DWITH_DEV_TOOLS=OFF',
+              '-DENABLE_STACKTRACE=OFF'
             )
-            Invoke-Native $Vcpkg install @Packages --triplet x64-windows-static --clean-after-build
+            Invoke-Native cmake @DwarfsConfigure
+            Invoke-Native cmake --build $DwarfsBuild --target install
+
+            $Config = Get-ChildItem -Path $DwarfsPrefix -Filter dwarfs-config.cmake -Recurse -File | Select-Object -First 1
+            if ($null -eq $Config) {
+              throw 'Pinned DwarFS source build completed without installing dwarfs-config.cmake.'
+            }
+            Write-Host "Installed DwarFS CMake package: $($Config.FullName)"
 
             $BuildDir = Join-Path $env:RUNNER_TEMP 'ipasim-dwarfs-reader-build'
-            $Toolchain = Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake'
-            $ConfigureArgs = @(
+            $ProofConfigure = @(
               '-S', "$env:GITHUB_WORKSPACE\src\IpaSimulator\dwarfs-reader",
               '-B', $BuildDir,
               '-G', 'Ninja',
               '-DCMAKE_BUILD_TYPE=Release',
               "-DCMAKE_TOOLCHAIN_FILE=$Toolchain",
               '-DVCPKG_TARGET_TRIPLET=x64-windows-static',
+              "-DVCPKG_INSTALLED_DIR=$VcpkgInstalled",
+              '-DVCPKG_MANIFEST_MODE=OFF',
               "-DCMAKE_PREFIX_PATH=$DwarfsPrefix"
             )
-            Invoke-Native cmake @ConfigureArgs
+            Invoke-Native cmake @ProofConfigure
             Invoke-Native cmake --build $BuildDir --target DwarfsRuntimeRootStoreSmoke
 
             $Bridge = Join-Path $BuildDir 'bin\IpaSimDwarfsReader.dll'
@@ -237,9 +253,9 @@ jobs:
             const path = process.env.DIAGNOSTIC_LOG;
             const text = fs.existsSync(path) ? fs.readFileSync(path, 'utf8') : 'reader smoke log was not produced';
             const lines = text.split(/\r?\n/);
-            const useful = lines.filter(line => /error|fatal|failed|cannot|missing|mismatch|dwarfs|vcpkg|cmake|smoke/i.test(line)).slice(-100);
-            const tail = lines.slice(-100);
-            const excerpt = (useful.length ? useful : tail).join('\n').slice(-14000);
+            const useful = lines.filter(line => /error|fatal|failed|exception|cannot|missing|mismatch|does not|not found|required|dwarfs|vcpkg|cmake|smoke/i.test(line)).slice(-120);
+            const tail = lines.slice(-120);
+            const excerpt = (useful.length ? useful : tail).join('\n').slice(-16000);
             const status = passed ? '✅ Windows in-image reader smoke passed' : '❌ Windows in-image reader smoke failed';
             const body = `${marker}\n## RuntimeRoot DwarFS reader diagnostic\n\n${status} on \`${context.sha}\`.\n\n${passed ? 'The bridge read the Darwin-only internal pathname directly from the DwarFS image without mounting or extracting it.' : '### Next actionable output\n```text\n' + excerpt + '\n```\n\nThe workflow still fails normally after publishing this diagnostic.'}`;
             const { owner, repo } = context.repo;
