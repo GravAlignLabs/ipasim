@@ -153,8 +153,15 @@ LoadedLibrary *DynamicLoader::load(const string &Path) {
 #endif
 
 #if defined(IPASIM_MODERN_CORE)
-  BinaryPath BP(IsRuntimeImage ? BinaryPath{Path, /* Relative */ false}
-                               : resolvePath(Path));
+  const string RuntimeIdentity =
+      IsRuntimeImage ? RuntimeStore->identity(Path) : string();
+  if (IsRuntimeImage && RuntimeIdentity.empty()) {
+    Log.error() << "cannot identify RuntimeRoot dependency " << Path << Log.end();
+    return nullptr;
+  }
+  BinaryPath BP(IsRuntimeImage
+                    ? BinaryPath{RuntimeIdentity, /* Relative */ false}
+                    : resolvePath(Path));
 #else
   BinaryPath BP(resolvePath(Path));
 #endif
@@ -218,7 +225,7 @@ LoadedLibrary *DynamicLoader::load(const string &Path) {
       Log.error() << "invalid RuntimeRoot Mach-O: " << Path << Log.end();
       return RememberFailure();
     }
-    L = loadMachO(BP.Path, &RuntimeData);
+    L = loadMachO(Path, &RuntimeData, &BP.Path);
   } else
 #endif
   if (LIEF::MachO::is_macho(BP.Path))
@@ -397,7 +404,8 @@ BinaryPath DynamicLoader::resolvePath(const string &Path) {
 }
 
 LoadedLibrary *DynamicLoader::loadMachO(const string &Path,
-                                        const vector<uint8_t> *Data) {
+                                        const vector<uint8_t> *Data,
+                                        const string *Identity) {
   using namespace LIEF::MachO;
   if (sizeof(void *) != 8) {
     Log.error("ARM64 Mach-O loading requires a 64-bit Windows host");
@@ -426,9 +434,10 @@ LoadedLibrary *DynamicLoader::loadMachO(const string &Path,
     return nullptr;
   }
 
+  const string &Key = Identity ? *Identity : Path;
   LoadedDylib *LLP = LL.get();
   Binary &Bin = LL->Bin;
-  LLs[Path] = move(LL);
+  LLs[Key] = move(LL);
   LoadOrder.push_back(LLP);
 
   auto ForgetCurrent = [&]() -> LoadedLibrary * {
@@ -436,7 +445,7 @@ LoadedLibrary *DynamicLoader::loadMachO(const string &Path,
                     LoadOrder.end());
     if (MainExecutable == LLP)
       MainExecutable = nullptr;
-    LLs.erase(Path);
+    LLs.erase(Key);
     return nullptr;
   };
 
