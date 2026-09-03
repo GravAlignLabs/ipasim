@@ -12,6 +12,41 @@ mkdir -p "$(dirname "$image")" "$(dirname "$log")"
 : > "$log"
 exec > >(tee -a "$log") 2>&1
 
+emit_image_identity() {
+  local sha size
+  sha="$(shasum -a 256 "$image" | awk '{print tolower($1)}')"
+  size="$(stat -f '%z' "$image")"
+  [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "ERROR: invalid image SHA-256: $sha"; exit 1; }
+  [[ "$size" =~ ^[0-9]+$ ]] || { echo "ERROR: invalid image size: $size"; exit 1; }
+
+  echo "RuntimeRoot.dwarfs SHA-256: $sha"
+  echo "RuntimeRoot.dwarfs bytes: $size"
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    {
+      echo "image_sha256=$sha"
+      echo "image_size=$size"
+      echo "build_seconds=${build_seconds:-0}"
+      echo "cache_reused=${cache_reused:-false}"
+    } >> "$GITHUB_OUTPUT"
+  fi
+}
+
+build_seconds=0
+cache_reused=false
+
+# The Actions cache is immutable for this versioned key. A cache entry is only
+# written after the original image has passed dwarfsck --check-integrity. On a
+# cache hit, do not reinstall a writer/checker merely to consume an already
+# verified image: Homebrew can move independently of our pinned image format.
+# Recompute the image identity here; the Windows acceptance job independently
+# checks the restored image against these exact SHA-256/size outputs.
+if [[ -s "$image" ]]; then
+  cache_reused=true
+  echo "Using previously integrity-verified cached RuntimeRoot DwarFS image: $image"
+  emit_image_identity
+  exit 0
+fi
+
 [[ -d "$xcode" ]] || { echo "ERROR: pinned Xcode is not installed: $xcode"; exit 1; }
 sudo xcode-select -s "$xcode/Contents/Developer"
 xcodebuild -version
@@ -46,6 +81,10 @@ runtime_root="$runtime_bundle/Contents/Resources/RuntimeRoot"
 }
 echo "Pinned RuntimeRoot: $runtime_root"
 
+# Cache misses remain fail-closed on the exact writer version. If Homebrew no
+# longer serves the pinned version, fail explicitly rather than silently
+# rebuilding a differently-versioned image. A source-pinned writer can replace
+# this cache-miss bootstrap in a later packaging-hardening change.
 brew install dwarfs
 installed_version="$(brew list --versions dwarfs | awk 'NR == 1 {print $2}')"
 if [[ "$installed_version" != "$version" ]]; then
@@ -64,39 +103,18 @@ for tool in "$mkdwarfs" "$dwarfsck"; do
 done
 echo "Pinned DwarFS writer/checker: $installed_version ($prefix)"
 
-build_seconds=0
-cache_reused=false
-if [[ -s "$image" ]]; then
-  cache_reused=true
-  echo "Using cached complete RuntimeRoot DwarFS image: $image"
-else
-  rm -f "$image"
-  echo "Building one DwarFS image from the complete iOS $ios_version ($ios_build) RuntimeRoot."
-  echo 'No RuntimeRoot paths are excluded, renamed, sanitized, mounted, or pre-extracted.'
-  started="$(date +%s)"
-  sudo "$mkdwarfs" -i "$runtime_root" -o "$image" --log-level=info
-  finished="$(date +%s)"
-  build_seconds=$((finished - started))
-  sudo chown "$(id -u):$(id -g)" "$image"
-  chmod 600 "$image"
-  [[ -s "$image" ]] || { echo "ERROR: RuntimeRoot.dwarfs was not created: $image"; exit 1; }
-  echo "DwarFS image build seconds: $build_seconds"
-fi
+rm -f "$image"
+echo "Building one DwarFS image from the complete iOS $ios_version ($ios_build) RuntimeRoot."
+echo 'No RuntimeRoot paths are excluded, renamed, sanitized, mounted, or pre-extracted.'
+started="$(date +%s)"
+sudo "$mkdwarfs" -i "$runtime_root" -o "$image" --log-level=info
+finished="$(date +%s)"
+build_seconds=$((finished - started))
+sudo chown "$(id -u):$(id -g)" "$image"
+chmod 600 "$image"
+[[ -s "$image" ]] || { echo "ERROR: RuntimeRoot.dwarfs was not created: $image"; exit 1; }
+echo "DwarFS image build seconds: $build_seconds"
 
-echo 'Running DwarFS embedded block integrity validation.'
+echo 'Running DwarFS embedded block integrity validation before cache save.'
 "$dwarfsck" "$image" --check-integrity
-sha="$(shasum -a 256 "$image" | awk '{print tolower($1)}')"
-size="$(stat -f '%z' "$image")"
-[[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "ERROR: invalid image SHA-256: $sha"; exit 1; }
-[[ "$size" =~ ^[0-9]+$ ]] || { echo "ERROR: invalid image size: $size"; exit 1; }
-
-echo "RuntimeRoot.dwarfs SHA-256: $sha"
-echo "RuntimeRoot.dwarfs bytes: $size"
-if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-  {
-    echo "image_sha256=$sha"
-    echo "image_size=$size"
-    echo "build_seconds=$build_seconds"
-    echo "cache_reused=$cache_reused"
-  } >> "$GITHUB_OUTPUT"
-fi
+emit_image_identity
