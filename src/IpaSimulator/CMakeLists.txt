@@ -143,6 +143,12 @@ if (IPASIM_MODERN_CORE)
         DarwinPthreadWorkqueueSmoke.cpp)
     target_compile_options (DarwinPthreadWorkqueueSmoke PRIVATE -std=c++17)
 
+    add_executable (RuntimeRootStoreSmoke
+        RuntimeRootStoreSmoke.cpp)
+    target_compile_options (RuntimeRootStoreSmoke PRIVATE -std=c++17)
+    target_include_directories (RuntimeRootStoreSmoke PRIVATE
+        "${SOURCE_DIR}/include")
+
     # Run the semantic checks as part of the normal core dependency graph. A
     # compile/link/runtime failure therefore flows through the existing captured
     # core-build log and the single self-updating PR diagnostic comment before
@@ -204,6 +210,10 @@ if (IPASIM_MODERN_CORE)
         COMMAND "$<TARGET_FILE:DarwinPthreadWorkqueueSmoke>" "$<TARGET_FILE:IpaSimDarwinHost>"
         DEPENDS DarwinPthreadWorkqueueSmoke IpaSimDarwinHost
         USES_TERMINAL)
+    add_custom_target (RuntimeRootStoreCheck
+        COMMAND "$<TARGET_FILE:RuntimeRootStoreSmoke>"
+        DEPENDS RuntimeRootStoreSmoke
+        USES_TERMINAL)
 
     # A module-definition file is linker input, not an object/source input.
     # The modern core deliberately uses clang.exe as the compiler driver and
@@ -241,7 +251,8 @@ else ()
         DarwinPthreadQosCheck
         DarwinPthreadTsdCheck
         DarwinPthreadWorkloopCheck
-        DarwinPthreadWorkqueueCheck)
+        DarwinPthreadWorkqueueCheck
+        RuntimeRootStoreCheck)
 endif ()
 
 # The legacy path used a patched Clang plus the Coroutines TS. Current Clang
