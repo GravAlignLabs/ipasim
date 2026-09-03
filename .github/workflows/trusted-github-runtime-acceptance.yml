@@ -34,8 +34,13 @@ jobs:
     outputs:
       archive_sha256: ${{ steps.archive.outputs.archive_sha256 }}
       runtime_bundle: ${{ steps.discovery.outputs.runtime_bundle }}
+      runtime_version: ${{ steps.discovery.outputs.runtime_version }}
+      runtime_build: ${{ steps.discovery.outputs.runtime_build }}
+      runtime_identifier: ${{ steps.discovery.outputs.runtime_identifier }}
       iphoneos_sdk_version: ${{ steps.discovery.outputs.iphoneos_sdk_version }}
+      iphoneos_sdk_path: ${{ steps.discovery.outputs.iphoneos_sdk_path }}
       iphonesimulator_sdk_version: ${{ steps.discovery.outputs.iphonesimulator_sdk_version }}
+      iphonesimulator_sdk_path: ${{ steps.discovery.outputs.iphonesimulator_sdk_path }}
 
     steps:
       - name: Discover pinned runtime and SDKs
@@ -78,29 +83,41 @@ jobs:
           runtime_json="$RUNNER_TEMP/simctl-runtimes.json"
           xcrun simctl list runtimes --json > "$runtime_json"
 
-          runtime_bundle="$(python3 - "$runtime_json" "$RUNTIME_IOS_BUILD" <<'PY'
+          runtime_record="$(python3 - "$runtime_json" "$RUNTIME_IOS_VERSION" "$RUNTIME_IOS_BUILD" <<'PY'
           import json
           import sys
 
-          path, target_build = sys.argv[1], sys.argv[2]
+          path, target_version, target_build = sys.argv[1], sys.argv[2], sys.argv[3]
           with open(path, 'r', encoding='utf-8') as handle:
               data = json.load(handle)
 
           for runtime in data.get('runtimes', []):
               if runtime.get('buildversion') != target_build:
                   continue
+              if runtime.get('version') != target_version:
+                  continue
               if runtime.get('isAvailable') is False:
                   continue
               bundle = runtime.get('bundlePath') or runtime.get('dataPath')
-              if bundle:
-                  print(bundle)
-                  sys.exit(0)
+              if not bundle:
+                  continue
+              identifier = runtime.get('identifier') or ''
+              print('\t'.join((bundle, runtime.get('version', ''), runtime.get('buildversion', ''), identifier)))
+              sys.exit(0)
 
-          print(f'iOS simulator runtime build {target_build} was not found in simctl JSON.', file=sys.stderr)
+          print(
+              f'iOS simulator runtime {target_version} build {target_build} was not found as an available simctl runtime.',
+              file=sys.stderr,
+          )
           sys.exit(1)
           PY
           )"
 
+          IFS=$'\t' read -r runtime_bundle runtime_version runtime_build runtime_identifier <<< "$runtime_record"
+          if [[ "$runtime_version" != "$RUNTIME_IOS_VERSION" || "$runtime_build" != "$RUNTIME_IOS_BUILD" ]]; then
+            echo "ERROR: simctl runtime identity changed: expected $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD), got $runtime_version ($runtime_build)"
+            exit 1
+          fi
           if [[ ! -d "$runtime_bundle" ]]; then
             echo "ERROR: simctl returned a runtime bundle that is not a directory: $runtime_bundle"
             exit 1
@@ -112,32 +129,36 @@ jobs:
             exit 1
           fi
 
+          bundle_cf_version='unavailable'
           plist="$runtime_bundle/Contents/Info.plist"
-          actual_build=''
           if [[ -f "$plist" ]]; then
-            actual_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist" 2>/dev/null || true)"
-          fi
-          if [[ -n "$actual_build" && "$actual_build" != "$RUNTIME_IOS_BUILD" ]]; then
-            echo "ERROR: simulator bundle build changed: expected $RUNTIME_IOS_BUILD, got $actual_build"
-            exit 1
+            bundle_cf_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist" 2>/dev/null || echo 'unavailable')"
           fi
 
-          seven_zip="$(command -v 7z || command -v 7zz || true)"
+          seven_zip="$(command -v 7zz || command -v 7z || true)"
           if [[ -z "$seven_zip" ]]; then
             echo 'ERROR: 7-Zip is not available on this GitHub-hosted macOS runner.'
             exit 1
           fi
 
-          echo "Pinned iOS simulator runtime validated: $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)"
+          echo "Pinned iOS simulator runtime validated from simctl: $runtime_version ($runtime_build)"
+          echo "Runtime identifier: ${runtime_identifier:-<none>}"
           echo "Runtime bundle: $runtime_bundle"
+          echo "Simulator bundle CFBundleVersion (package metadata only): $bundle_cf_version"
           echo "7-Zip: $seven_zip"
 
           {
             echo "runtime_bundle=$runtime_bundle"
             echo "runtime_root=$runtime_root"
+            echo "runtime_version=$runtime_version"
+            echo "runtime_build=$runtime_build"
+            echo "runtime_identifier=$runtime_identifier"
+            echo "bundle_cf_version=$bundle_cf_version"
             echo "seven_zip=$seven_zip"
             echo "iphoneos_sdk_version=$iphoneos_version"
+            echo "iphoneos_sdk_path=$iphoneos_path"
             echo "iphonesimulator_sdk_version=$iphonesimulator_version"
+            echo "iphonesimulator_sdk_path=$iphonesimulator_path"
           } >> "$GITHUB_OUTPUT"
 
       - name: Verify RuntimeRoot encryption secret
@@ -222,21 +243,33 @@ jobs:
           ARCHIVE_SHA: ${{ steps.archive.outputs.archive_sha256 }}
           CACHE_HIT: ${{ steps.runtime_cache.outputs.cache-hit }}
           RUNTIME_BUNDLE: ${{ steps.discovery.outputs.runtime_bundle }}
+          RUNTIME_VERSION: ${{ steps.discovery.outputs.runtime_version }}
+          RUNTIME_BUILD: ${{ steps.discovery.outputs.runtime_build }}
+          RUNTIME_IDENTIFIER: ${{ steps.discovery.outputs.runtime_identifier }}
+          BUNDLE_CF_VERSION: ${{ steps.discovery.outputs.bundle_cf_version }}
           IPHONEOS_VERSION: ${{ steps.discovery.outputs.iphoneos_sdk_version }}
+          IPHONEOS_PATH: ${{ steps.discovery.outputs.iphoneos_sdk_path }}
           IPHONESIM_VERSION: ${{ steps.discovery.outputs.iphonesimulator_sdk_version }}
+          IPHONESIM_PATH: ${{ steps.discovery.outputs.iphonesimulator_sdk_path }}
         run: |
           {
             echo '## Trusted GitHub-hosted iOS RuntimeRoot source'
             echo
             echo "- Pinned Xcode: $RUNTIME_XCODE_PATH"
             echo "- Pinned runtime: iOS $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)"
+            echo "- Observed simctl runtime: ${RUNTIME_VERSION:-<unavailable>} (${RUNTIME_BUILD:-<unavailable>})"
+            echo "- Runtime identifier: ${RUNTIME_IDENTIFIER:-<unavailable>}"
             echo "- Runtime bundle: ${RUNTIME_BUNDLE:-<unavailable>}"
+            echo "- Bundle CFBundleVersion (package metadata): ${BUNDLE_CF_VERSION:-<unavailable>}"
             echo "- iphoneos SDK: ${IPHONEOS_VERSION:-<unavailable>}"
+            echo "- iphoneos path: ${IPHONEOS_PATH:-<unavailable>}"
             echo "- iphonesimulator SDK: ${IPHONESIM_VERSION:-<unavailable>}"
+            echo "- iphonesimulator path: ${IPHONESIM_PATH:-<unavailable>}"
             echo "- Encrypted cache key: $RUNTIME_CACHE_KEY"
             echo "- Encrypted cache hit: ${CACHE_HIT:-n/a}"
             echo "- Encrypted archive SHA-256: ${ARCHIVE_SHA:-n/a}"
             echo
+            echo 'Runtime OS build identity comes from simctl buildversion; CFBundleVersion is package metadata only.'
             echo 'Only the encrypted RuntimeRoot archive is cached. SDK contents and plaintext RuntimeRoot files are not uploaded as artifacts.'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -423,16 +456,24 @@ jobs:
           RUNTIME_CACHE_HIT: ${{ steps.runtime_cache.outputs.cache-hit }}
           RUNTIME_SHA: ${{ env.EXPECTED_RUNTIME_SHA256 }}
           TESTER_SHA: ${{ steps.tester.outputs.sha256 }}
+          RUNTIME_VERSION: ${{ needs.runtime-source.outputs.runtime_version }}
+          RUNTIME_BUILD: ${{ needs.runtime-source.outputs.runtime_build }}
+          RUNTIME_IDENTIFIER: ${{ needs.runtime-source.outputs.runtime_identifier }}
           IPHONEOS_SDK: ${{ needs.runtime-source.outputs.iphoneos_sdk_version }}
+          IPHONEOS_PATH: ${{ needs.runtime-source.outputs.iphoneos_sdk_path }}
           IPHONESIM_SDK: ${{ needs.runtime-source.outputs.iphonesimulator_sdk_version }}
+          IPHONESIM_PATH: ${{ needs.runtime-source.outputs.iphonesimulator_sdk_path }}
         run: |
           @(
             '## Trusted public IPA full-runtime acceptance',
             '',
             '- Workload: pinned AWS Device Farm sample IPA',
-            "- Runtime source: GitHub-hosted iOS $env:RUNTIME_IOS_VERSION ($env:RUNTIME_IOS_BUILD)",
+            "- Runtime source: GitHub-hosted iOS $env:RUNTIME_VERSION ($env:RUNTIME_BUILD)",
+            "- Runtime identifier: $env:RUNTIME_IDENTIFIER",
             "- iphoneos SDK observed: $env:IPHONEOS_SDK",
+            "- iphoneos SDK path: $env:IPHONEOS_PATH",
             "- iphonesimulator SDK observed: $env:IPHONESIM_SDK",
+            "- iphonesimulator SDK path: $env:IPHONESIM_PATH",
             '- Exact test path: `Test-Ipa.cmd <IPA> <RuntimeRoot>`',
             "- Test exit code: $env:TEST_EXIT",
             "- Published tester SHA256: $env:TESTER_SHA",
