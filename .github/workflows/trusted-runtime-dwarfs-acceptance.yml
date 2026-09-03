@@ -1,0 +1,658 @@
+name: Trusted DwarFS RuntimeRoot acceptance
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/trusted-runtime-dwarfs-acceptance.yml'
+      - 'include/ipasim/DynamicLoader.hpp'
+      - 'include/ipasim/DwarfsReaderBridgeApi.h'
+      - 'include/ipasim/DwarfsRuntimeRootStore.hpp'
+      - 'include/ipasim/Probe.hpp'
+      - 'src/IpaSimulator/CMakeLists.txt'
+      - 'src/IpaSimulator/DwarfsReaderBridge.cpp'
+      - 'src/IpaSimulator/DwarfsRuntimeRootStore.cpp'
+      - 'src/IpaSimulator/IpaProbe.cpp'
+      - 'src/IpaSimulator/IpaSimulator.cpp'
+      - 'src/IpaSimulator/dwarfs-reader/**'
+  workflow_dispatch:
+
+concurrency:
+  group: trusted-runtime-dwarfs-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+env:
+  AWS_IPA_COMMIT: 58e48234db510bd4fbf643643e8808c5d6a13845
+  AWS_IPA_BLOB: 06a33a39286ffd7c9d300c5924750b6f97c4e346
+  AWS_IPA_SIZE: '2138167'
+  RUNTIME_XCODE_PATH: /Applications/Xcode_16.4.app
+  RUNTIME_IOS_VERSION: '18.5'
+  RUNTIME_IOS_BUILD: 22F77
+  DWARFS_VERSION: '0.15.7'
+  DWARFS_SOURCE_SHA256: 363c7fdbf7bad490a6b8d63186da8643c1aeb17ca54cce1193d7b0ebc57bc6bd
+  VCPKG_BASELINE: 62159a45e18f3a9ac0548628dcaf74fcb60c6ff9
+  RUNTIME_DWARFS_CACHE_KEY: ipasim-github-runtime-macos15-xcode16.4-ios18.5-22F77-dwarfs0157-v1
+
+jobs:
+  runtime-image:
+    name: Build complete pinned RuntimeRoot DwarFS image
+    runs-on: macos-15
+    timeout-minutes: 90
+    outputs:
+      image_sha256: ${{ steps.verify.outputs.image_sha256 }}
+      image_size: ${{ steps.verify.outputs.image_size }}
+      runtime_version: ${{ steps.discovery.outputs.runtime_version }}
+      runtime_build: ${{ steps.discovery.outputs.runtime_build }}
+
+    steps:
+      - name: Check out ipaSim
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Discover pinned iOS RuntimeRoot
+        id: discovery
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/runtime-dwarfs-source.log"
+          : > "$log"
+          exec > >(tee -a "$log") 2>&1
+
+          if [[ ! -d "$RUNTIME_XCODE_PATH" ]]; then
+            echo "ERROR: pinned Xcode is not installed: $RUNTIME_XCODE_PATH"
+            exit 1
+          fi
+          sudo xcode-select -s "$RUNTIME_XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+
+          runtime_json="$RUNNER_TEMP/simctl-runtimes.json"
+          xcrun simctl list runtimes --json > "$runtime_json"
+          runtime_record="$(python3 - "$runtime_json" "$RUNTIME_IOS_VERSION" "$RUNTIME_IOS_BUILD" <<'PY'
+          import json
+          import sys
+
+          path, target_version, target_build = sys.argv[1:]
+          with open(path, 'r', encoding='utf-8') as handle:
+              data = json.load(handle)
+          for runtime in data.get('runtimes', []):
+              if runtime.get('version') != target_version:
+                  continue
+              if runtime.get('buildversion') != target_build:
+                  continue
+              if runtime.get('isAvailable') is False:
+                  continue
+              bundle = runtime.get('bundlePath') or runtime.get('dataPath')
+              if bundle:
+                  print('\t'.join((bundle, runtime.get('version', ''), runtime.get('buildversion', ''))))
+                  sys.exit(0)
+          print(f'pinned iOS runtime {target_version} ({target_build}) not found', file=sys.stderr)
+          sys.exit(1)
+          PY
+          )"
+          IFS=$'\t' read -r runtime_bundle runtime_version runtime_build <<< "$runtime_record"
+          runtime_root="$runtime_bundle/Contents/Resources/RuntimeRoot"
+          if [[ ! -d "$runtime_root/System" || ! -d "$runtime_root/usr" ]]; then
+            echo "ERROR: pinned RuntimeRoot does not expose System and usr: $runtime_root"
+            exit 1
+          fi
+          echo "Pinned RuntimeRoot: $runtime_root"
+          echo "runtime_root=$runtime_root" >> "$GITHUB_OUTPUT"
+          echo "runtime_version=$runtime_version" >> "$GITHUB_OUTPUT"
+          echo "runtime_build=$runtime_build" >> "$GITHUB_OUTPUT"
+
+      - name: Install and pin DwarFS writer
+        id: dwarfs_tool
+        if: steps.discovery.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/runtime-dwarfs-source.log"
+          exec > >(tee -a "$log") 2>&1
+
+          brew install dwarfs
+          prefix="$(brew --prefix dwarfs)"
+          mkdwarfs="$prefix/bin/mkdwarfs"
+          dwarfsck="$prefix/bin/dwarfsck"
+          for tool in "$mkdwarfs" "$dwarfsck"; do
+            [[ -x "$tool" ]] || { echo "ERROR: expected DwarFS tool is missing: $tool"; exit 1; }
+            "$tool" --version
+          done
+          "$mkdwarfs" --version | grep -F "$DWARFS_VERSION"
+          "$dwarfsck" --version | grep -F "$DWARFS_VERSION"
+          echo "mkdwarfs=$mkdwarfs" >> "$GITHUB_OUTPUT"
+          echo "dwarfsck=$dwarfsck" >> "$GITHUB_OUTPUT"
+
+      - name: Restore DwarFS RuntimeRoot cache
+        id: runtime_cache
+        if: steps.discovery.outcome == 'success' && steps.dwarfs_tool.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ipasim-runtime-dwarfs
+          key: ${{ env.RUNTIME_DWARFS_CACHE_KEY }}
+          enableCrossOsArchive: true
+
+      - name: Build complete DwarFS image on cache miss
+        id: package
+        if: >-
+          steps.discovery.outcome == 'success' &&
+          steps.dwarfs_tool.outcome == 'success' &&
+          steps.runtime_cache.outcome == 'success' &&
+          steps.runtime_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          RUNTIME_ROOT: ${{ steps.discovery.outputs.runtime_root }}
+          MKDWARFS: ${{ steps.dwarfs_tool.outputs.mkdwarfs }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/runtime-dwarfs-source.log"
+          exec > >(tee -a "$log") 2>&1
+
+          image_dir="$GITHUB_WORKSPACE/ipasim-runtime-dwarfs"
+          image="$image_dir/RuntimeRoot.dwarfs"
+          mkdir -p "$image_dir"
+          rm -f "$image"
+
+          echo "Building one DwarFS image from the complete iOS $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD) RuntimeRoot."
+          echo 'No RuntimeRoot paths are excluded, renamed, sanitized, mounted, or pre-extracted.'
+          started="$(date +%s)"
+          sudo "$MKDWARFS" -i "$RUNTIME_ROOT" -o "$image" --log-level=info
+          finished="$(date +%s)"
+          sudo chown "$(id -u):$(id -g)" "$image"
+          chmod 600 "$image"
+          [[ -s "$image" ]] || { echo 'ERROR: RuntimeRoot.dwarfs was not created.'; exit 1; }
+          echo "DwarFS image build seconds: $((finished - started))"
+          ls -lh "$image"
+
+      - name: Verify complete DwarFS image
+        id: verify
+        if: >-
+          steps.discovery.outcome == 'success' &&
+          steps.dwarfs_tool.outcome == 'success' &&
+          steps.runtime_cache.outcome == 'success' &&
+          (steps.runtime_cache.outputs.cache-hit == 'true' || steps.package.outcome == 'success')
+        continue-on-error: true
+        shell: bash
+        env:
+          DWARFSCK: ${{ steps.dwarfs_tool.outputs.dwarfsck }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/runtime-dwarfs-source.log"
+          exec > >(tee -a "$log") 2>&1
+
+          image="$GITHUB_WORKSPACE/ipasim-runtime-dwarfs/RuntimeRoot.dwarfs"
+          [[ -s "$image" ]] || { echo "ERROR: cached DwarFS image is missing: $image"; exit 1; }
+          echo 'Running DwarFS embedded block integrity validation.'
+          "$DWARFSCK" "$image" --check-integrity
+          sha="$(shasum -a 256 "$image" | awk '{print tolower($1)}')"
+          size="$(stat -f '%z' "$image")"
+          [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "ERROR: invalid image SHA-256: $sha"; exit 1; }
+          [[ "$size" =~ ^[0-9]+$ ]] || { echo "ERROR: invalid image size: $size"; exit 1; }
+          echo "RuntimeRoot.dwarfs SHA-256: $sha"
+          echo "RuntimeRoot.dwarfs bytes: $size"
+          echo "image_sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "image_size=$size" >> "$GITHUB_OUTPUT"
+
+      - name: Save DwarFS RuntimeRoot cache
+        if: >-
+          steps.runtime_cache.outputs.cache-hit != 'true' &&
+          steps.verify.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ipasim-runtime-dwarfs
+          key: ${{ env.RUNTIME_DWARFS_CACHE_KEY }}
+          enableCrossOsArchive: true
+
+      - name: Publish RuntimeRoot image failure
+        if: >-
+          always() && github.event_name == 'pull_request' &&
+          (steps.discovery.outcome == 'failure' ||
+           steps.dwarfs_tool.outcome == 'failure' ||
+           steps.runtime_cache.outcome == 'failure' ||
+           steps.package.outcome == 'failure' ||
+           steps.verify.outcome == 'failure')
+        uses: actions/github-script@v7
+        env:
+          DIAGNOSTIC_LOG: ${{ runner.temp }}/runtime-dwarfs-source.log
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ipasim-runtime-dwarfs-acceptance-diagnostic -->';
+            const text = fs.existsSync(process.env.DIAGNOSTIC_LOG)
+              ? fs.readFileSync(process.env.DIAGNOSTIC_LOG, 'utf8')
+              : 'RuntimeRoot DwarFS source log was not produced.';
+            const lines = text.split(/\r?\n/);
+            const useful = lines.filter(l => /error|fatal|failed|exception|permission|dwarfs|runtime|integrity|brew/i.test(l)).slice(-140);
+            const excerpt = (useful.length ? useful : lines.slice(-140)).join('\n').slice(-18000);
+            const body = `${marker}\n## Full RuntimeRoot DwarFS acceptance\n\n❌ **macOS RuntimeRoot image preparation failed** on \`${context.sha}\`.\n\n### Next actionable output\n\`\`\`text\n${excerpt}\n\`\`\`\n\nNo RuntimeRoot paths are excluded or rewritten. The workflow fails normally after publishing this diagnostic.`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+
+      - name: Publish RuntimeRoot image summary
+        if: always()
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.runtime_cache.outputs.cache-hit }}
+          IMAGE_SHA: ${{ steps.verify.outputs.image_sha256 }}
+          IMAGE_SIZE: ${{ steps.verify.outputs.image_size }}
+        run: |
+          {
+            echo '## Full RuntimeRoot DwarFS image'
+            echo
+            echo "- Pinned runtime: iOS $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)"
+            echo "- Pinned DwarFS: $DWARFS_VERSION"
+            echo "- Cross-OS cache key: $RUNTIME_DWARFS_CACHE_KEY"
+            echo "- Cache hit: ${CACHE_HIT:-n/a}"
+            echo "- Image SHA-256: ${IMAGE_SHA:-n/a}"
+            echo "- Image bytes: ${IMAGE_SIZE:-n/a}"
+            echo
+            echo 'The complete RuntimeRoot remains one DwarFS image. RuntimeRoot bytes are not uploaded as workflow artifacts.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload source diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-dwarfs-source-log-${{ github.run_id }}
+          path: ${{ runner.temp }}/runtime-dwarfs-source.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail after RuntimeRoot image diagnostic
+        if: >-
+          steps.discovery.outcome == 'failure' ||
+          steps.dwarfs_tool.outcome == 'failure' ||
+          steps.runtime_cache.outcome == 'failure' ||
+          steps.package.outcome == 'failure' ||
+          steps.verify.outcome == 'failure'
+        shell: bash
+        run: exit 1
+
+  resolve-core-tester:
+    name: Resolve exact-head Windows Core tester
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      run_id: ${{ steps.resolve.outputs.run_id }}
+    steps:
+      - name: Find successful exact-head Core artifact
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          run_id=''
+          for attempt in $(seq 1 45); do
+            run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/windows-arm64-core.yml/runs?head_sha=$TARGET_SHA&per_page=20" --jq '.workflow_runs[0].id // empty')"
+            if [[ -n "$run_id" ]]; then
+              break
+            fi
+            echo "Exact-head Core run has not appeared yet ($attempt/45)."
+            sleep 20
+          done
+          [[ -n "$run_id" ]] || { echo "ERROR: no Windows ARM64 Core run found for $TARGET_SHA"; exit 1; }
+
+          for attempt in $(seq 1 60); do
+            status="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.status')"
+            conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.conclusion // empty')"
+            echo "Core run $run_id: status=$status conclusion=${conclusion:-pending}"
+            if [[ "$status" == 'completed' ]]; then
+              [[ "$conclusion" == 'success' ]] || { echo "ERROR: exact-head Core run concluded $conclusion"; exit 1; }
+              break
+            fi
+            sleep 15
+          done
+          status="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.status')"
+          conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.conclusion // empty')"
+          [[ "$status" == 'completed' && "$conclusion" == 'success' ]] || { echo 'ERROR: exact-head Core run did not complete successfully in time.'; exit 1; }
+
+          artifact_count="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" --jq '[.artifacts[] | select(.name == "ipasim-ipa-tester" and .expired == false)] | length')"
+          [[ "$artifact_count" == '1' ]] || { echo "ERROR: expected one live ipasim-ipa-tester artifact, found $artifact_count"; exit 1; }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+  reader-bridge:
+    name: Build pinned Windows DwarFS reader bridge
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - name: Check out ipaSim
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Enter x64 MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Restore DwarFS vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\vcpkg-bincache
+          key: dwarfs-v0.15.7-source-vcpkg-62159a45-x64-windows-static-v2
+          save-always: true
+
+      - name: Build reader bridge from pinned DwarFS source
+        id: build_bridge
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Log = Join-Path $env:RUNNER_TEMP 'runtime-dwarfs-bridge.log'
+          Set-Content -LiteralPath $Log -Value ''
+          function Invoke-Native {
+            param([Parameter(Mandatory=$true)][string]$Exe,
+                  [Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
+            & $Exe @Arguments 2>&1 | Tee-Object -FilePath $Log -Append
+            $ExitCode = $LASTEXITCODE
+            if ($ExitCode -ne 0) { throw "$Exe failed with exit code $ExitCode" }
+          }
+          try {
+            $SourceArchive = Join-Path $env:RUNNER_TEMP "dwarfs-$env:DWARFS_VERSION.tar.xz"
+            $SourceRoot = Join-Path $env:RUNNER_TEMP 'dwarfs-source'
+            $DwarfsBuild = Join-Path $env:RUNNER_TEMP 'dwarfs-build'
+            $DwarfsPrefix = Join-Path $env:RUNNER_TEMP 'dwarfs-prefix'
+            $VcpkgRoot = Join-Path $env:RUNNER_TEMP 'vcpkg-dwarfs'
+            $VcpkgInstalled = Join-Path $env:RUNNER_TEMP 'vcpkg-install-dwarfs'
+
+            Invoke-WebRequest -Uri "https://github.com/mhx/dwarfs/releases/download/v$env:DWARFS_VERSION/dwarfs-$env:DWARFS_VERSION.tar.xz" -OutFile $SourceArchive
+            $ActualSha = (Get-FileHash -Algorithm SHA256 $SourceArchive).Hash.ToLowerInvariant()
+            if ($ActualSha -ne $env:DWARFS_SOURCE_SHA256) {
+              throw "DwarFS source SHA-256 mismatch: expected $env:DWARFS_SOURCE_SHA256 got $ActualSha"
+            }
+            New-Item -ItemType Directory -Force -Path $SourceRoot | Out-Null
+            Invoke-Native tar -xf $SourceArchive -C $SourceRoot
+            $DwarfsSource = Get-ChildItem -Path $SourceRoot -Filter CMakeLists.txt -Recurse -File |
+              Where-Object { Test-Path (Join-Path $_.Directory.FullName 'vcpkg.json') } |
+              Select-Object -First 1 -ExpandProperty DirectoryName
+            if ([string]::IsNullOrWhiteSpace($DwarfsSource)) { throw 'DwarFS source root was not found.' }
+
+            New-Item -ItemType Directory -Force -Path $VcpkgRoot | Out-Null
+            Invoke-Native git -C $VcpkgRoot init
+            Invoke-Native git -C $VcpkgRoot remote add origin https://github.com/microsoft/vcpkg.git
+            Invoke-Native git -C $VcpkgRoot fetch origin $env:VCPKG_BASELINE
+            Invoke-Native git -C $VcpkgRoot checkout --detach FETCH_HEAD
+            Invoke-Native (Join-Path $VcpkgRoot 'bootstrap-vcpkg.bat') -disableMetrics
+
+            $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $env:RUNNER_TEMP 'vcpkg-bincache'
+            New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+            $Toolchain = Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake'
+            $Ninja = (Get-Command ninja.exe -ErrorAction Stop).Source
+
+            $DwarfsConfigure = @(
+              '-S', $DwarfsSource,
+              '-B', $DwarfsBuild,
+              '-G', 'Ninja',
+              "-DCMAKE_MAKE_PROGRAM=$Ninja",
+              '-DCMAKE_BUILD_TYPE=Release',
+              "-DCMAKE_INSTALL_PREFIX=$DwarfsPrefix",
+              "-DCMAKE_TOOLCHAIN_FILE=$Toolchain",
+              '-DVCPKG_TARGET_TRIPLET=x64-windows-static',
+              "-DVCPKG_INSTALLED_DIR=$VcpkgInstalled",
+              '-DWITH_LIBDWARFS=ON',
+              '-DWITH_TOOLS=OFF',
+              '-DWITH_FUSE_DRIVER=OFF',
+              '-DWITH_DESKTOP_INTEGRATION=OFF',
+              '-DWITH_TESTS=OFF',
+              '-DWITH_BENCHMARKS=OFF',
+              '-DWITH_ALL_BENCHMARKS=OFF',
+              '-DWITH_FUZZ=OFF',
+              '-DWITH_MAN_OPTION=OFF',
+              '-DWITH_UNIVERSAL_BINARY=OFF',
+              '-DWITH_FUSE_EXTRACT_BINARY=OFF',
+              '-DWITH_PXATTR=OFF',
+              '-DWITH_EXAMPLE=OFF',
+              '-DWITH_DEV_TOOLS=OFF',
+              '-DENABLE_STACKTRACE=OFF'
+            )
+            Invoke-Native cmake @DwarfsConfigure
+            Invoke-Native cmake --build $DwarfsBuild --target install
+
+            $BridgeBuild = Join-Path $env:RUNNER_TEMP 'ipasim-dwarfs-reader-build'
+            $BridgeConfigure = @(
+              '-S', "$env:GITHUB_WORKSPACE\src\IpaSimulator\dwarfs-reader",
+              '-B', $BridgeBuild,
+              '-G', 'Ninja',
+              "-DCMAKE_MAKE_PROGRAM=$Ninja",
+              '-DCMAKE_BUILD_TYPE=Release',
+              "-DCMAKE_TOOLCHAIN_FILE=$Toolchain",
+              '-DVCPKG_TARGET_TRIPLET=x64-windows-static',
+              "-DVCPKG_INSTALLED_DIR=$VcpkgInstalled",
+              '-DVCPKG_MANIFEST_MODE=OFF',
+              "-DCMAKE_PREFIX_PATH=$DwarfsPrefix"
+            )
+            Invoke-Native cmake @BridgeConfigure
+            Invoke-Native cmake --build $BridgeBuild --target IpaSimDwarfsReader
+
+            $Bridge = Join-Path $BridgeBuild 'bin\IpaSimDwarfsReader.dll'
+            if (-not (Test-Path -LiteralPath $Bridge -PathType Leaf)) { throw "reader bridge was not produced: $Bridge" }
+            Copy-Item -LiteralPath $Bridge -Destination "$env:GITHUB_WORKSPACE\IpaSimDwarfsReader.dll" -Force
+          }
+          catch {
+            ($_ | Format-List * -Force | Out-String) | Tee-Object -FilePath $Log -Append | Write-Host
+            throw
+          }
+
+      - name: Publish reader bridge failure
+        if: steps.build_bridge.outcome == 'failure' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          DIAGNOSTIC_LOG: ${{ runner.temp }}/runtime-dwarfs-bridge.log
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ipasim-runtime-dwarfs-acceptance-diagnostic -->';
+            const text = fs.existsSync(process.env.DIAGNOSTIC_LOG) ? fs.readFileSync(process.env.DIAGNOSTIC_LOG, 'utf8') : 'reader bridge log was not produced';
+            const lines = text.split(/\r?\n/);
+            const useful = lines.filter(l => /error|fatal|failed|exception|cannot|missing|vcpkg|cmake|ninja|dwarfs/i.test(l)).slice(-140);
+            const excerpt = (useful.length ? useful : lines.slice(-140)).join('\n').slice(-18000);
+            const body = `${marker}\n## Full RuntimeRoot DwarFS acceptance\n\n❌ **Windows DwarFS reader bridge build failed** on \`${context.sha}\`.\n\n### Next actionable output\n\`\`\`text\n${excerpt}\n\`\`\`\n\nThe workflow fails normally after publishing this diagnostic.`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+
+      - name: Upload reader bridge
+        if: steps.build_bridge.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipasim-dwarfs-reader-bridge
+          path: IpaSimDwarfsReader.dll
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Fail after reader bridge diagnostic
+        if: steps.build_bridge.outcome == 'failure'
+        shell: pwsh
+        run: exit 1
+
+  windows-acceptance:
+    name: Run pinned AWS IPA directly from DwarFS RuntimeRoot
+    needs:
+      - runtime-image
+      - resolve-core-tester
+      - reader-bridge
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      EXPECTED_IMAGE_SHA256: ${{ needs.runtime-image.outputs.image_sha256 }}
+      EXPECTED_IMAGE_SIZE: ${{ needs.runtime-image.outputs.image_size }}
+
+    steps:
+      - name: Download exact-head Core tester
+        uses: actions/download-artifact@v4
+        with:
+          name: ipasim-ipa-tester
+          path: tester
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-core-tester.outputs.run_id }}
+
+      - name: Download DwarFS reader bridge
+        uses: actions/download-artifact@v4
+        with:
+          name: ipasim-dwarfs-reader-bridge
+          path: reader-bridge
+
+      - name: Restore complete DwarFS RuntimeRoot cache
+        id: runtime_cache_windows
+        uses: actions/cache/restore@v4
+        with:
+          path: ipasim-runtime-dwarfs
+          key: ${{ env.RUNTIME_DWARFS_CACHE_KEY }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Verify image, public IPA, and run exact-head probe
+        id: acceptance
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Log = Join-Path $env:RUNNER_TEMP 'runtime-dwarfs-acceptance.log'
+          Set-Content -LiteralPath $Log -Value ''
+          function Invoke-Native {
+            param([Parameter(Mandatory=$true)][string]$Exe,
+                  [Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
+            & $Exe @Arguments 2>&1 | Tee-Object -FilePath $Log -Append
+            $ExitCode = $LASTEXITCODE
+            if ($ExitCode -ne 0) { throw "$Exe failed with exit code $ExitCode" }
+          }
+          try {
+            $Image = Join-Path $env:GITHUB_WORKSPACE 'ipasim-runtime-dwarfs\RuntimeRoot.dwarfs'
+            if (-not (Test-Path -LiteralPath $Image -PathType Leaf)) { throw "RuntimeRoot DwarFS cache is missing: $Image" }
+            $ActualSha = (Get-FileHash -LiteralPath $Image -Algorithm SHA256).Hash.ToLowerInvariant()
+            $ExpectedSha = $env:EXPECTED_IMAGE_SHA256.Trim().ToLowerInvariant()
+            $ActualSize = (Get-Item -LiteralPath $Image).Length
+            if ($ActualSha -ne $ExpectedSha) { throw "RuntimeRoot.dwarfs SHA-256 mismatch: expected $ExpectedSha got $ActualSha" }
+            if ($ActualSize -ne [int64]$env:EXPECTED_IMAGE_SIZE) { throw "RuntimeRoot.dwarfs size mismatch: expected $env:EXPECTED_IMAGE_SIZE got $ActualSize" }
+            "RuntimeRoot.dwarfs verified: $ActualSha ($ActualSize bytes)" | Tee-Object -FilePath $Log -Append
+
+            $Probe = Get-ChildItem -Path "$env:GITHUB_WORKSPACE\tester" -Filter IpaProbe.exe -Recurse -File | Select-Object -First 1
+            if ($null -eq $Probe) { throw 'exact-head tester does not contain IpaProbe.exe' }
+            $TesterDir = $Probe.Directory.FullName
+            $Arm64Smoke = Join-Path $TesterDir 'Arm64Smoke.exe'
+            if (-not (Test-Path -LiteralPath $Arm64Smoke -PathType Leaf)) { throw "exact-head tester does not contain Arm64Smoke.exe beside IpaProbe.exe: $TesterDir" }
+            $Bridge = Get-ChildItem -Path "$env:GITHUB_WORKSPACE\reader-bridge" -Filter IpaSimDwarfsReader.dll -Recurse -File | Select-Object -First 1
+            if ($null -eq $Bridge) { throw 'reader bridge artifact does not contain IpaSimDwarfsReader.dll' }
+
+            $Ipa = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.ipa'
+            $Url = "https://raw.githubusercontent.com/aws-samples/aws-device-farm-sample-app-for-ios/$env:AWS_IPA_COMMIT/prebuilt/prebuiltSampleApp.ipa"
+            Invoke-WebRequest -Uri $Url -OutFile $Ipa
+            $Size = (Get-Item -LiteralPath $Ipa).Length
+            if ($Size -ne [int64]$env:AWS_IPA_SIZE) { throw "AWS sample IPA size mismatch: expected $env:AWS_IPA_SIZE got $Size" }
+            $ActualBlob = (& git hash-object -- $Ipa).Trim().ToLowerInvariant()
+            if ($LASTEXITCODE -ne 0) { throw 'git hash-object failed for the AWS sample IPA' }
+            if ($ActualBlob -ne $env:AWS_IPA_BLOB) { throw "AWS sample IPA blob mismatch: expected $env:AWS_IPA_BLOB got $ActualBlob" }
+            "Pinned AWS IPA verified at upstream blob $ActualBlob." | Tee-Object -FilePath $Log -Append
+
+            $Extract = Join-Path $env:RUNNER_TEMP 'aws-ipa-extracted'
+            if (Test-Path -LiteralPath $Extract) { Remove-Item -LiteralPath $Extract -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $Extract | Out-Null
+            $Zip = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.zip'
+            Copy-Item -LiteralPath $Ipa -Destination $Zip -Force
+            Expand-Archive -LiteralPath $Zip -DestinationPath $Extract -Force
+
+            $Locator = Join-Path $env:RUNNER_TEMP 'locate-ipa-executable.py'
+            @'
+import pathlib
+import plistlib
+import sys
+root = pathlib.Path(sys.argv[1])
+apps = list((root / "Payload").glob("*.app"))
+if len(apps) != 1:
+    raise SystemExit(f"expected exactly one Payload/*.app, found {len(apps)}")
+info_path = apps[0] / "Info.plist"
+with info_path.open("rb") as handle:
+    info = plistlib.load(handle)
+name = info.get("CFBundleExecutable")
+if not isinstance(name, str) or not name:
+    raise SystemExit("Info.plist has no CFBundleExecutable")
+exe = apps[0] / name
+if not exe.is_file():
+    raise SystemExit(f"CFBundleExecutable does not exist: {exe}")
+print(exe)
+'@ | Set-Content -LiteralPath $Locator -Encoding UTF8
+            $AppExe = (& python $Locator $Extract).Trim()
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($AppExe)) { throw 'could not locate the pinned IPA executable' }
+            "Pinned IPA executable: $AppExe" | Tee-Object -FilePath $Log -Append
+
+            Invoke-Native $Arm64Smoke
+            Invoke-Native $Probe.FullName $AppExe '--runtime-root-dwarfs' $Image $Bridge.FullName
+          }
+          catch {
+            ($_ | Format-List * -Force | Out-String) | Tee-Object -FilePath $Log -Append | Write-Host
+            throw
+          }
+
+      - name: Publish DwarFS acceptance result
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          DIAGNOSTIC_LOG: ${{ runner.temp }}/runtime-dwarfs-acceptance.log
+          ACCEPTANCE_OUTCOME: ${{ steps.acceptance.outcome }}
+          IMAGE_SHA: ${{ needs.runtime-image.outputs.image_sha256 }}
+          IMAGE_SIZE: ${{ needs.runtime-image.outputs.image_size }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ipasim-runtime-dwarfs-acceptance-diagnostic -->';
+            const passed = process.env.ACCEPTANCE_OUTCOME === 'success';
+            const text = fs.existsSync(process.env.DIAGNOSTIC_LOG) ? fs.readFileSync(process.env.DIAGNOSTIC_LOG, 'utf8') : 'Windows acceptance log was not produced';
+            const lines = text.split(/\r?\n/);
+            const useful = lines.filter(l => /error|fatal|failed|exception|loader|runtime|dependency|symbol|dylib|framework|dwarfs|ipasim-probe|Mach-O/i.test(l)).slice(-180);
+            const excerpt = (useful.length ? useful : lines.slice(-180)).join('\n').slice(-20000);
+            const status = passed ? '✅ **Full DwarFS RuntimeRoot probe passed on real Windows.**' : '❌ **Full DwarFS RuntimeRoot probe reached a failing boundary on real Windows.**';
+            const body = `${marker}\n## Full RuntimeRoot DwarFS acceptance\n\n${status}\n\n- Runtime: iOS ${process.env.RUNTIME_IOS_VERSION || '18.5'} (${process.env.RUNTIME_IOS_BUILD || '22F77'})\n- DwarFS: ${process.env.DWARFS_VERSION || '0.15.7'}\n- Image SHA-256: \`${process.env.IMAGE_SHA || 'n/a'}\`\n- Image bytes: ${process.env.IMAGE_SIZE || 'n/a'}\n- RuntimeRoot mount/extraction: **none**\n\n${passed ? 'The pinned public IPA was loaded through the exact-head Windows probe using bytes read directly from the single DwarFS image.' : '### Next actionable output\n```text\n' + excerpt + '\n```\n\nThis is the real loader diagnostic; no RuntimeRoot path is excluded, rewritten, or materialized as NTFS to make the test pass.'}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+
+      - name: Publish Windows DwarFS summary
+        if: always()
+        shell: pwsh
+        run: |
+          @"
+          ## Windows DwarFS RuntimeRoot acceptance
+
+          - Exact-head Core run: ${{ needs.resolve-core-tester.outputs.run_id }}
+          - RuntimeRoot cache hit: ${{ steps.runtime_cache_windows.outputs.cache-hit }}
+          - RuntimeRoot SHA-256: ${{ needs.runtime-image.outputs.image_sha256 }}
+          - RuntimeRoot bytes: ${{ needs.runtime-image.outputs.image_size }}
+          - RuntimeRoot extraction: none
+          - Probe outcome: ${{ steps.acceptance.outcome }}
+          "@ | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload Windows acceptance log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-dwarfs-windows-log-${{ github.run_id }}
+          path: ${{ runner.temp }}/runtime-dwarfs-acceptance.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail after publishing DwarFS acceptance diagnostic
+        if: steps.acceptance.outcome == 'failure'
+        shell: pwsh
+        run: exit 1
