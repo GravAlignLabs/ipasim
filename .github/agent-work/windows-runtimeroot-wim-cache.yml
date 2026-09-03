@@ -3,24 +3,24 @@ owner: DeerSpotter
 agent: GPT-5.6 Sol
 
 task: >-
-  Replace repeated Windows expansion of the trusted RuntimeRoot transport archive
-  with a derived, SHA-keyed read-only WIM mount path in CI.
+  Prove a Windows read-only WIM RuntimeRoot path that avoids per-run expansion
+  of the trusted RuntimeRoot archive.
 
 scope:
-  - .github/workflows/trusted-github-runtime-acceptance.yml
+  - .github/workflows/trusted-runtime-wim-acceptance.yml
 
 branch: ci/windows-runtimeroot-wim-cache
 started_utc: 2026-09-03T14:57:00Z
-updated_utc: 2026-09-03T14:57:00Z
+updated_utc: 2026-09-03T15:00:00Z
 base_sha: 3b851d677e51c6327524a81ab9aca6898c8f796f
 expected_pr: draft
 
 next_checkpoint: >-
-  Build a WIM from the verified RuntimeRoot archive on cache miss, cache it by
-  RuntimeRoot archive SHA-256, mount it read-only on Windows, and reach
-  Test-Ipa.cmd without per-run RuntimeRoot extraction.
+  Capture the pinned GitHub-hosted RuntimeRoot directly into a WIM on macOS,
+  restore it on Windows, verify its recorded SHA-256, mount it read-only, and
+  run Test-Ipa.cmd against the mounted RuntimeRoot without expanding 467k files.
 
 notes: >-
-  The tar+zstd archive remains the authoritative cross-OS transport. The WIM is
-  a derived Windows acceleration cache only. No RuntimeRoot bytes are committed
-  to Git or uploaded as workflow artifacts.
+  This is an isolated trusted acceptance experiment. The existing tar+zstd
+  transport workflow remains unchanged until the WIM path proves itself. No
+  RuntimeRoot bytes are committed to Git or uploaded as workflow artifacts.
