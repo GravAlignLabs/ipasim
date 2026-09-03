@@ -24,7 +24,7 @@ env:
   RUNTIME_XCODE_PATH: /Applications/Xcode_16.4.app
   RUNTIME_IOS_VERSION: '18.5'
   RUNTIME_IOS_BUILD: 22F77
-  RUNTIME_CACHE_KEY: ipasim-encrypted-github-runtime-macos15-xcode16.4-ios18.5-22F77-v1
+  RUNTIME_CACHE_KEY: ipasim-github-runtime-macos15-xcode16.4-ios18.5-22F77-zstd-v1
 
 jobs:
   runtime-source:
@@ -135,9 +135,9 @@ jobs:
             bundle_cf_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist" 2>/dev/null || echo 'unavailable')"
           fi
 
-          seven_zip="$(command -v 7zz || command -v 7z || true)"
-          if [[ -z "$seven_zip" ]]; then
-            echo 'ERROR: 7-Zip is not available on this GitHub-hosted macOS runner.'
+          zstd_bin="$(command -v zstd || true)"
+          if [[ -z "$zstd_bin" ]]; then
+            echo 'ERROR: zstd is not available on this GitHub-hosted macOS runner.'
             exit 1
           fi
 
@@ -145,7 +145,7 @@ jobs:
           echo "Runtime identifier: ${runtime_identifier:-<none>}"
           echo "Runtime bundle: $runtime_bundle"
           echo "Simulator bundle CFBundleVersion (package metadata only): $bundle_cf_version"
-          echo "7-Zip: $seven_zip"
+          echo "zstd: $zstd_bin"
 
           {
             echo "runtime_bundle=$runtime_bundle"
@@ -154,26 +154,14 @@ jobs:
             echo "runtime_build=$runtime_build"
             echo "runtime_identifier=$runtime_identifier"
             echo "bundle_cf_version=$bundle_cf_version"
-            echo "seven_zip=$seven_zip"
+            echo "zstd_bin=$zstd_bin"
             echo "iphoneos_sdk_version=$iphoneos_version"
             echo "iphoneos_sdk_path=$iphoneos_path"
             echo "iphonesimulator_sdk_version=$iphonesimulator_version"
             echo "iphonesimulator_sdk_path=$iphonesimulator_path"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Verify RuntimeRoot encryption secret
-        shell: bash
-        env:
-          RUNTIME_ARCHIVE_PASSWORD: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_PASSWORD }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${RUNTIME_ARCHIVE_PASSWORD:-}" ]]; then
-            echo 'ERROR: repository secret IPASIM_RUNTIME_ARCHIVE_PASSWORD is not configured.' >&2
-            exit 1
-          fi
-          echo 'RuntimeRoot encryption secret is configured.'
-
-      - name: Restore encrypted GitHub-hosted RuntimeRoot cache
+      - name: Restore GitHub-hosted RuntimeRoot cache
         id: runtime_cache
         uses: actions/cache/restore@v4
         with:
@@ -181,54 +169,60 @@ jobs:
           key: ${{ env.RUNTIME_CACHE_KEY }}
           enableCrossOsArchive: true
 
-      - name: Package GitHub-hosted RuntimeRoot on cache miss
+      - name: Package GitHub-hosted RuntimeRoot with zstd on cache miss
         if: steps.runtime_cache.outputs.cache-hit != 'true'
         shell: bash
         env:
           RUNTIME_ROOT: ${{ steps.discovery.outputs.runtime_root }}
-          SEVEN_ZIP: ${{ steps.discovery.outputs.seven_zip }}
-          RUNTIME_ARCHIVE_PASSWORD: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_PASSWORD }}
+          ZSTD_BIN: ${{ steps.discovery.outputs.zstd_bin }}
         run: |
           set -euo pipefail
+          log="$RUNNER_TEMP/github-runtime-source.log"
+          exec > >(tee -a "$log") 2>&1
+
           archive_dir="$RUNNER_TEMP/ipasim-runtime-archive"
-          archive="$archive_dir/RuntimeRoot.7z"
+          archive="$archive_dir/RuntimeRoot.tar.zst"
           mkdir -p "$archive_dir"
+          rm -f "$archive"
 
           runtime_parent="$(dirname "$RUNTIME_ROOT")"
           runtime_leaf="$(basename "$RUNTIME_ROOT")"
-          echo "Creating encrypted RuntimeRoot archive from GitHub-hosted iOS $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)."
+          echo "Creating RuntimeRoot.tar.zst from GitHub-hosted iOS $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)."
+          echo 'Using the measured zstd1 path: sudo tar | zstd -1 -T0. No RuntimeRoot paths are excluded.'
           (
             cd "$runtime_parent"
-            "$SEVEN_ZIP" a -t7z "$archive" "$runtime_leaf" -mhe=on -mx=1 "-p${RUNTIME_ARCHIVE_PASSWORD}"
+            sudo tar -cf - "$runtime_leaf" | "$ZSTD_BIN" -1 -T0 -q -o "$archive"
           )
 
           if [[ ! -s "$archive" ]]; then
-            echo 'ERROR: RuntimeRoot.7z was not created.' >&2
+            echo 'ERROR: RuntimeRoot.tar.zst was not created.' >&2
             exit 1
           fi
-          echo 'Encrypted RuntimeRoot archive created:'
+
+          chmod 600 "$archive"
+          echo 'RuntimeRoot zstd archive created from the complete RuntimeRoot:'
           ls -lh "$archive"
 
-      - name: Verify encrypted RuntimeRoot archive
+      - name: Verify RuntimeRoot zstd archive
         id: archive
         shell: bash
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/ipasim-runtime-archive/RuntimeRoot.7z"
+          archive="$RUNNER_TEMP/ipasim-runtime-archive/RuntimeRoot.tar.zst"
           if [[ ! -f "$archive" ]]; then
-            echo 'ERROR: encrypted RuntimeRoot cache/archive is missing RuntimeRoot.7z.' >&2
+            echo 'ERROR: RuntimeRoot cache is missing RuntimeRoot.tar.zst.' >&2
             exit 1
           fi
 
           sha="$(shasum -a 256 "$archive" | awk '{print tolower($1)}')"
           if [[ ! "$sha" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "ERROR: invalid encrypted RuntimeRoot SHA-256: $sha" >&2
+            echo "ERROR: invalid RuntimeRoot archive SHA-256: $sha" >&2
             exit 1
           fi
-          echo "Encrypted RuntimeRoot SHA-256: $sha"
+          echo "RuntimeRoot.tar.zst SHA-256: $sha"
           echo "archive_sha256=$sha" >> "$GITHUB_OUTPUT"
 
-      - name: Save encrypted GitHub-hosted RuntimeRoot cache
+      - name: Save GitHub-hosted RuntimeRoot cache
         if: steps.runtime_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
@@ -265,12 +259,13 @@ jobs:
             echo "- iphoneos path: ${IPHONEOS_PATH:-<unavailable>}"
             echo "- iphonesimulator SDK: ${IPHONESIM_VERSION:-<unavailable>}"
             echo "- iphonesimulator path: ${IPHONESIM_PATH:-<unavailable>}"
-            echo "- Encrypted cache key: $RUNTIME_CACHE_KEY"
-            echo "- Encrypted cache hit: ${CACHE_HIT:-n/a}"
-            echo "- Encrypted archive SHA-256: ${ARCHIVE_SHA:-n/a}"
+            echo "- Cross-OS cache key: $RUNTIME_CACHE_KEY"
+            echo "- Cross-OS cache hit: ${CACHE_HIT:-n/a}"
+            echo "- RuntimeRoot.tar.zst SHA-256: ${ARCHIVE_SHA:-n/a}"
             echo
             echo 'Runtime OS build identity comes from simctl buildversion; CFBundleVersion is package metadata only.'
-            echo 'Only the encrypted RuntimeRoot archive is cached. SDK contents and plaintext RuntimeRoot files are not uploaded as artifacts.'
+            echo 'The complete GitHub-hosted RuntimeRoot is cached as RuntimeRoot.tar.zst using zstd -1; no runtime paths are excluded.'
+            echo 'RuntimeRoot bytes are not committed to Git or uploaded as workflow artifacts. SDK contents are not cached or uploaded.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload RuntimeRoot source diagnostic log
@@ -288,7 +283,6 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 45
     env:
-      RUNTIME_ARCHIVE_PASSWORD: ${{ secrets.IPASIM_RUNTIME_ARCHIVE_PASSWORD }}
       EXPECTED_RUNTIME_SHA256: ${{ needs.runtime-source.outputs.archive_sha256 }}
 
     steps:
@@ -301,15 +295,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if (-not $env:RUNTIME_ARCHIVE_PASSWORD) {
-            throw 'Repository secret IPASIM_RUNTIME_ARCHIVE_PASSWORD is not configured.'
-          }
           $expected = $env:EXPECTED_RUNTIME_SHA256.Trim().ToLowerInvariant()
           if ($expected -notmatch '^[0-9a-f]{64}$') {
             throw "GitHub-hosted runtime source did not provide a valid archive SHA256: '$expected'."
           }
           Write-Host "Runtime cache key: $env:RUNTIME_CACHE_KEY"
-          Write-Host "Expected encrypted RuntimeRoot SHA256: $expected"
+          Write-Host "Expected RuntimeRoot.tar.zst SHA256: $expected"
 
       - name: Verify published tester and extract it
         id: tester
@@ -367,7 +358,7 @@ jobs:
           }
           Write-Host "Pinned AWS IPA verified at upstream blob $actualBlob."
 
-      - name: Restore encrypted GitHub-hosted RuntimeRoot cache
+      - name: Restore GitHub-hosted RuntimeRoot cache
         id: runtime_cache
         uses: actions/cache/restore@v4
         with:
@@ -376,38 +367,53 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      - name: Verify encrypted RuntimeRoot archive SHA256
+      - name: Verify RuntimeRoot zstd archive SHA256
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $archive = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive\RuntimeRoot.7z'
+          $archive = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive\RuntimeRoot.tar.zst'
           if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
-            throw 'RuntimeRoot.7z is missing after the cross-OS cache restore.'
+            throw 'RuntimeRoot.tar.zst is missing after the cross-OS cache restore.'
           }
           $expected = $env:EXPECTED_RUNTIME_SHA256.Trim().ToLowerInvariant()
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $expected) {
-            throw "Encrypted RuntimeRoot SHA256 mismatch after cross-OS restore: expected $expected, got $actual."
+            throw "RuntimeRoot.tar.zst SHA256 mismatch after cross-OS restore: expected $expected, got $actual."
           }
-          Write-Host "Encrypted RuntimeRoot SHA256 verified: $actual"
+          Write-Host "RuntimeRoot.tar.zst SHA256 verified: $actual"
 
       - name: Extract ephemeral RuntimeRoot
         id: runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $archive = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive\RuntimeRoot.7z'
+          $archive = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive\RuntimeRoot.tar.zst'
+          $staging = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-zstd'
           $extract = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-expanded'
-          if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
-          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+          foreach ($path in @($staging, $extract)) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
+          }
+
           $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
           if (-not (Test-Path -LiteralPath $sevenZip -PathType Leaf)) {
             throw '7-Zip is not available on this GitHub-hosted Windows runner.'
           }
-          & $sevenZip x $archive "-o$extract" "-p$env:RUNTIME_ARCHIVE_PASSWORD" -y | Out-Host
+
+          & $sevenZip x $archive "-o$staging" -y | Out-Host
           if ($LASTEXITCODE -ne 0) {
-            throw "RuntimeRoot extraction failed with 7-Zip exit code $LASTEXITCODE."
+            throw "RuntimeRoot zstd decompression failed with 7-Zip exit code $LASTEXITCODE."
           }
+          $tarArchive = Join-Path $staging 'RuntimeRoot.tar'
+          if (-not (Test-Path -LiteralPath $tarArchive -PathType Leaf)) {
+            throw 'RuntimeRoot.tar was not produced from RuntimeRoot.tar.zst.'
+          }
+
+          & $sevenZip x $tarArchive "-o$extract" -y | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            throw "RuntimeRoot tar extraction failed with 7-Zip exit code $LASTEXITCODE."
+          }
+
           $runtimeRoot = $null
           foreach ($candidate in @((Join-Path $extract 'RuntimeRoot'), $extract)) {
             if ((Test-Path -LiteralPath (Join-Path $candidate 'System') -PathType Container) -and
@@ -420,7 +426,7 @@ jobs:
             throw 'Extracted RuntimeRoot does not expose System and usr at its top level.'
           }
           "runtime_root=$runtimeRoot" >> $env:GITHUB_OUTPUT
-          Write-Host 'RuntimeRoot extracted into ephemeral runner storage and validated.'
+          Write-Host 'RuntimeRoot.tar.zst extracted into ephemeral runner storage and validated.'
 
       - name: Run exact Test-Ipa.cmd against pinned AWS IPA
         id: acceptance
@@ -477,10 +483,10 @@ jobs:
             '- Exact test path: `Test-Ipa.cmd <IPA> <RuntimeRoot>`',
             "- Test exit code: $env:TEST_EXIT",
             "- Published tester SHA256: $env:TESTER_SHA",
-            "- Encrypted RuntimeRoot SHA256: $env:RUNTIME_SHA",
+            "- RuntimeRoot.tar.zst SHA256: $env:RUNTIME_SHA",
             "- Cross-OS RuntimeRoot cache hit: $env:RUNTIME_CACHE_HIT",
             '',
-            'Only the encrypted RuntimeRoot archive is cached. Plaintext exists only in runner.temp and is never uploaded as an artifact.'
+            'The GitHub-hosted RuntimeRoot is cached directly as RuntimeRoot.tar.zst. Extracted bytes exist only in runner.temp and are never uploaded as workflow artifacts.'
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Upload trusted acceptance console log
