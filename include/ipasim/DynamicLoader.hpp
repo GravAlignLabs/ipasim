@@ -9,6 +9,7 @@
 #include "ipasim/LoadedLibrary.hpp"
 #include "ipasim/Logger.hpp"
 #include "ipasim/RuntimeLog.hpp"
+#include "ipasim/RuntimeRootStore.hpp"
 
 #include <functional>
 #include <map>
@@ -21,8 +22,6 @@
 #include <vector>
 
 namespace ipasim {
-
-class RuntimeRootStore;
 
 struct BinaryPath {
   std::string Path;
