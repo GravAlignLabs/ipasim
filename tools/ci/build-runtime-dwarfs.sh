@@ -47,18 +47,22 @@ runtime_root="$runtime_bundle/Contents/Resources/RuntimeRoot"
 echo "Pinned RuntimeRoot: $runtime_root"
 
 brew install dwarfs
+installed_version="$(brew list --versions dwarfs | awk 'NR == 1 {print $2}')"
+if [[ "$installed_version" != "$version" ]]; then
+  echo "ERROR: expected Homebrew DwarFS $version but installed ${installed_version:-<none>}"
+  exit 1
+fi
 prefix="$(brew --prefix dwarfs)"
 mkdwarfs="$prefix/bin/mkdwarfs"
 dwarfsck="$prefix/bin/dwarfsck"
 for tool in "$mkdwarfs" "$dwarfsck"; do
   [[ -x "$tool" ]] || { echo "ERROR: expected DwarFS tool is missing: $tool"; exit 1; }
-  version_text="$($tool --version 2>&1)"
-  echo "$version_text"
-  grep -F "$version" <<< "$version_text" >/dev/null || {
-    echo "ERROR: expected DwarFS $version but $tool reported: $version_text"
+  if ! "$tool" -h >/dev/null 2>&1; then
+    echo "ERROR: DwarFS tool did not accept its documented help option: $tool"
     exit 1
-  }
+  fi
 done
+echo "Pinned DwarFS writer/checker: $installed_version ($prefix)"
 
 build_seconds=0
 cache_reused=false
