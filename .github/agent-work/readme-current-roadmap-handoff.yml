@@ -1,0 +1,30 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Refresh README new-chat handoff guidance so future contributors understand the
+  merged runtime checkpoint through PR #70, the public/trusted IPA acceptance
+  architecture, and the evidence-driven roadmap selection rule.
+
+scope:
+  - README.md
+  - .github/agent-work/readme-current-roadmap-handoff.yml
+
+branch: docs/current-runtime-handoff
+started_utc: 2026-09-03T13:16:00Z
+updated_utc: 2026-09-03T13:16:00Z
+base_sha: 877667229916ce86b76e7984babc1c60e3c388d5
+expected_pr: draft
+
+next_checkpoint: >-
+  Replace stale PR #65 handoff text with a compact current checkpoint covering
+  pthread core, public AWS acceptance, GitHub-hosted RuntimeRoot zstd caching,
+  frozen regression boundaries, and the rule that the first genuine non-cascading
+  runtime failure determines the next subsystem even when ROADMAP.md lists a
+  different nominal priority.
+
+notes: >-
+  Documentation only. Do not change runtime code, workflows, generated-route
+  approval, tester snapshots, or frozen acceptance behavior. Keep README useful
+  for a fresh AI chat without duplicating the full ROADMAP.md.
