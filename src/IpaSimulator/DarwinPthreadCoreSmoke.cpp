@@ -8,6 +8,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -83,6 +84,9 @@ SelfFn PthreadSelf = nullptr;
 ThreadIdFn PthreadThreadId = nullptr;
 JoinFn PthreadJoinGlobal = nullptr;
 ExitFn PthreadExit = nullptr;
+HANDLE DetachedReady = nullptr;
+HANDLE DetachedRelease = nullptr;
+std::atomic<HANDLE> DetachedBackingThread{nullptr};
 
 [[noreturn]] void fail(const char *Message) {
   std::fprintf(stderr, "[darwin-pthread-core-smoke] FAIL: %s\n", Message);
@@ -121,6 +125,25 @@ void *joinSelf(void *) {
 void *exitExplicitly(void *Argument) {
   PthreadExit(Argument);
   return reinterpret_cast<void *>(0xBADULL);
+}
+
+void *holdDetachedThread(void *Argument) {
+  require(PthreadSelf() != nullptr, "detached worker pthread_self returned null");
+  std::uint64_t ThreadId = 0;
+  require(PthreadThreadId(nullptr, &ThreadId) == 0 && ThreadId != 0,
+          "detached worker thread id missing");
+
+  HANDLE BackingThread = nullptr;
+  require(DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+                          GetCurrentProcess(), &BackingThread, SYNCHRONIZE,
+                          FALSE, 0) != FALSE,
+          "could not duplicate detached backing thread handle");
+  DetachedBackingThread.store(BackingThread, std::memory_order_release);
+  require(SetEvent(DetachedReady) != FALSE,
+          "could not signal detached worker readiness");
+  require(WaitForSingleObject(DetachedRelease, 5000) == WAIT_OBJECT_0,
+          "detached worker release timed out");
+  return Argument;
 }
 
 } // namespace
@@ -307,21 +330,47 @@ int main(int argc, char **argv) {
   require(PthreadJoinGlobal(Thread, &Joined) == 0 && Joined == Expected,
           "pthread_exit value was not visible to joiner");
 
-  // Detached threads reject join and second detach without becoming fake
-  // joinable objects.
+  // Keep the detached backing thread alive while its rejection semantics are
+  // checked, then wait for the real Windows thread to terminate before unloading
+  // the provider DLL. This prevents the smoke itself from racing FreeLibrary
+  // against pthreadStartThunk while making EINVAL deterministic instead of
+  // accepting ESRCH after an already-completed detached thread.
+  DetachedReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  DetachedRelease = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  require(DetachedReady != nullptr && DetachedRelease != nullptr,
+          "could not create detached-thread synchronization events");
+  DetachedBackingThread.store(nullptr, std::memory_order_relaxed);
+
   require(AttrInit(&Attr) == 0, "detached attr init failed");
   require(AttrSetDetach(&Attr, PthreadCreateDetached) == 0,
           "detached attr setup failed");
   Thread = nullptr;
   require(PthreadCreate(&Thread, &Attr,
-                        reinterpret_cast<void *>(&returnArgument), nullptr) == 0,
+                        reinterpret_cast<void *>(&holdDetachedThread), nullptr) ==
+              0,
           "detached pthread_create failed");
-  const int JoinDetached = PthreadJoinGlobal(Thread, nullptr);
-  require(JoinDetached == EINVAL || JoinDetached == ESRCH,
+  require(WaitForSingleObject(DetachedReady, 5000) == WAIT_OBJECT_0,
+          "detached worker did not become ready");
+  HANDLE DetachedThread =
+      DetachedBackingThread.load(std::memory_order_acquire);
+  require(DetachedThread != nullptr,
+          "detached worker did not expose its backing thread handle");
+
+  require(PthreadJoinGlobal(Thread, nullptr) == EINVAL,
           "detached thread unexpectedly joined");
-  const int DetachAgain = PthreadDetach(Thread);
-  require(DetachAgain == EINVAL || DetachAgain == ESRCH,
+  require(PthreadDetach(Thread) == EINVAL,
           "second detach unexpectedly succeeded");
+
+  require(SetEvent(DetachedRelease) != FALSE,
+          "could not release detached worker");
+  require(WaitForSingleObject(DetachedThread, 5000) == WAIT_OBJECT_0,
+          "detached backing Windows thread did not terminate");
+  CloseHandle(DetachedThread);
+  CloseHandle(DetachedRelease);
+  CloseHandle(DetachedReady);
+  DetachedBackingThread.store(nullptr, std::memory_order_relaxed);
+  DetachedRelease = nullptr;
+  DetachedReady = nullptr;
 
   require(AttrDestroy(&Attr) == 0, "attr destroy failed");
   require(AttrDestroy(&Attr) == DarwinErrnoInvalid,
