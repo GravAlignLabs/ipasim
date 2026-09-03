@@ -1,0 +1,30 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Profile GitHub-hosted iOS RuntimeRoot packaging independently of the trusted
+  acceptance workflow so first-cache-fill time and archive size can be reduced
+  using measured results rather than assumptions.
+
+scope:
+  - tools/ci/runtime-root-package-profile.sh
+  - .github/workflows/runtime-root-package-profile.yml
+  - .github/agent-work/runtime-root-package-performance.yml
+
+branch: ci/runtime-root-package-performance
+started_utc: 2026-09-03T12:31:00Z
+updated_utc: 2026-09-03T12:31:00Z
+base_sha: 70ea97560d8bb352f5d52cf5ffaa7c8923869723
+expected_pr: draft
+
+next_checkpoint: >-
+  Add a secret-free macOS profiling workflow that records top-level RuntimeRoot
+  logical size/file counts and measures candidate archive strategies without
+  uploading Apple runtime bytes or changing the production acceptance path.
+
+notes: >-
+  Measurement only in this claim. Do not modify trusted-github-runtime-acceptance.yml,
+  do not upload/cache plaintext or test archives, and do not change ipaSim runtime
+  behavior. Results must identify any excluded paths explicitly rather than hiding
+  warnings.
