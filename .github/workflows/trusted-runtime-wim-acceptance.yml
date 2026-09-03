@@ -1,0 +1,669 @@
+name: Trusted RuntimeRoot WIM acceptance
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/trusted-runtime-wim-acceptance.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: trusted-runtime-wim-acceptance
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+env:
+  AWS_IPA_COMMIT: 58e48234db510bd4fbf643643e8808c5d6a13845
+  AWS_IPA_BLOB: 06a33a39286ffd7c9d300c5924750b6f97c4e346
+  AWS_IPA_SIZE: '2138167'
+  RUNTIME_XCODE_PATH: /Applications/Xcode_16.4.app
+  RUNTIME_IOS_VERSION: '18.5'
+  RUNTIME_IOS_BUILD: 22F77
+  RUNTIME_WIM_CACHE_KEY: ipasim-github-runtime-macos15-xcode16.4-ios18.5-22F77-wim-lzx20-v1
+
+jobs:
+  runtime-wim-source:
+    name: Capture pinned RuntimeRoot directly as WIM
+    runs-on: macos-15
+    timeout-minutes: 60
+    outputs:
+      runtime_version: ${{ steps.discovery.outputs.runtime_version }}
+      runtime_build: ${{ steps.discovery.outputs.runtime_build }}
+      runtime_identifier: ${{ steps.discovery.outputs.runtime_identifier }}
+      wim_sha256: ${{ steps.wim.outputs.wim_sha256 }}
+      wim_size: ${{ steps.wim.outputs.wim_size }}
+
+    steps:
+      - name: Discover pinned GitHub-hosted RuntimeRoot
+        id: discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/runtime-wim-source.log"
+          : > "$log"
+          exec > >(tee -a "$log") 2>&1
+
+          if [[ ! -d "$RUNTIME_XCODE_PATH" ]]; then
+            echo "ERROR: pinned Xcode is not installed: $RUNTIME_XCODE_PATH"
+            exit 1
+          fi
+
+          sudo xcode-select -s "$RUNTIME_XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+
+          runtime_json="$RUNNER_TEMP/simctl-runtimes.json"
+          xcrun simctl list runtimes --json > "$runtime_json"
+
+          runtime_record="$(python3 - "$runtime_json" "$RUNTIME_IOS_VERSION" "$RUNTIME_IOS_BUILD" <<'PY'
+          import json
+          import sys
+
+          path, target_version, target_build = sys.argv[1], sys.argv[2], sys.argv[3]
+          with open(path, 'r', encoding='utf-8') as handle:
+              data = json.load(handle)
+
+          for runtime in data.get('runtimes', []):
+              if runtime.get('buildversion') != target_build:
+                  continue
+              if runtime.get('version') != target_version:
+                  continue
+              if runtime.get('isAvailable') is False:
+                  continue
+              bundle = runtime.get('bundlePath') or runtime.get('dataPath')
+              if not bundle:
+                  continue
+              print('\t'.join((
+                  bundle,
+                  runtime.get('version', ''),
+                  runtime.get('buildversion', ''),
+                  runtime.get('identifier') or '',
+              )))
+              sys.exit(0)
+
+          print(
+              f'iOS simulator runtime {target_version} build {target_build} was not found.',
+              file=sys.stderr,
+          )
+          sys.exit(1)
+          PY
+          )"
+
+          IFS=$'\t' read -r runtime_bundle runtime_version runtime_build runtime_identifier <<< "$runtime_record"
+          runtime_root="$runtime_bundle/Contents/Resources/RuntimeRoot"
+
+          if [[ "$runtime_version" != "$RUNTIME_IOS_VERSION" || "$runtime_build" != "$RUNTIME_IOS_BUILD" ]]; then
+            echo "ERROR: runtime identity changed: expected $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD), got $runtime_version ($runtime_build)"
+            exit 1
+          fi
+          if [[ ! -d "$runtime_root/System" || ! -d "$runtime_root/usr" ]]; then
+            echo "ERROR: RuntimeRoot does not expose System and usr: $runtime_root"
+            exit 1
+          fi
+
+          echo "Pinned runtime: $runtime_version ($runtime_build)"
+          echo "Runtime identifier: ${runtime_identifier:-<none>}"
+          echo "RuntimeRoot: $runtime_root"
+          {
+            echo "runtime_root=$runtime_root"
+            echo "runtime_version=$runtime_version"
+            echo "runtime_build=$runtime_build"
+            echo "runtime_identifier=$runtime_identifier"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore WIM cache
+        id: wim_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ipasim-runtime-wim
+          key: ${{ env.RUNTIME_WIM_CACHE_KEY }}
+          enableCrossOsArchive: true
+
+      - name: Install wimlib on WIM cache miss
+        if: steps.wim_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/runtime-wim-source.log"
+          exec > >(tee -a "$log") 2>&1
+
+          if command -v wimlib-imagex >/dev/null 2>&1; then
+            wimlib-imagex --version
+            exit 0
+          fi
+
+          brew install wimlib
+          wimlib-imagex --version
+
+      - name: Capture complete RuntimeRoot directly as WIM
+        if: steps.wim_cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          RUNTIME_ROOT: ${{ steps.discovery.outputs.runtime_root }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/runtime-wim-source.log"
+          exec > >(tee -a "$log") 2>&1
+
+          out_dir="$GITHUB_WORKSPACE/ipasim-runtime-wim"
+          wim="$out_dir/RuntimeRoot.wim"
+          mkdir -p "$out_dir"
+          rm -f "$wim"
+
+          echo "Capturing the complete RuntimeRoot directly into a WIM."
+          echo "No RuntimeRoot paths are excluded."
+          echo "wimlib preserves symbolic links as WIM reparse points."
+          echo "Compression: non-solid LZX level 20 for random-access mounting."
+
+          sudo wimlib-imagex capture \
+            "$RUNTIME_ROOT" \
+            "$wim" \
+            "RuntimeRoot" \
+            "GitHub-hosted iOS $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)" \
+            --compress=LZX:20 \
+            --check
+
+          sudo chown "$(id -u):$(id -g)" "$wim"
+          chmod 600 "$wim"
+
+          if [[ ! -s "$wim" ]]; then
+            echo "ERROR: RuntimeRoot.wim was not created."
+            exit 1
+          fi
+
+          wimlib-imagex verify "$wim"
+          wimlib-imagex info "$wim"
+          ls -lh "$wim"
+
+      - name: Verify WIM and publish source digest
+        id: wim
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/runtime-wim-source.log"
+          exec > >(tee -a "$log") 2>&1
+
+          wim="$GITHUB_WORKSPACE/ipasim-runtime-wim/RuntimeRoot.wim"
+          if [[ ! -f "$wim" ]]; then
+            echo "ERROR: WIM cache did not provide RuntimeRoot.wim."
+            exit 1
+          fi
+
+          sha="$(shasum -a 256 "$wim" | awk '{print tolower($1)}')"
+          size="$(stat -f '%z' "$wim")"
+          if [[ ! "$sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "ERROR: invalid RuntimeRoot.wim SHA-256: $sha"
+            exit 1
+          fi
+          if [[ "$size" -le 0 ]]; then
+            echo "ERROR: invalid RuntimeRoot.wim size: $size"
+            exit 1
+          fi
+
+          echo "RuntimeRoot.wim SHA-256: $sha"
+          echo "RuntimeRoot.wim size: $size bytes"
+          echo "wim_sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "wim_size=$size" >> "$GITHUB_OUTPUT"
+
+      - name: Save WIM cache
+        if: steps.wim_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ipasim-runtime-wim
+          key: ${{ env.RUNTIME_WIM_CACHE_KEY }}
+          enableCrossOsArchive: true
+
+      - name: Publish WIM source summary
+        if: always()
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.wim_cache.outputs.cache-hit }}
+          WIM_SHA: ${{ steps.wim.outputs.wim_sha256 }}
+          WIM_SIZE: ${{ steps.wim.outputs.wim_size }}
+          RUNTIME_VERSION: ${{ steps.discovery.outputs.runtime_version }}
+          RUNTIME_BUILD: ${{ steps.discovery.outputs.runtime_build }}
+          RUNTIME_IDENTIFIER: ${{ steps.discovery.outputs.runtime_identifier }}
+        run: |
+          {
+            echo '## Trusted RuntimeRoot WIM source'
+            echo
+            echo "- Runtime: iOS ${RUNTIME_VERSION:-<unavailable>} (${RUNTIME_BUILD:-<unavailable>})"
+            echo "- Runtime identifier: ${RUNTIME_IDENTIFIER:-<unavailable>}"
+            echo "- WIM cache key: $RUNTIME_WIM_CACHE_KEY"
+            echo "- WIM cache hit: ${CACHE_HIT:-n/a}"
+            echo "- RuntimeRoot.wim SHA-256: ${WIM_SHA:-n/a}"
+            echo "- RuntimeRoot.wim size: ${WIM_SIZE:-n/a} bytes"
+            echo
+            echo 'The WIM is captured directly from all filesystem entries in the GitHub-hosted RuntimeRoot on macOS.'
+            echo 'macOS-specific extended attributes are not represented by WIM and remain a known experiment limitation.'
+            echo 'No RuntimeRoot files are committed to Git or uploaded as workflow artifacts.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload WIM source diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trusted-runtime-wim-source-log-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: ${{ runner.temp }}/runtime-wim-source.log
+
+      - name: Report WIM source diagnostic to merged PR
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          DISCOVERY_OUTCOME: ${{ steps.discovery.outcome }}
+          CACHE_OUTCOME: ${{ steps.wim_cache.outcome }}
+          WIM_OUTCOME: ${{ steps.wim.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ipasim-runtime-wim-diagnostic -->';
+            const { owner, repo } = context.repo;
+            const pulls = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner,
+              repo,
+              commit_sha: context.sha,
+            });
+            if (!pulls.data.length) {
+              core.notice('No pull request is associated with this commit; skipping PR diagnostic comment.');
+              return;
+            }
+
+            const pr = pulls.data[0];
+            const logPath = process.env.RUNNER_TEMP + '/runtime-wim-source.log';
+            let tail = '<source log unavailable>';
+            if (fs.existsSync(logPath)) {
+              const text = fs.readFileSync(logPath, 'utf8');
+              tail = text.slice(-7000);
+            }
+
+            const body = `${marker}
+            ## RuntimeRoot WIM acceptance
+
+            Commit: \`${context.sha}\`
+
+            The trusted WIM source stage ran before the Windows mount stage.
+
+            - Runtime discovery: **${process.env.DISCOVERY_OUTCOME || 'unknown'}**
+            - WIM cache restore/build: **${process.env.CACHE_OUTCOME || 'unknown'}**
+            - WIM verification: **${process.env.WIM_OUTCOME || 'unknown'}**
+
+            <details><summary>Latest actionable source diagnostic</summary>
+
+            \`\`\`text
+            ${tail}
+            \`\`\`
+            </details>
+
+            This comment is updated in place by subsequent WIM acceptance stages.`;
+
+            const comments = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number: pr.number,
+              per_page: 100,
+            });
+            const existing = comments.data.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: pr.number,
+                body,
+              });
+            }
+
+  trusted-wim-runtime:
+    name: Mount RuntimeRoot WIM and run pinned AWS sample IPA
+    needs: runtime-wim-source
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      EXPECTED_WIM_SHA256: ${{ needs.runtime-wim-source.outputs.wim_sha256 }}
+      EXPECTED_WIM_SIZE: ${{ needs.runtime-wim-source.outputs.wim_size }}
+
+    steps:
+      - name: Check out trusted master
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Verify published tester and extract it
+        id: tester
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $build = Join-Path $env:GITHUB_WORKSPACE 'tester\windows\latest\BUILD.txt'
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'tester\windows\latest\ipasim-ipa-tester.zip'
+          foreach ($path in @($build, $zip)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Published tester input is missing: $path"
+            }
+          }
+
+          $line = Get-Content -LiteralPath $build |
+            Where-Object { $_ -like 'zip_sha256=*' } |
+            Select-Object -First 1
+          if (-not $line) { throw 'Published BUILD.txt does not contain zip_sha256.' }
+
+          $expected = ($line -split '=', 2)[1].Trim().ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expected -notmatch '^[0-9a-f]{64}$') { throw 'Published tester zip_sha256 is invalid.' }
+          if ($actual -ne $expected) {
+            throw "Published tester SHA256 mismatch: expected $expected, got $actual."
+          }
+
+          $extract = Join-Path $env:RUNNER_TEMP 'trusted-wim-ipa-tester'
+          if (Test-Path -LiteralPath $extract) {
+            Remove-Item -LiteralPath $extract -Recurse -Force
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+
+          foreach ($name in @('Test-Ipa.cmd', 'Test-Ipa.ps1', 'IpaProbe.exe', 'Arm64Smoke.exe')) {
+            $path = Join-Path $extract $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Published tester is incomplete: $path"
+            }
+          }
+
+          "sha256=$expected" >> $env:GITHUB_OUTPUT
+          Write-Host "Published tester SHA256 verified: $expected"
+
+      - name: Download and verify pinned AWS IPA
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ipa = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.ipa'
+          $url = "https://raw.githubusercontent.com/aws-samples/aws-device-farm-sample-app-for-ios/$env:AWS_IPA_COMMIT/prebuilt/prebuiltSampleApp.ipa"
+
+          & curl.exe -L --fail --silent --show-error $url -o $ipa
+          if ($LASTEXITCODE -ne 0) {
+            throw "AWS sample IPA download failed with curl exit code $LASTEXITCODE."
+          }
+          if (-not (Test-Path -LiteralPath $ipa -PathType Leaf)) {
+            throw 'AWS sample IPA was not downloaded.'
+          }
+
+          $size = (Get-Item -LiteralPath $ipa).Length
+          if ($size -ne [int64]$env:AWS_IPA_SIZE) {
+            throw "AWS sample IPA size mismatch: expected $env:AWS_IPA_SIZE, got $size"
+          }
+
+          $actualBlob = (& git hash-object -- $ipa).Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0) { throw 'git hash-object failed for the AWS sample IPA.' }
+          if ($actualBlob -ne $env:AWS_IPA_BLOB) {
+            throw "AWS sample IPA Git blob mismatch: expected $env:AWS_IPA_BLOB, got $actualBlob"
+          }
+
+          Write-Host "Pinned AWS IPA verified at upstream blob $actualBlob."
+
+      - name: Restore RuntimeRoot WIM cache
+        id: wim_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ipasim-runtime-wim
+          key: ${{ env.RUNTIME_WIM_CACHE_KEY }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Verify RuntimeRoot WIM digest and image metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $wim = Join-Path $env:GITHUB_WORKSPACE 'ipasim-runtime-wim\RuntimeRoot.wim'
+          if (-not (Test-Path -LiteralPath $wim -PathType Leaf)) {
+            throw 'RuntimeRoot.wim is missing after cache restore.'
+          }
+
+          $expected = $env:EXPECTED_WIM_SHA256.Trim().ToLowerInvariant()
+          if ($expected -notmatch '^[0-9a-f]{64}$') {
+            throw "RuntimeRoot source did not provide a valid WIM SHA256: '$expected'."
+          }
+
+          $actual = (Get-FileHash -LiteralPath $wim -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "RuntimeRoot.wim SHA256 mismatch: expected $expected, got $actual."
+          }
+
+          $expectedSize = [int64]$env:EXPECTED_WIM_SIZE
+          $actualSize = (Get-Item -LiteralPath $wim).Length
+          if ($actualSize -ne $expectedSize) {
+            throw "RuntimeRoot.wim size mismatch: expected $expectedSize, got $actualSize."
+          }
+
+          Write-Host "RuntimeRoot.wim SHA256 verified: $actual"
+          Write-Host "RuntimeRoot.wim size verified: $actualSize bytes"
+
+          $dismLog = Join-Path $env:RUNNER_TEMP 'runtime-wim-dism-info.log'
+          & dism.exe /English /Get-WimInfo "/WimFile:$wim" 2>&1 | Tee-Object -FilePath $dismLog
+          if ($LASTEXITCODE -ne 0) {
+            throw "DISM could not read RuntimeRoot.wim metadata; exit code $LASTEXITCODE."
+          }
+
+      - name: Mount RuntimeRoot WIM read-only
+        id: runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $wim = Join-Path $env:GITHUB_WORKSPACE 'ipasim-runtime-wim\RuntimeRoot.wim'
+          $mount = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-wim-mount'
+          $scratch = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-wim-scratch'
+
+          foreach ($path in @($mount, $scratch)) {
+            if (Test-Path -LiteralPath $path) {
+              Remove-Item -LiteralPath $path -Recurse -Force
+            }
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
+          }
+
+          Write-Host 'Windows identity:'
+          & whoami.exe
+          Write-Host 'Relevant privileges:'
+          & whoami.exe /priv
+
+          $log = Join-Path $env:RUNNER_TEMP 'runtime-wim-mount.log'
+          & dism.exe /English /Mount-Image "/ImageFile:$wim" /Index:1 "/MountDir:$mount" /ReadOnly /Optimize "/ScratchDir:$scratch" 2>&1 |
+            Tee-Object -FilePath $log
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            throw "Read-only RuntimeRoot WIM mount failed with DISM exit code $exitCode."
+          }
+
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'runtime-wim-mounted.flag') -Value $mount -Encoding ascii
+
+          foreach ($required in @('System', 'usr')) {
+            $path = Join-Path $mount $required
+            if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+              throw "Mounted RuntimeRoot is missing required top-level directory: $required"
+            }
+          }
+
+          $resolved = (Resolve-Path -LiteralPath $mount).Path
+          "runtime_root=$resolved" >> $env:GITHUB_OUTPUT
+          Write-Host "RuntimeRoot WIM mounted read-only at: $resolved"
+
+      - name: Run exact Test-Ipa.cmd against mounted RuntimeRoot
+        id: acceptance
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RUNTIME_ROOT: ${{ steps.runtime.outputs.runtime_root }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tester = Join-Path $env:RUNNER_TEMP 'trusted-wim-ipa-tester'
+          $testCmd = Join-Path $tester 'Test-Ipa.cmd'
+          $ipa = Join-Path $env:RUNNER_TEMP 'AWSDeviceFarmSample.ipa'
+          $log = Join-Path $env:RUNNER_TEMP 'trusted-wim-public-ipa-acceptance.log'
+          $wrapper = Join-Path $env:RUNNER_TEMP 'run-trusted-wim-public-ipa.cmd'
+
+          @"
+          @echo off
+          call "$testCmd" "$ipa" "$env:RUNTIME_ROOT"
+          exit /b %ERRORLEVEL%
+          "@ | Set-Content -LiteralPath $wrapper -Encoding ascii
+
+          Write-Host 'Running exact tester path against read-only mounted WIM:'
+          Write-Host '  Test-Ipa.cmd "<AWSDeviceFarmSample.ipa>" "<mounted RuntimeRoot>"'
+          'continue' | & cmd.exe /d /c $wrapper 2>&1 | Tee-Object -FilePath $log
+          $exitCode = $LASTEXITCODE
+          "exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+          exit $exitCode
+
+      - name: Unmount RuntimeRoot WIM
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $flag = Join-Path $env:RUNNER_TEMP 'runtime-wim-mounted.flag'
+          if (-not (Test-Path -LiteralPath $flag -PathType Leaf)) {
+            Write-Host 'No successful WIM mount was recorded; nothing to unmount.'
+            exit 0
+          }
+
+          $mount = (Get-Content -LiteralPath $flag -Raw).Trim()
+          $log = Join-Path $env:RUNNER_TEMP 'runtime-wim-unmount.log'
+          & dism.exe /English /Unmount-Image "/MountDir:$mount" /Discard 2>&1 |
+            Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "RuntimeRoot WIM unmount failed with DISM exit code $LASTEXITCODE."
+            exit $LASTEXITCODE
+          }
+
+      - name: Publish trusted WIM acceptance summary
+        if: always()
+        shell: pwsh
+        env:
+          TEST_EXIT: ${{ steps.acceptance.outputs.exit_code }}
+          WIM_CACHE_HIT: ${{ steps.wim_cache.outputs.cache-hit }}
+          WIM_SHA: ${{ needs.runtime-wim-source.outputs.wim_sha256 }}
+          WIM_SIZE: ${{ needs.runtime-wim-source.outputs.wim_size }}
+          TESTER_SHA: ${{ steps.tester.outputs.sha256 }}
+          RUNTIME_VERSION: ${{ needs.runtime-wim-source.outputs.runtime_version }}
+          RUNTIME_BUILD: ${{ needs.runtime-wim-source.outputs.runtime_build }}
+        run: |
+          @(
+            '## Trusted public IPA WIM RuntimeRoot acceptance',
+            '',
+            '- Workload: pinned AWS Device Farm sample IPA',
+            "- Runtime source: GitHub-hosted iOS $env:RUNTIME_VERSION ($env:RUNTIME_BUILD)",
+            '- Runtime delivery: read-only mounted WIM; no Windows RuntimeRoot expansion',
+            "- WIM cache hit: $env:WIM_CACHE_HIT",
+            "- RuntimeRoot.wim SHA256: $env:WIM_SHA",
+            "- RuntimeRoot.wim size: $env:WIM_SIZE bytes",
+            "- Published tester SHA256: $env:TESTER_SHA",
+            "- Test exit code: $env:TEST_EXIT"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload trusted WIM acceptance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trusted-runtime-wim-acceptance-log-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}\runtime-wim-dism-info.log
+            ${{ runner.temp }}\runtime-wim-mount.log
+            ${{ runner.temp }}\runtime-wim-unmount.log
+            ${{ runner.temp }}\trusted-wim-public-ipa-acceptance.log
+            ${{ github.workspace }}\tester\windows\latest\BUILD.txt
+
+      - name: Report WIM acceptance diagnostic to merged PR
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          TESTER_OUTCOME: ${{ steps.tester.outcome }}
+          WIM_CACHE_OUTCOME: ${{ steps.wim_cache.outcome }}
+          RUNTIME_OUTCOME: ${{ steps.runtime.outcome }}
+          ACCEPTANCE_OUTCOME: ${{ steps.acceptance.outcome }}
+          TEST_EXIT: ${{ steps.acceptance.outputs.exit_code }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ipasim-runtime-wim-diagnostic -->';
+            const { owner, repo } = context.repo;
+            const pulls = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner,
+              repo,
+              commit_sha: context.sha,
+            });
+            if (!pulls.data.length) {
+              core.notice('No pull request is associated with this commit; skipping PR diagnostic comment.');
+              return;
+            }
+
+            const pr = pulls.data[0];
+            const candidates = [
+              process.env.RUNNER_TEMP + '/trusted-wim-public-ipa-acceptance.log',
+              process.env.RUNNER_TEMP + '/runtime-wim-mount.log',
+              process.env.RUNNER_TEMP + '/runtime-wim-dism-info.log',
+            ];
+            let selected = '<acceptance diagnostic unavailable>';
+            for (const path of candidates) {
+              if (!fs.existsSync(path)) continue;
+              const text = fs.readFileSync(path, 'utf8');
+              if (text.trim()) {
+                selected = text.slice(-8000);
+                break;
+              }
+            }
+
+            const body = `${marker}
+            ## RuntimeRoot WIM acceptance
+
+            Commit: \`${context.sha}\`
+
+            - Tester verification: **${process.env.TESTER_OUTCOME || 'unknown'}**
+            - WIM cache restore: **${process.env.WIM_CACHE_OUTCOME || 'unknown'}**
+            - Read-only WIM mount: **${process.env.RUNTIME_OUTCOME || 'unknown'}**
+            - \`Test-Ipa.cmd\`: **${process.env.ACCEPTANCE_OUTCOME || 'not reached'}**
+            - Tester exit code: **${process.env.TEST_EXIT || 'n/a'}**
+
+            <details><summary>Latest actionable diagnostic</summary>
+
+            \`\`\`text
+            ${selected}
+            \`\`\`
+            </details>
+
+            The workflow publishes this diagnostic before it fails normally.`;
+
+            const comments = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number: pr.number,
+              per_page: 100,
+            });
+            const existing = comments.data.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: pr.number,
+                body,
+              });
+            }
+
+      - name: Fail after trusted diagnostic publication
+        if: steps.acceptance.outcome == 'failure'
+        shell: pwsh
+        run: throw 'Trusted public IPA acceptance failed; see the workflow summary and uploaded console log.'
