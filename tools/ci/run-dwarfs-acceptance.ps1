@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory = $true)][Int64]$ExpectedImageSize,
     [Parameter(Mandatory = $true)][string]$TesterRoot,
     [Parameter(Mandatory = $true)][string]$ReaderBridge,
+    [Parameter(Mandatory = $true)][string]$DirectoryArchive,
     [Parameter(Mandatory = $true)][string]$Log
 )
 
@@ -20,7 +21,7 @@ function Write-Log([string]$Message) {
     $Message | Tee-Object -FilePath $Log -Append | Write-Host
 }
 
-function Invoke-Native {
+function Invoke-RequiredNative {
     param(
         [Parameter(Mandatory = $true)][string]$Exe,
         [Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments
@@ -32,10 +33,65 @@ function Invoke-Native {
     }
 }
 
+function Invoke-ProbeForBoundary {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$Exe,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+
+    Write-Log ''
+    Write-Log "===== $Label ====="
+    $RawLines = @(& $Exe @Arguments 2>&1)
+    $ExitCode = $LASTEXITCODE
+    $Lines = @()
+    foreach ($RawLine in $RawLines) {
+        $Line = [string]$RawLine
+        $Lines += $Line
+        $Line | Tee-Object -FilePath $Log -Append | Write-Host
+    }
+
+    $RelevantErrors = @($Lines | Where-Object {
+        $_ -match '^Error:' -and $_ -ne 'Error: unsupported ARM64 relocation.'
+    })
+    $SymbolBoundary = $RelevantErrors |
+        Where-Object { $_ -match '^Error: symbol .+ was not found for library ordinal -?\d+\.$' } |
+        Select-Object -First 1
+    $FixupBoundary = $RelevantErrors |
+        Where-Object { $_ -match '^Error: cannot apply chained fixups for ' } |
+        Select-Object -First 1
+
+    if ($ExitCode -eq 0) {
+        $CanonicalBoundary = '<success>'
+    }
+    elseif ($SymbolBoundary -and $FixupBoundary) {
+        $CanonicalBoundary = "$SymbolBoundary || $FixupBoundary"
+    }
+    elseif ($FixupBoundary) {
+        $CanonicalBoundary = $FixupBoundary
+    }
+    elseif ($SymbolBoundary) {
+        $CanonicalBoundary = $SymbolBoundary
+    }
+    elseif ($RelevantErrors.Count -gt 0) {
+        $CanonicalBoundary = $RelevantErrors[0]
+    }
+    else {
+        throw "$Label exited with code $ExitCode without a diagnosable non-relocation loader/runtime boundary."
+    }
+
+    Write-Log "$Label exit code: $ExitCode"
+    Write-Log "$Label canonical boundary: $CanonicalBoundary"
+    return [pscustomobject]@{
+        ExitCode = [int]$ExitCode
+        Boundary = [string]$CanonicalBoundary
+    }
+}
+
 try {
-    foreach ($Required in @($Image, $ReaderBridge)) {
+    foreach ($Required in @($Image, $ReaderBridge, $DirectoryArchive)) {
         if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {
-            throw "required DwarFS acceptance input is missing: $Required"
+            throw "required RuntimeRoot acceptance input is missing: $Required"
         }
     }
     if (-not (Test-Path -LiteralPath $TesterRoot -PathType Container)) {
@@ -52,6 +108,10 @@ try {
         throw "RuntimeRoot.dwarfs size mismatch: expected $ExpectedImageSize got $ActualImageSize"
     }
     Write-Log "RuntimeRoot.dwarfs verified: $ActualImageSha ($ActualImageSize bytes)"
+
+    $DirectoryArchiveSha = (Get-FileHash -LiteralPath $DirectoryArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+    $DirectoryArchiveSize = (Get-Item -LiteralPath $DirectoryArchive).Length
+    Write-Log "RuntimeRoot.tar.zst baseline cache verified as a readable immutable cache object: $DirectoryArchiveSha ($DirectoryArchiveSize bytes)"
 
     $Probe = Get-ChildItem -Path $TesterRoot -Filter IpaProbe.exe -Recurse -File | Select-Object -First 1
     if ($null -eq $Probe) {
@@ -132,9 +192,74 @@ try {
     $AppExecutable = $MachOCandidates[0].FullName
     Write-Log "Pinned IPA executable: $AppExecutable"
 
-    Invoke-Native $Arm64Smoke
-    Invoke-Native $Probe.FullName $AppExecutable '--runtime-root-dwarfs' $Image $ReaderBridge
-    Write-Log 'Full DwarFS RuntimeRoot probe completed successfully on real Windows.'
+    Invoke-RequiredNative $Arm64Smoke
+
+    $DwarfsResult = Invoke-ProbeForBoundary `
+        -Label 'DwarFS RuntimeRoot probe' `
+        -Exe $Probe.FullName `
+        -Arguments @($AppExecutable, '--runtime-root-dwarfs', $Image, $ReaderBridge)
+
+    # The image has already produced its authoritative loader result. Remove the
+    # restored cache copy before materializing the directory baseline so the
+    # comparison does not unnecessarily retain both full RuntimeRoot forms.
+    $DwarfsCacheDirectory = Split-Path -Parent $Image
+    if (Test-Path -LiteralPath $DwarfsCacheDirectory -PathType Container) {
+        Remove-Item -LiteralPath $DwarfsCacheDirectory -Recurse -Force
+        Write-Log 'Released restored DwarFS cache bytes before directory baseline extraction.'
+    }
+
+    $SevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+    if (-not (Test-Path -LiteralPath $SevenZip -PathType Leaf)) {
+        throw '7-Zip is not available on this GitHub-hosted Windows runner.'
+    }
+    $Staging = Join-Path $env:RUNNER_TEMP 'runtime-root-zstd-staging'
+    $Expanded = Join-Path $env:RUNNER_TEMP 'runtime-root-directory-baseline'
+    foreach ($Path in @($Staging, $Expanded)) {
+        if (Test-Path -LiteralPath $Path) {
+            Remove-Item -LiteralPath $Path -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    }
+
+    Invoke-RequiredNative $SevenZip 'x' $DirectoryArchive "-o$Staging" '-y'
+    $TarArchive = Join-Path $Staging 'RuntimeRoot.tar'
+    if (-not (Test-Path -LiteralPath $TarArchive -PathType Leaf)) {
+        throw 'RuntimeRoot.tar was not produced from the trusted zstd baseline cache.'
+    }
+    Invoke-RequiredNative $SevenZip 'x' $TarArchive "-o$Expanded" '-y'
+
+    $RuntimeRoot = $null
+    foreach ($Candidate in @((Join-Path $Expanded 'RuntimeRoot'), $Expanded)) {
+        if ((Test-Path -LiteralPath (Join-Path $Candidate 'System') -PathType Container) -and
+            (Test-Path -LiteralPath (Join-Path $Candidate 'usr') -PathType Container)) {
+            $RuntimeRoot = (Resolve-Path -LiteralPath $Candidate).Path
+            break
+        }
+    }
+    if (-not $RuntimeRoot) {
+        throw 'Extracted directory baseline does not expose System and usr at its top level.'
+    }
+    Write-Log "Extracted directory RuntimeRoot baseline: $RuntimeRoot"
+
+    $DirectoryResult = Invoke-ProbeForBoundary `
+        -Label 'Directory RuntimeRoot probe' `
+        -Exe $Probe.FullName `
+        -Arguments @($AppExecutable, '--runtime-root-dir', $RuntimeRoot)
+
+    if ($DwarfsResult.ExitCode -ne $DirectoryResult.ExitCode) {
+        throw "RuntimeRoot backend parity failed: DwarFS exit $($DwarfsResult.ExitCode), directory exit $($DirectoryResult.ExitCode)."
+    }
+    if ($DwarfsResult.Boundary -ne $DirectoryResult.Boundary) {
+        throw "RuntimeRoot backend parity failed: DwarFS boundary '$($DwarfsResult.Boundary)' differs from directory boundary '$($DirectoryResult.Boundary)'."
+    }
+
+    if ($DwarfsResult.ExitCode -eq 0) {
+        Write-Log 'RuntimeRoot backend parity established: both backends completed the Mach-O load.'
+    }
+    else {
+        Write-Log "RuntimeRoot backend parity established at the same real compatibility boundary: $($DwarfsResult.Boundary)"
+    }
+    Write-Log 'Full DwarFS RuntimeRoot storage/loader acceptance passed on real Windows without mounting or extracting the DwarFS RuntimeRoot.'
 }
 catch {
     ($_ | Format-List * -Force | Out-String) | Tee-Object -FilePath $Log -Append | Write-Host
