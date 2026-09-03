@@ -14,13 +14,13 @@ namespace ipasim {
 
 // Immutable byte-source boundary for Apple RuntimeRoot objects. Darwin install
 // names stay in Darwin form here; callers do not need to materialize them as
-// Windows filesystem paths. The directory backend preserves the current
-// extracted-RuntimeRoot behavior while allowing a later compressed-image
-// backend to satisfy the same contract without mounting or extraction.
+// Windows filesystem paths. A store also supplies a stable source identity so
+// loader memoization remains correct when RuntimeRoot sources are switched.
 class RuntimeRootStore {
 public:
   virtual ~RuntimeRootStore() = default;
 
+  virtual std::string identity(std::string_view DarwinPath) const = 0;
   virtual bool readFile(std::string_view DarwinPath,
                         std::vector<std::uint8_t> &Data,
                         std::string &Error) const = 0;
@@ -33,6 +33,12 @@ public:
   explicit DirectoryRuntimeRootStore(std::filesystem::path Root)
       : Root(std::move(Root)) {}
 
+  std::string identity(std::string_view DarwinPath) const override {
+    if (DarwinPath.empty() || DarwinPath.front() != '/')
+      return {};
+    return resolve(DarwinPath).make_preferred().string();
+  }
+
   bool readFile(std::string_view DarwinPath, std::vector<std::uint8_t> &Data,
                 std::string &Error) const override {
     Data.clear();
@@ -43,10 +49,7 @@ public:
       return false;
     }
 
-    const std::filesystem::path Relative(
-        std::string(DarwinPath.substr(1)));
-    const std::filesystem::path Resolved =
-        (Root / Relative).lexically_normal();
+    const std::filesystem::path Resolved = resolve(DarwinPath);
 
     std::error_code EC;
     if (!std::filesystem::is_regular_file(Resolved, EC) || EC) {
@@ -85,6 +88,12 @@ public:
   }
 
 private:
+  std::filesystem::path resolve(std::string_view DarwinPath) const {
+    const std::filesystem::path Relative(
+        std::string(DarwinPath.substr(1)));
+    return (Root / Relative).lexically_normal();
+  }
+
   std::filesystem::path Root;
 };
 
