@@ -148,10 +148,6 @@ struct ThreadRecord {
 static_assert(offsetof(ThreadRecord, Guest) == 0,
               "pthread_t must remain the address of the Darwin guest object");
 
-struct PthreadExitSignal {
-  void *Value;
-};
-
 std::mutex RegistryMutex;
 std::unordered_map<DarwinPthread, std::shared_ptr<ThreadRecord>> Threads;
 std::atomic<std::uint64_t> NextThreadId{1};
@@ -424,21 +420,18 @@ void finishRecord(ThreadRecord &Record, void *ExitValue) {
 }
 
 DWORD WINAPI pthreadStartThunk(void *Parameter) {
-  auto *Raw = static_cast<ThreadRecord *>(Parameter);
-  auto Record = lookupRecord(pthreadIdentity(*Raw));
-  if (!Record)
-    return static_cast<DWORD>(DarwinErrnoNoSuchProcess);
+  auto *Record = static_cast<ThreadRecord *>(Parameter);
+  {
+    const auto Registered = lookupRecord(pthreadIdentity(*Record));
+    if (!Registered || Registered.get() != Record)
+      return static_cast<DWORD>(DarwinErrnoNoSuchProcess);
+  }
 
-  CurrentThread = Record.get();
+  CurrentThread = Record;
   void *ExitValue = nullptr;
   int CoreResult = 0;
-  try {
-    ExitValue = invokeStartRoutine(Record->StartRoutine,
-                                   Record->StartArgument, CoreResult);
-  } catch (const PthreadExitSignal &Exit) {
-    ExitValue = Exit.Value;
-    CoreResult = 0;
-  }
+  ExitValue = invokeStartRoutine(Record->StartRoutine,
+                                 Record->StartArgument, CoreResult);
   CurrentRoutineIsNative = false;
   if (CoreResult != 0)
     ExitValue = reinterpret_cast<void *>(static_cast<std::uintptr_t>(CoreResult));
@@ -892,14 +885,21 @@ __declspec(dllexport) int pthread_join(DarwinPthread Thread, void **ExitValue) {
   return 0;
 }
 
-// The native semantic smoke calls pthread_exit from a native test start routine;
-// a local C++ sentinel unwinds that controlled host callback normally. A real
-// ARM64 guest call asks IpaSimLibrary to terminate the current guest execution
-// loop without resuming the instruction after pthread_exit, allowing the fresh
-// Unicorn context to unwind and release its stack/CPU objects normally.
+// A native executable start routine exists only for the standalone provider
+// smoke and host-side semantic tests; it owns no GuestExecutionContext. Record
+// its pthread result before ending that backing Windows thread. A real ARM64
+// guest call instead requests logical guest execution termination below so the
+// Unicorn context and its C++ stack/CPU ownership unwind normally.
 __declspec(dllexport) void pthread_exit(void *ExitValue) {
-  if (CurrentRoutineIsNative)
-    throw PthreadExitSignal{ExitValue};
+  if (CurrentRoutineIsNative && CurrentThread) {
+    ThreadRecord *Record = CurrentThread;
+    CurrentRoutineIsNative = false;
+    CurrentThread = nullptr;
+    finishRecord(*Record, ExitValue);
+    ExitThread(0);
+    __assume(0);
+  }
+
   if (requestGuestPthreadExit(ExitValue))
     return;
 
