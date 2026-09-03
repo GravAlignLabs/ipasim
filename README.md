@@ -131,7 +131,28 @@ cross-OS Actions cache
 
 The intended path has **no RuntimeRoot mount, full extraction, filename sanitization, path exclusion, or NTFS materialization fallback**.
 
-The existing zstd/directory path remains the trusted baseline until this image-backed path proves parity. The static closure and host-import inventory preflights are still directory-backed; they must move onto `RuntimeRootStore` before an image backend can become the production RuntimeRoot source.
+### Latest PR #78 checkpoint
+
+The full-image experiment has now crossed the storage boundary on real Windows. On the last pre-documentation head (`8e4236d9fc4530b630673a9bf880075ca14c1025`):
+
+- **Windows ARM64 Core**, **Synthetic iOS IPA on Windows**, and **Threaded ARM64 Guest Context** all passed;
+- the Darwin-only illegal-name DwarFS fixture passed;
+- the Windows in-image DwarFS reader smoke passed;
+- the complete pinned RuntimeRoot was restored as one verified **7,202,038,273-byte** DwarFS image;
+- the exact-head Windows probe loaded real Apple frameworks and dylibs directly from the image without mounting or extracting the RuntimeRoot; and
+- the first real loader stop was an unresolved `_mach_absolute_time` import while applying chained fixups for `/usr/lib/system/libsystem_sim_platform.dylib`.
+
+The relevant boundary is:
+
+```text
+Error: symbol _mach_absolute_time was not found for library ordinal 5.
+Error: cannot apply chained fixups for /usr/lib/system/libsystem_sim_platform.dylib:
+cannot resolve chained-fixup import _mach_absolute_time from library ordinal 5.
+```
+
+That is a successful **image-backed storage/loader proof**, but it is not yet enough to declare backend parity. PR #78 remains draft until the same exact-head Core tester and pinned public AWS IPA are run through the extracted-directory RuntimeRoot backend and the first genuine non-cascading loader/runtime boundary is compared directly. `_mach_absolute_time` must not be implemented inside this storage PR merely to force the image-backed path farther.
+
+The existing zstd/directory path remains the trusted baseline until this exact-head comparison proves parity. The static closure and host-import inventory preflights are still directory-backed; they must move onto `RuntimeRootStore` before an image backend can become the production RuntimeRoot source.
 
 ### Why the RuntimeRoot architecture changed
 
