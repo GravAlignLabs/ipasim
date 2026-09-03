@@ -135,7 +135,7 @@ The existing zstd/directory path remains the trusted baseline until this image-b
 
 ### Why the RuntimeRoot architecture changed
 
-The trusted GitHub-hosted RuntimeRoot is large as a filesystem tree: the measured iOS 18.5 RuntimeRoot contains roughly **467,540 entries** and about **19.4 GiB** of logical content. PR #70's measured `zstd -1` package was `9,085,521,586` bytes and took about `142` seconds to create on the profiled GitHub macOS runner.
+The trusted GitHub-hosted RuntimeRoot is large as a filesystem tree: the measured iOS 18.5 RuntimeRoot contains roughly **467,540 entries** and **19,398,480 KiB** of logical content. PR #70's measured `zstd -1` package was `9,085,521,586` bytes and took about `142` seconds to create on the profiled GitHub macOS runner.
 
 The current trusted baseline is:
 
