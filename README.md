@@ -2,7 +2,7 @@
 
 > **Active fork: modern ARM64 iOS compatibility on Windows**
 >
-> This repository is a fork of [`ipasimulator/ipasim`](https://github.com/ipasimulator/ipasim). The original project and Jan Joneš's research remain the foundation of this work. This fork is extending ipaSim toward modern 64-bit ARM64 iOS applications while preserving explicit diagnostics for behavior that is not yet implemented.
+> This repository is a fork of [`ipasimulator/ipasim`](https://github.com/ipasimulator/ipasim). Jan Joneš's original research remains the foundation of the project. This fork is extending ipaSim toward modern 64-bit ARM64 iOS applications while keeping unsupported behavior explicit and diagnosable.
 
 [![Synthetic iOS IPA on Windows](https://github.com/GravAlignLabs/ipasim/actions/workflows/synthetic-hello-ipa.yml/badge.svg?branch=master)](https://github.com/GravAlignLabs/ipasim/actions/workflows/synthetic-hello-ipa.yml)
 [![Windows ARM64 Core](https://github.com/GravAlignLabs/ipasim/actions/workflows/windows-arm64-core.yml/badge.svg?branch=master)](https://github.com/GravAlignLabs/ipasim/actions/workflows/windows-arm64-core.yml)
@@ -12,7 +12,7 @@
 
 ipaSim is **not** being developed as a sequence of application-specific symbol fixes.
 
-The long-term objective is to derive the **mechanical iOS compatibility surface from Apple SDK metadata and compiler evidence in bulk**, generate reusable ARM64-to-Win64 adapter records, and maintain a separate, explicitly validated semantic-provider catalog. A real IPA is primarily a validation target and a source of dynamic/behavioral evidence; it should not be the primary mechanism for discovering which mechanically describable SDK APIs exist.
+The long-term objective is to derive the **mechanical iOS compatibility surface from Apple SDK metadata and compiler evidence in bulk**, generate reusable ARM64-to-Win64 adapter records, and maintain a separate, explicitly validated semantic-provider catalog. Real application execution is primarily validation and dynamic/behavioral evidence; it is not the primary discovery mechanism for mechanically describable SDK APIs.
 
 ```text
                     Apple iOS SDK
@@ -53,28 +53,178 @@ The long-term objective is to derive the **mechanical iOS compatibility surface 
          ARM64 guest execution
 ```
 
-The SDK/compiler side may tell ipaSim **how** a function is represented and called. It must never decide by itself that a Windows implementation has the correct Darwin/iOS semantics. That approval boundary remains explicit and fail-closed.
+The SDK/compiler side may establish **how** a function is represented and called. It must never decide by itself that a Windows implementation has the correct Darwin/iOS semantics. Semantic approval remains explicit and fail-closed.
 
 ## New-chat / contributor handoff
 
-If you are picking this project up in a new AI chat or as a new contributor, start here and then read [`AGENTS.md`](AGENTS.md) plus the active coordination claims under [`.github/agent-work/`](.github/agent-work/).
+If you are picking this project up in a new AI chat or as a new contributor, **start here**, then read [`AGENTS.md`](AGENTS.md), [`ROADMAP.md`](ROADMAP.md), and the active coordination claims under [`.github/agent-work/`](.github/agent-work/). Before editing `src/IpaSimulator/`, also read [`src/IpaSimulator/AGENTS.md`](src/IpaSimulator/AGENTS.md).
 
-**Latest merged compatibility checkpoint: [PR #65 — Implement XNU guarded file descriptors](https://github.com/GravAlignLabs/ipasim/pull/65).** PR #65 closed the next recorded real-IPA loader boundary after generated `_read`: it implements `guarded_open_np` / `guarded_close_np` guard identity and close-policy behavior rather than aliasing those APIs to ordinary `open` / `close`. Its implementation head passed Windows ARM64 Core #304, Synthetic iOS IPA #116, and Threaded ARM64 Guest Context #49 before merge.
+### Current merged checkpoint — September 3, 2026
 
-The generated-routing progression since the full SDK preflight is now:
+**Latest merged compatibility/storage checkpoint: [PR #77 — Prove DwarFS-backed RuntimeRoot reads on Windows](https://github.com/GravAlignLabs/ipasim/pull/77).**
 
-- PR #58 — complete pinned iPhoneOS16.5 SDK mechanical preflight;
-- PR #59 — deterministic semantic-migration planning from real host exports plus generated adapters;
-- PR #60 — generic live ARM64 state capture/commit for generated `AdapterRecord` execution;
-- PR #61 — process identity migration: `_getpid`, `_getuid`, `_geteuid`, `_getgid`, `_getegid`;
-- PR #62 — scalar descriptor migration: `_close`, `_lseek`;
-- PR #63 — pointer/positional output-side migration: `_write`, `_pread`, `_pwrite`, with complete guest-span validation;
-- PR #64 — real socket receive semantics plus generated `_read` routing;
-- PR #65 — XNU guarded regular-file open/close semantics for the next real runtime boundary.
+The recent progression is:
 
-That leaves **11 explicitly approved generated production routes** after PR #64. `_read` was deliberately held back in PR #63 until its socket receive semantics were real; PR #64 closed that semantic gap before approval. PR #65 is intentionally different: its public SDK records are untyped, so its callable ABI is backed by authoritative XNU/libdispatch evidence and remains outside the generator-owned adapter table. APIs whose SDK records are untyped, variadic, callback-dependent, data exports, or otherwise not mechanically safe remain outside generated routing until their ABI and runtime semantics are independently established.
+- [PR #58](https://github.com/GravAlignLabs/ipasim/pull/58) — complete pinned `iPhoneOS16.5.sdk` mechanical compatibility preflight;
+- [PR #59](https://github.com/GravAlignLabs/ipasim/pull/59) — deterministic semantic-migration planning from real host exports plus generated adapters;
+- [PR #60](https://github.com/GravAlignLabs/ipasim/pull/60) — generic live ARM64 state capture/commit for generated `AdapterRecord` execution;
+- [PR #61](https://github.com/GravAlignLabs/ipasim/pull/61) — process identity migration: `_getpid`, `_getuid`, `_geteuid`, `_getgid`, `_getegid`;
+- [PR #62](https://github.com/GravAlignLabs/ipasim/pull/62) — scalar descriptor migration: `_close`, `_lseek`;
+- [PR #63](https://github.com/GravAlignLabs/ipasim/pull/63) — pointer/positional I/O migration: `_write`, `_pread`, `_pwrite`, with complete guest-span validation;
+- [PR #64](https://github.com/GravAlignLabs/ipasim/pull/64) — real socket receive semantics plus generated `_read` routing;
+- [PR #65](https://github.com/GravAlignLabs/ipasim/pull/65) — XNU guarded regular-file descriptor semantics;
+- [PR #66](https://github.com/GravAlignLabs/ipasim/pull/66) — subsystem-oriented runtime roadmap;
+- [PR #67](https://github.com/GravAlignLabs/ipasim/pull/67) — real host-backed Darwin pthread core with independent ARM64 guest execution contexts;
+- [PR #68](https://github.com/GravAlignLabs/ipasim/pull/68) — pinned public third-party AWS Device Farm IPA acceptance;
+- [PR #69](https://github.com/GravAlignLabs/ipasim/pull/69) — GitHub-hosted iOS simulator RuntimeRoot discovery for trusted acceptance;
+- [PR #70](https://github.com/GravAlignLabs/ipasim/pull/70) — direct `tar + zstd -1` RuntimeRoot cache;
+- [PR #73](https://github.com/GravAlignLabs/ipasim/pull/73) — correct cross-OS RuntimeRoot cache identity by using the same repository-relative cache path on macOS and Windows;
+- [PR #74](https://github.com/GravAlignLabs/ipasim/pull/74) — isolated read-only WIM RuntimeRoot experiment;
+- [PR #75](https://github.com/GravAlignLabs/ipasim/pull/75) — keep auxiliary WIM diagnostic publishing non-blocking while preserving real acceptance failure;
+- [PR #76](https://github.com/GravAlignLabs/ipasim/pull/76) — decouple RuntimeRoot loading from Windows file paths with an immutable `RuntimeRootStore` byte-source boundary; and
+- [PR #77](https://github.com/GravAlignLabs/ipasim/pull/77) — prove Windows can read an NTFS-unrepresentable Darwin pathname directly from a DwarFS image without mounting, extracting, renaming, or falling back.
 
-The generated production path is now:
+PR #77's final head preserved the public Core, Synthetic IPA, Threaded ARM64, and DwarFS-reader regression checks before merge.
+
+[`ROADMAP.md`](ROADMAP.md) is a **dependency-oriented subsystem backlog**, not an unconditional execution order. **The first genuine non-cascading runtime failure may override the nominal priority numbering.**
+
+## Immediate objective: full RuntimeRoot directly from DwarFS
+
+The current active storage experiment is [draft PR #78](https://github.com/GravAlignLabs/ipasim/pull/78). It is **not merged functionality yet**.
+
+Its goal is to prove the complete pinned GitHub-hosted iOS 18.5 RuntimeRoot can remain one DwarFS image and feed ipaSim's real loader directly on Windows:
+
+```text
+GitHub macOS runner
+        |
+        |  Xcode 16.4
+        |  iOS simulator runtime 18.5 (22F77)
+        v
+complete RuntimeRoot
+        |
+        v
+     mkdwarfs
+        |
+        v
+ RuntimeRoot.dwarfs
+      ONE FILE
+        |
+        v
+cross-OS Actions cache
+        |
+        v
+   real Windows runner
+        |
+        +-> exact-head ipaSim Core tester
+        +-> validated DwarFS reader bridge
+        +-> pinned public AWS IPA
+        |
+        v
+    DynamicLoader
+        |
+        v
+   RuntimeRootStore
+        |
+        v
+ direct immutable reads from the DwarFS image
+```
+
+The intended path has **no RuntimeRoot mount, full extraction, filename sanitization, path exclusion, or NTFS materialization fallback**.
+
+The existing zstd/directory path remains the trusted baseline until this image-backed path proves parity. The static closure and host-import inventory preflights are still directory-backed; they must move onto `RuntimeRootStore` before an image backend can become the production RuntimeRoot source.
+
+### Why the RuntimeRoot architecture changed
+
+The trusted GitHub-hosted RuntimeRoot is large as a filesystem tree: the measured iOS 18.5 RuntimeRoot contains roughly **467,540 entries** and about **19.4 GiB** of logical content. PR #70's measured `zstd -1` package was `9,085,521,586` bytes and took about `142` seconds to create on the profiled GitHub macOS runner.
+
+The current trusted baseline is:
+
+```text
+GitHub-hosted macOS RuntimeRoot
+        -> complete tar stream
+        -> zstd -1 -T0
+        -> RuntimeRoot.tar.zst
+        -> repository-relative cross-OS Actions cache
+        -> Windows restore + SHA-256 verification
+        -> full extraction to a Windows directory
+        -> Test-Ipa.cmd
+```
+
+This is correct enough to remain the baseline, but it still asks Windows to reconstruct hundreds of thousands of filesystem objects before ipaSim can use the runtime.
+
+PR #74 tested a different idea: preserve the complete RuntimeRoot in one WIM and mount it read-only with DISM. The WIM itself was valid and independently verifiable, but the real Windows DISM mount failed with **Error 123** around 79% progress. No RuntimeRoot paths were excluded or renamed to force success. The result demonstrated that a valid single-file package is not enough if Windows must still project Apple's complete namespace as ordinary Windows paths.
+
+PR #76 therefore moved the architectural boundary **inside ipaSim**:
+
+```text
+DynamicLoader
+     |
+     v
+RuntimeRootStore
+   /       \
+  v         v
+Directory   future immutable image source
+baseline
+```
+
+PR #77 then supplied the first image-backed proof. A synthetic DwarFS fixture contains the Darwin path:
+
+```text
+/System/Library/Frameworks/UIKit.framework/Versions/A:/UIKit
+```
+
+The `A:` component cannot be materialized as a normal NTFS pathname component, but the Windows reader retrieves the exact bytes directly from the DwarFS image. That proves guest Darwin path identity no longer has to equal host Windows pathname identity.
+
+The permanent direction is therefore: **let ipaSim understand a Darwin RuntimeRoot source directly instead of requiring Windows to pretend the RuntimeRoot is an NTFS tree.**
+
+## Public acceptance and frozen regression contracts
+
+Contributors do not need a private application to reproduce core compatibility work.
+
+### Synthetic fixtures
+
+- **`HelloBootstrap.ipa`** — minimal loader/Unicorn proof; successful guest execution returns `X0=42`.
+- **`HelloNative.ipa`** — untouched minimal iOS executable used to expose the next Apple runtime boundary.
+- **`HelloUIKit.ipa`** — small UIKit/Foundation application used to expose framework/runtime boundaries publicly.
+
+Expected boundary diagnostics in these fixtures are evidence, not noise. Do not suppress an `Error:` line merely because the surrounding workflow is intentionally validating that boundary.
+
+### Pinned public third-party IPA
+
+PR #68 pins the Apache-2.0 AWS Device Farm sample IPA at upstream commit `58e48234db510bd4fbf643643e8808c5d6a13845` and Git blob `06a33a39286ffd7c9d300c5924750b6f97c4e346`. CI downloads and verifies the upstream object instead of committing the IPA into this repository.
+
+The no-RuntimeRoot public regression contract is intentionally:
+
+```text
+probe_exit=2
+first_error=Error: unsupported ARM64 relocation.
+runtime_boundary=Error: iOS runtime root is not configured for dependency /System/Library/Frameworks/AVFoundation.framework/AVFoundation.
+loader_stop=[ipasim-probe] loader stopped with code 2 before app execution.
+```
+
+The relocation diagnostic must remain visible until real target-neutral relocation support replaces it. A later dependency error is not permission to hide the earlier failure.
+
+Trusted full-RuntimeRoot acceptance is a stronger layer on top of the public baselines. Its purpose is to expose the next genuine loader/runtime/framework boundary using the complete pinned RuntimeRoot; it must not weaken the public contracts to advance farther.
+
+## Current generated production routes
+
+There are currently **11 explicitly approved generated production routes**:
+
+```text
+_close
+_getegid
+_geteuid
+_getgid
+_getpid
+_getuid
+_lseek
+_pread
+_pwrite
+_read
+_write
+```
+
+The production route is:
 
 ```text
 real Mach-O import resolution
@@ -90,36 +240,34 @@ real Mach-O import resolution
         -> ARM64 guest execution resumes
 ```
 
-There is also parallel Darwin pthread work. Before changing pthread, `SysTranslator.cpp`, `IpaSimulator.cpp`, `src/IpaSimulator/CMakeLists.txt`, or nearby guest-thread lifecycle code, inspect `.github/agent-work/` and open PRs to avoid overlapping active work.
+Generated SDK/ABI evidence determines call mechanics only. It never grants semantic implementation approval.
 
-## Current ARM64 work
+`guarded_open_np` and `guarded_close_np` remain intentionally outside the generated adapter table because the pinned public SDK evidence does not provide a generator-owned typed callable ABI for those exports. Their current ABI and behavior are backed by authoritative XNU/libdispatch evidence instead of being guessed into the generated route set.
 
-The modern ARM64 foundation began with [PR #3](https://github.com/GravAlignLabs/ipasim/pull/3). The complete SDK-wide mechanical compatibility preflight is merged, the generic live generated-adapter executor is in production, the process-identity and core descriptor I/O families have moved off handwritten ABI routing where authoritative generated ABI evidence exists, and current runtime work follows the first genuine non-cascading boundary exposed by public fixtures or real IPA validation.
+## Current Darwin pthread state
 
-The project is working on two connected layers:
+PR #67 merged the core guest pthread lifecycle onto the current runtime:
 
-1. real Windows-backed Darwin/runtime implementation required by modern iOS binaries; and
-2. an SDK/compiler-driven compatibility engine that generates the mechanical ABI bridge in bulk instead of hand-writing one symbol signature at a time.
+- `pthread_create` uses a real Windows backing thread and a fresh ARM64 Unicorn execution context;
+- worker callbacks retain their own `SysTranslator` instead of falling back to the process-global main engine;
+- guest-visible `pthread_t` identity remains separate from Windows thread handles;
+- join/detach/exit state is serialized and ownership races fail explicitly;
+- guest `pthread_exit` unwinds logical guest execution instead of terminating the host process;
+- Darwin LP64 widths and Darwin-specific errno values remain explicit where Win64 differs;
+- active guest stacks expose truthful bounds; fake guest stack addresses are not manufactured; and
+- unsupported custom stacks and fixed scheduling remain fail-closed.
 
-### Latest runtime checkpoint — September 2, 2026
+Darwin threading is not finished. TSD destructor teardown, cancellation, real signal delivery, kevent/workloop event delivery, richer Mach thread-port identity, custom guest stacks, and stronger scheduling semantics remain later subsystem work when evidence requires them.
 
-The recorded real-application evidence reached `_guarded_close_np` while loading `libdispatch.dylib`. Static audit evidence also showed `libdispatch` requires `_guarded_open_np`, so PR #65 treated guarded descriptors as one coherent semantic subsystem instead of adding a one-symbol compatibility alias.
+## SDK-wide mechanical compatibility engine
 
-Apple XNU establishes that `guarded_close_np(int fd, const guardid_t *guard)` requires the descriptor to already carry the matching 64-bit guard identity before it may close. Apple libdispatch opens its dispatch-I/O descriptors with `GUARD_CLOSE | GUARD_DUP | GUARD_SOCKET_IPC | GUARD_FILEPORT` and closes them later with the same guard value. PR #65 therefore tracks guard identity per guest descriptor, preserves `O_CLOEXEC`, blocks ordinary `close` from bypassing `GUARD_CLOSE`, and fails unsupported guarded capabilities closed.
+The modern compatibility engine is deliberately broader than any one application.
 
-The real Run for Office IPA remains a validation target rather than a source of app-specific patches. After each compatibility checkpoint merges, the preferred next step is to run the current merged tester against the real IPA and let the first genuine failure define the next semantic boundary.
+PR #58 exercises the complete pipeline against `theos/sdks@0222fd5413cf4b9af096f37b4621afa2688572f7`, scoped to `iPhoneOS16.5.sdk`.
 
-### Successful full-SDK preflight checkpoint — September 1, 2026
+The successful mechanical coverage snapshot is:
 
-PR #58 exercises the full compatibility pipeline against `theos/sdks@0222fd5413cf4b9af096f37b4621afa2688572f7`, scoped to `iPhoneOS16.5.sdk`.
-
-The authoritative physical header inventory is **5,118 headers**. CI partitions it into **32 deterministic shards** and accepts a merged header surface only when every physical header is owned exactly once. There are no bad-header ignore lists and no partial-success semantics.
-
-At commit `fbe336d0b4060766dc498f8a7757097c07c79fc3`, **Compatibility Surface Analyzer run #103 passed** and the authoritative **Theos iPhoneOS16.5 SDK Preflight run #55 passed end to end**. Later generated-routing migrations have continued to preserve the same fail-closed SDK/compiler boundary.
-
-The successful run produced the following mechanical coverage snapshot:
-
-- exhaustive physical headers analyzed: **5,118**
+- physical headers analyzed: **5,118 / 5,118**
 - TAPI symbols: **1,355,229**
 - Clang header C signatures: **13,795**
 - SDK catalog symbols: **1,354,457**
@@ -127,321 +275,133 @@ The successful run produced the following mechanical coverage snapshot:
 - AAPCS64 generated candidates: **12,599**
 - Win64 cross-ABI candidates: **12,515**
 - generated runtime adapters: **10,599**
-- explicitly approved generated production routes at run #55: **5**
-- explicitly approved generated production routes after PR #64: **11**
-- catalog rows not yet semantically approved at run #55: **1,354,452**
-
-The large difference between the SDK catalog size and the typed C candidate count is intentional. The catalog keeps callable C exports distinct from Objective-C metadata, TLS/data records, weak/mixed metadata, untyped globals, and other non-callable evidence instead of pretending every exported SDK record can become a function adapter.
-
-Current pipeline state:
+- explicitly approved generated production routes: **11**
 
 ```text
 pinned iPhoneOS16.5.sdk
-        -> complete TAPI scan                    PASS: 1,355,229 symbols
-        -> exhaustive Clang header indexing      PASS: 5,118/5,118 headers
-        -> merged header C signatures            PASS: 13,795
-        -> SDK typed catalog                     PASS: 1,354,457 records
-        -> typed C projection                    PASS: 13,298 candidates
-        -> AAPCS64 lowering                      PASS: 12,599 generated candidates
-        -> Win64 carrier lowering                PASS: 12,515 cross-ABI candidates
+        -> complete TAPI scan                    PASS
+        -> exhaustive Clang header indexing      PASS: 5,118/5,118
+        -> SDK typed catalog                     PASS
+        -> AAPCS64 lowering                      PASS
+        -> Win64 carrier lowering                PASS
         -> libffi bridge plans                   PASS
-        -> generated runtime adapters            PASS: 10,599 adapters
+        -> generated runtime adapters            PASS: 10,599
         -> compatibility planner                 PASS
-        -> semantic-route comparison             PASS / fail-closed approval boundary
+        -> semantic-route comparison             explicit approval boundary
         -> generic live generated execution      PASS
-        -> approved production routes            PASS: 11 after PR #64
+        -> approved production routes            11
         -> real semantic/runtime boundaries      evidence-driven, fail-closed
 ```
 
-The successful workflow published the complete generated compatibility bundle as the `theos-iphoneos16.5-sdk-compatibility` artifact in run #55. The bundle contains the TAPI surface, header signatures, SDK catalog, AAPCS64 and Win64 manifests, bridge plan, runtime adapter table, compatibility plan, generated adapter include, and approved semantic route include.
+Passing this preflight does **not** mean 10,599 iOS APIs are semantically implemented on Windows. It means the mechanical SDK/compiler pipeline can describe and carry that proven subset without weakening validation.
 
-Passing this preflight does **not** mean 10,599 iOS APIs are semantically implemented on Windows. It means the mechanical SDK/compiler pipeline can describe and carry that proven subset through the complete generation path without weakening validation. Semantic-provider approval remains separate and conservative.
+Core mechanical rules:
 
-The preflight remains intentionally fail-closed. Compiler/header/context failures, ABI invariant failures, unsupported carrier shapes, and missing semantic approval remain visible evidence rather than being converted into success.
-
-### SDK context recovery learned during PR #58
-
-The exhaustive run exposed and fixed several generic SDK/compiler-context classes rather than adding header-specific exceptions:
-
-- framework leaves are entered through SDK-derived umbrella/public ownership while declarations remain attributed to the physical target header;
-- nested framework include ownership can be followed transitively through SDK-authored include/import edges;
-- guarded declaration leaves may be re-entered safely when an umbrella edge is target-conditional, while unguarded implementation leaves are not entered twice;
-- libc++ is entered through the SDK's own `usr/include/c++/v1` root;
-- explicit SDK-authored public-header recommendations and reverse include owners are used as evidence;
-- module guards are distinguished from genuine module imports;
-- actual `@import` failures are checked against the SDK module maps;
-- Swift shim headers can use their SDK-authored importer branch when appropriate;
-- package-style `usr/include/<name>/<name>.h` ownership and prerequisite typedef providers can be recovered from SDK/compiler evidence;
-- target-inactive headers remain narrowly evidence-based rather than being converted into success;
-- AAPCS64 probes preserve required SDK umbrella context;
-- SDK convenience macros that alias an exported C function to an inline helper are removed only after the owning declaration has been entered, so ABI probing still targets the real exported function;
-- AAPCS64 batching records all batch failures before failing closed, improving one-run diagnostics without approving partial output; and
-- Win64 batch canonicalization now preserves the complete compiler-generated carrier namespace, including intermediate carrier typedef numbers that may disappear from the public LLVM-derived manifest.
-
-This work remains mechanical SDK analysis only. It does not grant semantic-provider approval, alter loader policy, or claim that an exported SDK function is correctly implemented on Windows merely because its ABI is mechanically describable.
-
-## Historical Apple toolchain evidence
-
-The public [`lujingyu/UWin`](https://github.com/lujingyu/UWin) repository provides an unusually useful historical reference corpus for understanding long-lived Apple SDK conventions. It is effectively a frozen 2011 iOS application snapshot with source, Xcode project state, committed build metadata, old CodeSense indexes, and some third-party build artifacts.
-
-The useful evidence is historical and external; **none of it is copied into ipaSim as implementation or semantic approval**.
-
-### What the UWin snapshot preserves
-
-- Xcode CodeSense/index state referencing the iPhone Simulator 4.2 SDK.
-- Real device build state referencing `iPhoneOS4.2.sdk` and Apple's GCC 4.2 toolchain.
-- Successful device compilation for both **ARMv6 and ARMv7**.
-- Translation-unit include evidence from an actual period iOS build.
-- Real BSD/Darwin networking source using APIs and layouts such as `socket`, `ioctl`, `SIOCGIFCONF`, `SIOCGIFFLAGS`, `struct ifreq`, `sockaddr_in`, `AF_LINK`, `sockaddr_dl`, `LLADDR`, `ether_ntoa`, `sa_len`, and related interfaces.
-- An external fat static archive, `libOAuth.a`, with ARMv6, ARMv7, and i386 slices. It is useful as a historical format/architecture specimen, but it should **not** be redistributed into ipaSim because the UWin repository does not provide a clear repository-level redistribution license for that artifact.
-
-One especially useful finding is the historical include order in UWin's `Reachability.m`:
-
-```text
-sys/socket.h
-    -> netinet/in.h
-    -> netinet6/in6.h
-    -> arpa/inet.h
-```
-
-The committed iOS 4.2 build state independently records `netinet/in.h` in that successfully compiled translation unit. That gives us evidence that the `netinet/in.h` -> `netinet6/in6.h` relationship encountered by the modern iOS 16.5 scanner is a long-standing Darwin/Apple SDK convention rather than a one-off Theos packaging quirk.
-
-### How this research should be used
-
-Historical compiler-success evidence can help distinguish enduring Apple SDK structure from a current SDK-specific accident:
-
-```text
-historical Apple/Xcode compiler evidence
-             |
-             +-> include ownership/order
-             +-> SDK macro/context conventions
-             +-> real ARM build targets
-             +-> actual Darwin API usage
-             |
-             v
-compare structurally with modern SDK evidence
-             |
-             v
-make the generic compatibility analyzer more accurate
-```
-
-The UWin `.pbxindex` also contains `cdecls`, `decls`, `imports`, `refs`, `files`, `categories`, `protocols`, `subclasses`, and symbol databases. That old CodeSense format is undocumented, so the more immediately useful artifact is its readable build-state evidence, which records compiler/SDK/architecture/translation-unit relationships directly.
-
-The snapshot also carries old `.svn` metadata for third-party libraries copied from another working tree. Treat those files as historical build examples, **not** authoritative upstream provenance.
-
-A future research tool may extract historical include/import relationships into a small reference corpus. Such a corpus should contain derived structural evidence only; it should not vendor UWin source or binary artifacts.
-
-## Current generated cross-ABI compatibility engine
-
-There are two useful views of the same compatibility knowledge:
-
-```text
-SDK-wide planning view
-----------------------
-Apple TAPI SDK symbol/provider universe
-        +
-Clang SDK header signatures/type trees
-        |
-        v
-SDK-wide typed compatibility catalog
-        |
-        v
-bulk mechanical ABI generation / coverage
-
-Application validation view
----------------------------
-Mach-O import requirements
-        |
-        v
-compare against SDK-wide catalog + semantic-provider status
-        |
-        v
-runtime validation / dynamic discovery
-```
-
-The generated execution progression is:
-
-```text
-SDK/import type evidence
-        -> Clang-proven ARM64 iOS ABI lowering
-        -> Clang-proven Win64 carrier lowering
-        -> libffi adapter plan
-        -> controlled executable cross-ABI bridge
-        -> production-independent runtime adapter table
-        -> runtime adapter registry / executor
-        -> explicit real semantic-provider binding
-        -> real loader-selected generated route
-        -> live generated ARM64 state capture/commit
-```
-
-The generated side may determine that a function uses `x0`, `v0`, an `x8` indirect result, a Win64 `sret`, a pointer carrier, or aggregate repacking. It does **not** decide that the corresponding iOS API is semantically implemented on Windows.
-
-Core rules:
-
-- scan SDK metadata in bulk when producing mechanical coverage;
-- use Apple TAPI metadata for direct exports and explicit re-export relationships;
-- use Clang to recover SDK header signatures and compiler-lowered ABI evidence;
-- preserve Apple LP64 carrier widths instead of naively recompiling source spellings under Win64 LLP64;
-- let libffi own proven Win64 call mechanics where appropriate;
-- keep guest stack offsets unknown until they are proven;
-- treat guest pointers as opaque addresses until runtime validation;
-- require explicit semantic ownership before a generated adapter may call a real host implementation;
-- reject missing, non-executable, or data exports instead of treating export presence as compatibility;
-- keep callbacks, variadics, no-prototype functions, and unresolved ABI classes outside the generic bridge until their rules are implemented;
-- keep Objective-C metadata and thread-local/data exports distinct from callable C functions; and
-- never convert unsupported behavior into fake success.
-
-### Compatibility-engine milestones
-
-- [PR #38](https://github.com/GravAlignLabs/ipasim/pull/38) — machine-readable ARM64 Mach-O import/dependency surface
-- [PR #40](https://github.com/GravAlignLabs/ipasim/pull/40) — Apple TAPI SDK provider and re-export knowledge surface
-- [PR #41](https://github.com/GravAlignLabs/ipasim/pull/41) — Clang-backed SDK C signature/type surface
-- [PR #42](https://github.com/GravAlignLabs/ipasim/pull/42) — deterministic typed compatibility inventory
-- [PR #43](https://github.com/GravAlignLabs/ipasim/pull/43) — Clang-backed ARM64 iOS/AAPCS64 lowering
-- [PR #44](https://github.com/GravAlignLabs/ipasim/pull/44) — compiler-backed Win64 carrier lowering
-- [PR #45](https://github.com/GravAlignLabs/ipasim/pull/45) — deterministic libffi-oriented bridge plans
-- [PR #46](https://github.com/GravAlignLabs/ipasim/pull/46) — first controlled executable ARM64-to-Win64 libffi proof
-- [PR #48](https://github.com/GravAlignLabs/ipasim/pull/48) — production-independent runtime adapter table
-- [PR #49](https://github.com/GravAlignLabs/ipasim/pull/49) — generated-adapter registry/executor
-- [PR #50](https://github.com/GravAlignLabs/ipasim/pull/50) — generated adapter bound to an explicitly approved real Darwin semantic provider
-- [PR #52](https://github.com/GravAlignLabs/ipasim/pull/52) — real loader-resolved import routed through generated ABI + approved semantic provider
-- [PR #53](https://github.com/GravAlignLabs/ipasim/pull/53) — table-driven generated semantic import routing
-- [PR #58](https://github.com/GravAlignLabs/ipasim/pull/58) — pinned full-SDK compatibility preflight, generic SDK-context hardening, and successful end-to-end iPhoneOS16.5 mechanical coverage
-- [PR #59](https://github.com/GravAlignLabs/ipasim/pull/59) — deterministic semantic migration candidates derived from real host exports plus generated adapters without granting approval
-- [PR #60](https://github.com/GravAlignLabs/ipasim/pull/60) — generic live ARM64 generated-adapter execution in `SysTranslator`
-- [PR #61](https://github.com/GravAlignLabs/ipasim/pull/61) — first multi-symbol production migration: process identity calls moved off the handwritten Darwin ABI table
-- [PR #62](https://github.com/GravAlignLabs/ipasim/pull/62) — scalar descriptor calls `_close` and `_lseek` migrated to generated routing
-- [PR #63](https://github.com/GravAlignLabs/ipasim/pull/63) — `_write`, `_pread`, and `_pwrite` migrated with complete guest-span provider validation; `_read` deliberately deferred until socket receive semantics were real
-- [PR #64](https://github.com/GravAlignLabs/ipasim/pull/64) — Winsock-backed socket receive semantics and generated `_read` migration
-- [PR #65](https://github.com/GravAlignLabs/ipasim/pull/65) — XNU guarded-fd semantic checkpoint for `guarded_open_np` / `guarded_close_np`
+- scan SDK metadata in bulk rather than waiting for one app to import each function;
+- use TAPI metadata for direct exports and explicit re-export relationships;
+- use Clang for SDK header signatures and compiler-lowered ABI evidence;
+- preserve Apple LP64 carrier widths across the Win64 LLP64 host boundary;
+- let libffi own proven host call mechanics where appropriate;
+- keep guest pointers opaque until complete runtime validation;
+- keep callbacks, variadics, no-prototype declarations, unresolved stack placement, Objective-C metadata, TLS, and data exports explicit rather than guessing;
+- require explicit semantic ownership before a generated adapter may call a real provider; and
+- reject missing, non-executable, or data exports instead of treating export presence as compatibility.
 
 ## Compatibility subsystems implemented so far
 
-### ARM64 execution and loader
+### ARM64 execution and loading
 
-- real ARM64/AArch64 Unicorn execution on Windows x64
-- AAPCS64 register handling and pointer-width host-call translation
-- modern ARM64 Mach-O parsing and image loading
-- chained fixups and exports-trie resolution
-- dependency ordinal handling and RuntimeRoot image resolution
-- shared-memory multi-engine execution
-- independent secondary guest execution contexts and threaded callbacks
-- controlled loader selection of explicitly approved generated semantic routes
-- generated live GPR/SIMD/stack capture and result commit driven by `AdapterRecord`
+- real ARM64/AArch64 Unicorn execution on Windows x64;
+- AAPCS64 register handling and pointer-width host-call translation;
+- modern ARM64 Mach-O parsing and image loading;
+- chained fixups and exports-trie resolution;
+- dependency ordinal handling and RuntimeRoot resolution;
+- shared-memory multi-engine execution;
+- independent secondary guest execution contexts and threaded callbacks;
+- controlled loader selection of explicitly approved generated semantic routes;
+- generated live GPR/SIMD/stack capture and result commit driven by `AdapterRecord`; and
+- immutable RuntimeRoot byte-source abstraction with the existing directory backend preserved as the known-good baseline.
 
 ### Darwin/runtime work
 
-Implemented coverage includes process identity and selected process information, Mach task/time/VM behavior, ulock synchronization, libplatform memory/string primitives, a coherent guest-visible file-descriptor namespace, regular files/FIFOs, Darwin ARM64 `stat` translation, socket/WinSock send and receive translation for the implemented boundaries, generated scalar and pointer-bearing descriptor I/O, XNU guarded regular-file descriptor identity/close policy merged in PR #65, selected simulator host re-exports, pthread QoS/TSD/workloop/workqueue work, and independent guest worker execution.
+Implemented coverage includes process identity and selected process information, Mach task/time/VM behavior, ulock synchronization, libplatform memory/string primitives, a coherent guest-visible file-descriptor namespace, regular files/FIFOs, Darwin ARM64 `stat` translation, implemented socket/WinSock send and receive translation, generated scalar and pointer-bearing descriptor I/O, XNU guarded regular-file descriptor semantics, pthread core/QoS/TSD/workloop/workqueue control-plane work, and independent guest worker execution.
 
 Unsupported behavior remains explicit rather than being fabricated as success.
 
-## Generated semantic-routing completion roadmap
+## How the next implementation is selected
 
-The scaling criterion remains: **every callable `IpaSimDarwinHost.dll` boundary that the guest can reach should either use a generated SDK-backed adapter plus explicit semantic approval, or be explicitly classified as complex/unsupported. The handwritten `DarwinHostCallSignature` table should eventually disappear rather than surviving as a second ABI database.**
+Use this sequence after every independently correct checkpoint merges:
 
-The earlier fixed PR-number roadmap is obsolete because runtime evidence changed the safe ordering. PR #63 correctly stopped before `_read`; PR #64 first implemented real socket receive semantics and only then approved generated `_read`; the next real IPA boundary then moved into XNU guarded descriptors, whose public SDK entries are untyped and therefore cannot honestly be forced into the generated adapter table.
+1. update to current `master`;
+2. inspect `.github/agent-work/` and open/draft PRs;
+3. run the applicable public validation workflows;
+4. run the pinned public acceptance workload through the strongest trusted RuntimeRoot path available;
+5. use private/local application execution only as additional evidence and never expose identifying data publicly;
+6. identify the **first genuine non-cascading semantic/runtime failure**;
+7. map it to the smallest coherent subsystem rather than treating one symbol as the architecture;
+8. create a narrow coordination claim;
+9. implement target-neutral behavior with explicit failure for unsupported semantics;
+10. add or preserve public regression proof; and
+11. delete the claim from the implementation PR before merge.
 
-### Completed scaling checkpoints
+A missing symbol is evidence of a boundary, not automatically the unit of implementation.
 
-- **Process identity:** `_getpid`, `_getuid`, `_geteuid`, `_getgid`, `_getegid` use generated routing.
-- **Scalar descriptor I/O:** `_close` and `_lseek` use generated routing.
-- **Pointer/positional descriptor I/O:** `_write`, `_pread`, `_pwrite`, and `_read` use generated routing with the required pointer gate and provider-level span validation.
-- **Socket-aware read:** Darwin socket descriptors receive through the Winsock-backed registry; regular files retain the tracked filesystem path.
-- **Guarded descriptors:** PR #65 implements the XNU guarded-open/guarded-close semantic boundary using authoritative XNU/libdispatch evidence. These functions remain handwritten ABI entries because the pinned public SDK catalog does not provide a generator-owned callable C ABI record for them.
+## Public validation order
 
-### Next priorities
-
-Do **not** assign the next PR from an old number list. After PR #65, run the current merged tester against the real IPA and use the first non-cascading failure as the next semantic target. In parallel, continue retiring the handwritten Darwin ABI table in coherent families when authoritative SDK/compiler ABI evidence and real semantic providers already exist.
-
-Likely remaining mechanical families include fixed-signature filesystem metadata/path calls, process/time/Mach calls, guest-stack-spilled Mach IPC, libplatform primitives, fixed-signature sockets/networking, and fixed-signature synchronization/pthread calls after overlapping pthread work lands. Variadic/no-prototype functions such as `open`/`fcntl`, callback-taking APIs, untyped SDK globals, and data exports require separate architecture rather than guessed generated records.
-
-For every migration:
-
-- generated ABI evidence determines call mechanics only;
-- explicit semantic approval determines whether a real provider may satisfy the import;
-- pointer-bearing providers validate complete guest-visible spans where API length is known;
-- data exports remain data;
-- missing/unsupported semantics fail closed;
-- existing public synthetic boundaries and prior generated routes are regression requirements, not optional tests.
-
-### After the scaling phase
-
-Deleting the handwritten table does not make ipaSim a finished iOS runtime. It marks the end of the **mechanical host-call scaling problem**. Development then follows the first genuine runtime boundary exposed by public fixtures and real IPAs, with larger semantic work continuing in Objective-C/Swift runtime behavior, Foundation/UIKit, XPC/services, graphics/UI/event loops, media, networking depth, and device services.
-
-## What remains
-
-ipaSim is still an active emulator bring-up effort, not a finished modern iOS compatibility layer. The complete pinned SDK mechanical preflight is proven and generated live execution is now scaling across real providers; the major remaining work is turning mechanically describable coverage into correct runtime behavior without weakening the semantic-approval boundary.
-
-Important remaining areas include:
-
-- continue retiring the handwritten Darwin ABI table where authoritative generated ABI evidence exists;
-- keep untyped/variadic/callback-dependent boundaries explicitly separate from generator-owned ABI records until their architecture is proven;
-- expand the machine-readable semantic-provider inventory so SDK-wide rows can move deliberately from `unclassified` / `not-approved` into approved, candidate, complex, or unsupported semantic states;
-- progressively generate more production route data from that semantic inventory while preserving explicit module/export/address verification;
-- keep generated adapter records as the mechanical source of truth instead of creating another handwritten ABI database;
-- exact guest-stack placement for remaining ABI classes that overflow ARM64 register banks;
-- callback/closure trampolines for host-to-guest calls;
-- variadic and no-prototype runtime boundaries;
-- broader vector/SIMD and aggregate ABI classes where compiler evidence is not yet sufficient;
-- broader libSystem, file, directory, xattr, process, Mach, networking, pthread, and signal semantics;
-- Objective-C and Swift runtime integration beyond the currently proven paths;
-- Foundation/UIKit and other framework behavior;
-- XPC and service-level compatibility; and
-- graphics, UI/event-loop, media, and device-service compatibility.
-
-The static/SDK-wide compatibility map is a planning and coverage surface. It is **not** proof that every SDK symbol is callable or semantically implemented.
-
-## Apple SDK metadata for compatibility research
-
-Use the maintained [Theos SDK archive](https://github.com/theos/sdks) as the public symbol/provider/header reference for SDK-wide analysis. The authoritative preflight pins a specific commit and `iPhoneOS16.5.sdk` so results cannot silently drift with upstream changes.
-
-`.tbd` files are useful for exported names, install names, provider/re-export relationships, targets, weak/TLS/Objective-C metadata classes, and SDK-version comparisons. They are **not implementation source**. Function prototypes require SDK headers/compiler evidence, and correct Windows semantics require independent implementation evidence.
-
-Preferred SDK-wide mechanical sequence:
-
-1. scan `.tbd` files recursively with `tbd_surface.py`;
-2. scan every physical SDK header through the exhaustive/contextual header pipeline;
-3. join provider/export and header/type evidence with `sdk_catalog.py`;
-4. keep callable C exports, untyped globals, Objective-C metadata, TLS, weak exports, and mixed metadata distinct;
-5. project only mechanically valid typed C exports into ABI generation;
-6. lower deterministically through AAPCS64, Win64, and libffi planning; and
-7. compare application imports and explicit semantic-provider status against that reusable map.
-
-## Public test strategy
-
-Contributors do **not** need a private commercial application to reproduce compatibility work.
-
-The repository generates public ARM64 fixtures in GitHub Actions:
-
-- **`HelloBootstrap.ipa`** — minimal loader/Unicorn proof with expected guest return `X0=42`
-- **`HelloNative.ipa`** — untouched minimal iOS executable used to expose the next Apple runtime boundary
-- **`HelloUIKit.ipa`** — small UIKit/Foundation application used to expose framework/runtime boundaries publicly
-
-Run public validation in this order when relevant:
+Follow [`AGENTS.md`](AGENTS.md) for the authoritative order. The normal public regression sequence is:
 
 1. **Synthetic iOS IPA on Windows** — `.github/workflows/synthetic-hello-ipa.yml`
 2. **Windows ARM64 Core** — `.github/workflows/windows-arm64-core.yml`
-3. **Threaded ARM64 Guest Context** — `.github/workflows/threaded-guest-context.yml`
-4. **Compatibility Surface Analyzer** — `.github/workflows/compat-surface.yml`
-5. **Theos iPhoneOS16.5 SDK Preflight** — `.github/workflows/theos-sdk-preflight.yml` for SDK-wide compatibility-engine changes
+3. **Threaded ARM64 Guest Context** when guest-thread/callback execution is relevant
+4. **Compatibility Surface Analyzer** when generated compatibility tooling or fixtures change
+5. optional local/private acceptance only after the public results are understood
 
-If you find a compatibility problem, prefer a small public synthetic or compiler-backed regression over application-specific handling.
+Additional public/trusted acceptance workflows may exercise the pinned AWS workload and GitHub-hosted RuntimeRoot. Those layers complement the core regression sequence; they do not replace it.
 
-## Local full-SDK preflight
+CI failures should preserve the real compiler/linker/packaging/runtime exit code, publish the most useful diagnostic available, and then fail normally. Auxiliary diagnostic publishing must not convert a real failure into success or prevent the real test from running.
 
-PR #58 also carries a resumable local pipeline for Windows/WSL development. The root helpers prepare the pinned SDK, run the compatibility-surface tests, reuse validated shard evidence where appropriate, and continue the downstream SDK pipeline without weakening the CI invariants.
+## Regression and privacy rules
 
-See [`LOCAL_THEOS_PREFLIGHT.md`](LOCAL_THEOS_PREFLIGHT.md) for the current commands and prerequisites.
+Regression prevention is a hard acceptance criterion.
+
+- no monkey patching, runtime swapping, or hidden compatibility hooks;
+- no application-specific names, bundle identifiers, local paths, fingerprints, private logs, or private RuntimeRoot data in public history;
+- no fabricated success for unsupported Darwin behavior;
+- complete guest pointer/span validation before host dereference when an API requires it;
+- exact Darwin LP64 structure widths and return/error conventions;
+- generated ABI evidence determines mechanics only;
+- semantic approval remains separate and explicit;
+- data exports remain data;
+- prior generated routes and semantic smokes remain green;
+- existing descriptor, Mach IPC, pthread/workqueue, VM, timing, socket, filesystem, loader, and RuntimeRootStore behavior remain regression requirements when applicable; and
+- public synthetic and AWS acceptance boundaries remain frozen until a real implementation intentionally advances them.
+
+## Apple SDK metadata for compatibility research
+
+Use the maintained [Theos SDK archive](https://github.com/theos/sdks) as the pinned public provider/header reference for the established iPhoneOS16.5 mechanical preflight.
+
+GitHub's macOS runner also exposes real `iphoneos` and `iphonesimulator` SDK installations. The trusted RuntimeRoot work currently uses the GitHub-hosted Xcode 16.4 / iOS 18.5 environment as runtime source evidence. Do not silently replace the established pinned Theos mechanical pipeline with a different SDK source without a separately claimed, regression-proven migration.
+
+`.tbd` files are useful for exported names, install names, provider/re-export relationships, targets, weak/TLS/Objective-C metadata classes, and SDK-version comparisons. They are **not implementation source**. Function prototypes require SDK headers/compiler evidence, and correct Windows semantics require independent implementation evidence.
+
+See [`LOCAL_THEOS_PREFLIGHT.md`](LOCAL_THEOS_PREFLIGHT.md) for the resumable Windows/WSL full-SDK pipeline.
 
 ## AI coding agents
 
-[`AGENTS.md`](AGENTS.md) is the canonical instruction set for autonomous and AI-assisted coding work. Changes under `src/IpaSimulator/` also follow [`src/IpaSimulator/AGENTS.md`](src/IpaSimulator/AGENTS.md).
+[`AGENTS.md`](AGENTS.md) is the canonical instruction set for autonomous and AI-assisted work. Changes below `src/IpaSimulator/` also follow [`src/IpaSimulator/AGENTS.md`](src/IpaSimulator/AGENTS.md).
 
-Before starting work, inspect `.github/agent-work/` and open/draft PRs. For mechanical compatibility work, first ask whether the required evidence can be generated from the SDK-wide catalog or an existing generator before creating a per-symbol handwritten mapping. For semantic/runtime work, the first genuine non-cascading failure remains the truth source.
+Before starting substantial work:
 
-Please keep changes target-neutral and evidence-driven. Do not add private application names, paths, patches, or success shims.
+1. update your view of `master`;
+2. inspect active claims and open/draft PRs;
+3. publish a narrow non-overlapping claim when required;
+4. keep implementation target-neutral and evidence-driven;
+5. preserve known-good public contracts; and
+6. remove the claim from the implementation PR before merge.
 
-See [`docs/arm64-ios-compatibility.md`](docs/arm64-ios-compatibility.md) for the current compatibility direction.
+For mechanical compatibility work, first ask whether the required evidence belongs in the SDK-wide catalog/generator rather than a handwritten per-symbol table. For semantic/runtime work, the first genuine non-cascading failure remains the truth source.
+
+See [`ROADMAP.md`](ROADMAP.md) for the current subsystem backlog and [`docs/arm64-ios-compatibility.md`](docs/arm64-ios-compatibility.md) for additional compatibility direction.
 
 ---
 
@@ -454,7 +414,7 @@ The original implementation supported simple applications. See the [author's the
 ## Related projects
 
 - [touchHLE](https://github.com/touchHLE/touchHLE) — high-level iOS emulator with useful subsystem comparison points, although its architecture and target era differ
-- [UWin](https://github.com/lujingyu/UWin) — historical 2011 iOS/Xcode build snapshot used only as external research evidence as described above
+- [UWin](https://github.com/lujingyu/UWin) — historical 2011 iOS/Xcode build snapshot used only as external research evidence
 
 ## Cloning and historical build documentation
 
