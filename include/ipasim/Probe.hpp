@@ -32,4 +32,14 @@ IPASIM_API int ipaSim_executeImage(const char *Path, uint64_t *ReturnValue);
 IPASIM_API int ipaSim_executeImageThreaded(const char *Path,
                                            uint64_t *ReturnValue);
 
+// Internal runtime C ABI used by the Darwin pthread semantic provider. These
+// exports do not create application-specific behavior: they expose one fresh
+// guest CPU context, its real stack identity, and a controlled non-local guest
+// pthread exit while preserving C++ ownership of the Unicorn context.
+IPASIM_API int ipaSim_runGuestPthread(void *FP, void *Arg0,
+                                     void **ReturnValue);
+IPASIM_API void *ipaSim_currentGuestStackTop();
+IPASIM_API int ipaSim_isMainGuestContext();
+IPASIM_API int ipaSim_requestGuestPthreadExit(void *ExitValue);
+
 #endif // IPASIM_PROBE_HPP

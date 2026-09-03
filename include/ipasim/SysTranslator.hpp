@@ -30,37 +30,17 @@ public:
   // Prepare an additional CPU context for code inside the already-loaded guest
   // process. It receives its own stack/register state and the normal host-call
   // and data-memory hooks, but does not repeat process-wide ObjC/image startup.
-  bool initializeExecutionContext() {
-    if (ExecutionContextInitialized)
-      return true;
+  bool initializeExecutionContext();
 
-    constexpr size_t StackSize = 8 * 1024 * 1024;
-    void *StackPtr = _aligned_malloc(StackSize, DynamicLoader::PageSize);
-    if (!StackPtr) {
-      Log.error("could not allocate guest execution-context stack");
-      return false;
-    }
+  // Return the real host-backed range mapped as this ARM64 CPU context's stack.
+  // The top address is Base + Size because Darwin/AArch64 stacks grow downward.
+  bool getExecutionStackBounds(void *&Base, size_t &Size) const;
 
-    const uint64_t StackAddr = reinterpret_cast<uint64_t>(StackPtr);
-    // A worker stack belongs only to this CPU context. Do not register it as a
-    // process-shared dyld mapping, otherwise later worker contexts would replay
-    // a stack whose backing allocation is freed when this context exits.
-    if (!Emu.mapRecordedMemory(StackAddr, StackSize,
-                               UC_PROT_READ | UC_PROT_WRITE)) {
-      _aligned_free(StackPtr);
-      return false;
-    }
-    Emu.writeReg(UC_ARM64_REG_SP,
-                 (StackAddr + StackSize) & ~uint64_t(0xF));
-
-    Emu.hook(UC_HOOK_MEM_FETCH_PROT, &SysTranslator::handleFetchProtMem, this);
-    Emu.hook(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED,
-             &SysTranslator::handleMemUnmapped, this);
-
-    ExecutionStack = StackPtr;
-    ExecutionContextInitialized = true;
-    return true;
-  }
+  // pthread_exit must not terminate a Windows host thread from inside a native
+  // bridge frame: doing so would bypass GuestExecutionContext teardown. Mark the
+  // current ARM64 execution as complete and publish the Darwin exit value in X0;
+  // the execution loop then unwinds without resuming the guest call site.
+  void requestGuestThreadExit(void *ExitValue);
 
   void *translate(void *FP);
   void *translate(void *FP, size_t ArgC, bool Returns = false);
@@ -87,6 +67,7 @@ public:
   template <typename... ArgTys> void *callBackR(void *FP, ArgTys... Args);
 
 private:
+  bool prepareExecutionStack();
   bool handleFetchProtMem(uc_mem_type Type, uint64_t Addr, int Size,
                           int64_t Value);
   void handleCode(uint64_t Addr, uint32_t Size);
@@ -110,6 +91,8 @@ private:
   std::function<void()> Continuation;
   bool ExecutionContextInitialized = false;
   void *ExecutionStack = nullptr;
+  size_t ExecutionStackSize = 0;
+  bool GuestThreadExitRequested = false;
 };
 
 class DynamicCaller {

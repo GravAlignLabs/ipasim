@@ -70,6 +70,7 @@ if (IPASIM_MODERN_CORE)
         DarwinVoucherBridge.cpp
         DarwinTelemetryBridge.cpp
         DarwinUlockBridge.cpp
+        DarwinPthreadCoreBridge.cpp
         DarwinPthreadQosBridge.cpp
         DarwinPthreadTsdBridge.cpp
         DarwinPthreadWorkloopBridge.cpp
@@ -121,6 +122,10 @@ if (IPASIM_MODERN_CORE)
     add_executable (DarwinUlockSmoke
         DarwinUlockSmoke.cpp)
     target_compile_options (DarwinUlockSmoke PRIVATE -std=c++17)
+
+    add_executable (DarwinPthreadCoreSmoke
+        DarwinPthreadCoreSmoke.cpp)
+    target_compile_options (DarwinPthreadCoreSmoke PRIVATE -std=c++17)
 
     add_executable (DarwinPthreadQosSmoke
         DarwinPthreadQosSmoke.cpp)
@@ -179,6 +184,10 @@ if (IPASIM_MODERN_CORE)
         COMMAND "$<TARGET_FILE:DarwinUlockSmoke>" "$<TARGET_FILE:IpaSimDarwinHost>"
         DEPENDS DarwinUlockSmoke IpaSimDarwinHost
         USES_TERMINAL)
+    add_custom_target (DarwinPthreadCoreCheck
+        COMMAND "$<TARGET_FILE:DarwinPthreadCoreSmoke>" "$<TARGET_FILE:IpaSimDarwinHost>"
+        DEPENDS DarwinPthreadCoreSmoke IpaSimDarwinHost
+        USES_TERMINAL)
     add_custom_target (DarwinPthreadQosCheck
         COMMAND "$<TARGET_FILE:DarwinPthreadQosSmoke>" "$<TARGET_FILE:IpaSimDarwinHost>"
         DEPENDS DarwinPthreadQosSmoke IpaSimDarwinHost
@@ -228,6 +237,7 @@ else ()
         DarwinVoucherCheck
         DarwinTelemetryCheck
         DarwinUlockCheck
+        DarwinPthreadCoreCheck
         DarwinPthreadQosCheck
         DarwinPthreadTsdCheck
         DarwinPthreadWorkloopCheck

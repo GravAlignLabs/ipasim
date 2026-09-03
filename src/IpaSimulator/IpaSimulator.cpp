@@ -161,6 +161,60 @@ IPASIM_API int ipaSim_executeImageThreaded(const char *Path,
   return 0;
 }
 
+// Run one guest pthread start routine on a fresh ARM64 CPU/register/stack
+// context in the calling Windows thread. DarwinPthreadCoreBridge owns the
+// Windows pthread lifetime; this routine is deliberately synchronous so the
+// host pthread identity/TSD state and its Unicorn context stay on one thread.
+IPASIM_API int ipaSim_runGuestPthread(void *FP, void *Arg0,
+                                     void **ReturnValue) {
+  if (!FP || !ReturnValue)
+    return 64;
+
+  auto Context = IpaSim.createExecutionContext();
+  if (!Context)
+    return 72;
+
+  ScopedSysTranslatorActivation Active(*Context->Sys);
+  *ReturnValue = Context->Sys->callBackR(FP, Arg0);
+  return 0;
+}
+
+// Darwin pthread_get_stackaddr_np reports the actual top of the current
+// downward-growing guest stack. Return no value when there is no active ARM64
+// execution context rather than leaking a native Windows stack or fabricating a
+// guest address.
+IPASIM_API void *ipaSim_currentGuestStackTop() {
+  if (!ActiveSysTranslator)
+    return nullptr;
+
+  void *Base = nullptr;
+  size_t Size = 0;
+  if (!ActiveSysTranslator->getExecutionStackBounds(Base, Size) || !Base ||
+      Size == 0)
+    return nullptr;
+  return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(Base) + Size);
+}
+
+// Return 1 only for the process's primary SysTranslator, 0 for an active worker
+// context, and -1 when called outside guest execution. The Darwin host bridge
+// uses this to avoid equating DLL-load thread identity with guest main-thread
+// identity.
+IPASIM_API int ipaSim_isMainGuestContext() {
+  if (!ActiveSysTranslator)
+    return -1;
+  return ActiveSysTranslator == &IpaSim.Sys ? 1 : 0;
+}
+
+// Request a non-local Darwin pthread exit without terminating the backing
+// Windows thread. SysTranslator stops resumption after the current native bridge
+// call and lets ipaSim_runGuestPthread unwind its C++ ownership normally.
+IPASIM_API int ipaSim_requestGuestPthreadExit(void *ExitValue) {
+  if (!ActiveSysTranslator)
+    return 3;
+  ActiveSysTranslator->requestGuestThreadExit(ExitValue);
+  return 0;
+}
+
 IPASIM_API void *ipaSim_translate(void *FP) {
   return currentSysTranslator().translate(FP);
 }
