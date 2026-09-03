@@ -4,6 +4,7 @@
 #include "ipasim/IpaSimulator.hpp"
 #include "ipasim/Probe.hpp"
 
+#include "ipasim/DwarfsRuntimeRootStore.hpp"
 #include "ipasim/DynamicLoader.hpp"
 #include "ipasim/LoadedLibrary.hpp"
 
@@ -93,6 +94,32 @@ IPASIM_API int ipaSim_setRuntimeRoot(const char *Path) {
     return 65;
   }
   return 0;
+}
+
+IPASIM_API int ipaSim_setDwarfsRuntimeRoot(const char *ImagePath,
+                                           const char *ReaderBridgePath) {
+#if defined(IPASIM_MODERN_CORE)
+  if (!ImagePath || !*ImagePath || !ReaderBridgePath || !*ReaderBridgePath)
+    return 64;
+
+  string Error;
+  auto Store = makeDwarfsRuntimeRootStore(ImagePath, ReaderBridgePath, Error);
+  if (!Store) {
+    // Match the directory setter's fail-closed behavior: an invalid replacement
+    // cannot leave a previously configured RuntimeRoot active.
+    IpaSim.Dyld.setRuntimeRootStore(nullptr);
+    Log.error() << "invalid DwarFS iOS runtime root: " << Error << Log.end();
+    return 65;
+  }
+
+  if (!IpaSim.Dyld.setRuntimeRootStore(std::move(Store)))
+    return 65;
+  return 0;
+#else
+  (void)ImagePath;
+  (void)ReaderBridgePath;
+  return 65;
+#endif
 }
 
 IPASIM_API int ipaSim_probeImage(const char *Path) {
