@@ -30,19 +30,39 @@ as a Device Farm test workload.
 Every pull-request execution is deliberately unprivileged. It receives no
 RuntimeRoot secrets and runs the untouched AWS application image through the
 published `IpaProbe` tester. This proves that a real third-party package is parsed
-without crashing and that an unsupported dependency stops through an explicit
-ipaSim loader diagnostic rather than hidden success.
+without crashing and that unsupported loader behavior remains explicit rather
+than becoming hidden success.
 
 The public check requires:
 
 1. the downloaded IPA to match the pinned upstream Git blob exactly;
 2. the committed published ipaSim tester to pass its SHA-256 provenance check;
 3. `IpaProbe` not to crash while processing the real third-party ARM iOS package;
-4. any nonzero probe result to contain an explicit ipaSim loader-stop diagnostic.
+4. the exact frozen loader observations below to remain visible until target-neutral
+   compatibility work legitimately advances them.
 
-The exact first non-cascading public loader boundary should be pinned after its
-initial discovery run, in the same style as the synthetic native and UIKit
-fixtures.
+#### Frozen public baseline
+
+The discovery run established this exact current sequence:
+
+```text
+first_error=Error: unsupported ARM64 relocation.
+runtime_boundary=Error: iOS runtime root is not configured for dependency /System/Library/Frameworks/AVFoundation.framework/AVFoundation.
+loader_stop=[ipasim-probe] loader stopped with code 2 before app execution.
+probe_exit=2
+```
+
+The relocation diagnostics occur before the missing-`AVFoundation` RuntimeRoot
+boundary and are therefore part of the compatibility baseline, not log noise. The
+workflow must not suppress or skip them. A future relocation implementation may
+advance this checkpoint only by replacing the unsupported behavior with real,
+target-neutral loader semantics and updating the frozen expectation from observed
+CI evidence.
+
+The missing `AVFoundation` dependency is separately recorded because the public PR
+job intentionally has no Apple RuntimeRoot. The explicit loader-stop diagnostic
+and exit code 2 prove that the unsupported dependency terminates through ipaSim's
+normal loader failure path rather than a process crash.
 
 ### Trusted full-runtime acceptance
 
@@ -75,5 +95,6 @@ code cannot access RuntimeRoot secrets or plaintext extracted files. Manual
 execution is also restricted to the `master` ref.
 
 This fixture must not be used as justification for application-specific aliases,
-monkey patches, hidden success paths, or committing/redistributing Apple runtime
-files. Runtime progress must come from target-neutral ipaSim compatibility work.
+monkey patches, hidden success paths, failure suppression, or
+committing/redistributing Apple runtime files. Runtime progress must come from
+target-neutral ipaSim compatibility work.
