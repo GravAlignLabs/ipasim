@@ -77,6 +77,7 @@ using ParallelFn = int (*)(DarwinQosClass, DarwinUnsignedLong);
 using RealtimeParallelFn = int (*)(DarwinUnsignedLong);
 using MainQosFn = DarwinQosClass (*)();
 using CpuNumberFn = int (*)(std::size_t *);
+using DarwinErrorFn = int *(*)();
 
 SelfFn PthreadSelf = nullptr;
 ThreadIdFn PthreadThreadId = nullptr;
@@ -163,6 +164,7 @@ int main(int argc, char **argv) {
       Dll, "pthread_time_constraint_max_parallelism");
   auto MainQos = requireExport<MainQosFn>(Dll, "qos_class_main");
   auto CpuNumber = requireExport<CpuNumberFn>(Dll, "pthread_cpu_number_np");
+  auto DarwinError = requireExport<DarwinErrorFn>(Dll, "__error");
 
   DarwinPthreadAttr Attr{};
   require(AttrInit(nullptr) == DarwinErrnoInvalid,
@@ -236,8 +238,11 @@ int main(int argc, char **argv) {
           "logical QoS parallelism invalid");
   require(Parallel(QosClassDefault, 1) >= 1,
           "physical QoS parallelism invalid");
-  errno = 0;
-  require(Parallel(QosClassDefault, 2) == -1 && errno == EINVAL,
+  int *DarwinErrno = DarwinError();
+  require(DarwinErrno != nullptr, "Darwin __error returned null");
+  *DarwinErrno = 0;
+  require(Parallel(QosClassDefault, 2) == -1 &&
+              *DarwinErrno == DarwinErrnoInvalid,
           "invalid parallelism flags were accepted");
   require(RealtimeParallel(0) >= 1, "realtime parallelism invalid");
   require(MainQos() == QosClassDefault, "main QoS class incorrect");
@@ -290,8 +295,9 @@ int main(int argc, char **argv) {
               reinterpret_cast<std::uintptr_t>(Joined) == DarwinErrnoDeadlock,
           "self join did not report Darwin EDEADLK");
 
-  // Native pthread_exit unwinds through the host bridge's controlled sentinel;
-  // the joiner must observe the supplied value without terminating the process.
+  // Native pthread_exit records the supplied value before ending only the
+  // standalone smoke's backing Windows thread; the joiner must observe it
+  // without terminating the process.
   Thread = nullptr;
   Expected = reinterpret_cast<void *>(0x87654321ULL);
   require(PthreadCreate(&Thread, nullptr,
