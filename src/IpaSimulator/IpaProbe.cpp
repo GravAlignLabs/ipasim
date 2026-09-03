@@ -12,15 +12,26 @@ int main(int argc, char **argv) {
     const bool executeThreaded =
         argc >= 2 && std::strcmp(argv[1], "--execute-threaded") == 0;
     const bool executionMode = execute || executeThreaded;
-    const int minArgs = executionMode ? 3 : 2;
-    const int maxArgs = executionMode ? 4 : 3;
+    const int imageIndex = executionMode ? 2 : 1;
 
-    if (argc < minArgs || argc > maxArgs) {
+    if (argc <= imageIndex) {
         std::fprintf(stderr,
                      "Usage:\n"
                      "  IpaProbe.exe <path-to-extracted-Mach-O> [path-to-iOS-runtime-root]\n"
                      "  IpaProbe.exe --execute <path-to-extracted-Mach-O> [path-to-iOS-runtime-root]\n"
-                     "  IpaProbe.exe --execute-threaded <path-to-extracted-Mach-O> [path-to-iOS-runtime-root]\n");
+                     "  IpaProbe.exe --execute-threaded <path-to-extracted-Mach-O> [path-to-iOS-runtime-root]\n"
+                     "  IpaProbe.exe [--execute|--execute-threaded] <path-to-extracted-Mach-O> --runtime-root-dwarfs <RuntimeRoot.dwarfs> <IpaSimDwarfsReader.dll>\n");
+        return 64;
+    }
+
+    const int runtimeArgCount = argc - (imageIndex + 1);
+    const bool directoryRuntime = runtimeArgCount == 1;
+    const bool dwarfsRuntime =
+        runtimeArgCount == 3 &&
+        std::strcmp(argv[imageIndex + 1], "--runtime-root-dwarfs") == 0;
+    if (runtimeArgCount != 0 && !directoryRuntime && !dwarfsRuntime) {
+        std::fprintf(stderr,
+                     "[ipasim-probe] invalid RuntimeRoot arguments. Use one directory path or explicit --runtime-root-dwarfs <image> <reader-bridge>.\n");
         return 64;
     }
 
@@ -32,11 +43,10 @@ int main(int argc, char **argv) {
         !ipasim::probe::runLegacyDyldInfoAuditSelfTest())
         return 70;
 
-    const char *imagePath = argv[executionMode ? 2 : 1];
-    const char *runtimeRoot =
-        argc == maxArgs ? argv[executionMode ? 3 : 2] : nullptr;
+    const char *imagePath = argv[imageIndex];
 
-    if (runtimeRoot) {
+    if (directoryRuntime) {
+        const char *runtimeRoot = argv[imageIndex + 1];
         std::printf("[ipasim-probe] iOS runtime root: %s\n", runtimeRoot);
 
         ipasim::probe::reportStaticClosureSymbolAuditComplete(imagePath,
@@ -47,6 +57,25 @@ int main(int argc, char **argv) {
         if (runtimeResult != 0) {
             std::fprintf(stderr,
                          "[ipasim-probe] runtime root rejected with code %d.\n",
+                         runtimeResult);
+            return runtimeResult;
+        }
+    } else if (dwarfsRuntime) {
+        const char *runtimeImage = argv[imageIndex + 2];
+        const char *readerBridge = argv[imageIndex + 3];
+        std::printf("[ipasim-probe] DwarFS iOS runtime image: %s\n",
+                    runtimeImage);
+        std::printf("[ipasim-probe] DwarFS reader bridge: %s\n",
+                    readerBridge);
+        std::fprintf(
+            stderr,
+            "[ipasim-probe] NOTE: static closure and host-import inventory preflights are currently directory-backed and are not claimed in DwarFS mode; the real DynamicLoader result below remains authoritative for this storage experiment.\n");
+
+        const int runtimeResult =
+            ipaSim_setDwarfsRuntimeRoot(runtimeImage, readerBridge);
+        if (runtimeResult != 0) {
+            std::fprintf(stderr,
+                         "[ipasim-probe] DwarFS runtime root rejected with code %d.\n",
                          runtimeResult);
             return runtimeResult;
         }
