@@ -1,0 +1,29 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Fix trusted GitHub-hosted RuntimeRoot packaging so intrinsic unreadable simulator
+  host-state paths are handled explicitly while all other archive/read failures
+  remain visible and fatal.
+
+scope:
+  - .github/workflows/trusted-github-runtime-acceptance.yml
+  - .github/agent-work/runtime-root-package-correctness.yml
+
+branch: ci/runtime-root-package-correctness
+started_utc: 2026-09-03T12:31:00Z
+updated_utc: 2026-09-03T12:31:00Z
+base_sha: ec002cba0853456c05e1fdbfd7e3208b9e7b2f4e
+expected_pr: draft
+
+next_checkpoint: >-
+  Make the runtime-source job classify unreadable paths before archiving, permit
+  only explicitly documented simulator host-state exclusions, package the remaining
+  RuntimeRoot deterministically, and keep every unexpected permission/archive
+  failure fatal and self-reported.
+
+notes: >-
+  CI packaging only. Do not alter ipaSim runtime/loader behavior, public AWS
+  acceptance boundaries, synthetic baselines, secrets, or RuntimeRoot contents in
+  Git. No blanket warning suppression and no success-on-error archive handling.
