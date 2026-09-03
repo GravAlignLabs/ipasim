@@ -1,0 +1,35 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Prove the complete pinned GitHub-hosted iOS 18.5 RuntimeRoot can be packaged as
+  one DwarFS image and consumed directly by ipaSim on real Windows without
+  mounting or extracting the RuntimeRoot tree.
+
+scope:
+  - include/ipasim/IpaSimulator.hpp
+  - include/ipasim/Probe.hpp
+  - include/ipasim/DynamicLoader.hpp
+  - src/IpaSimulator/IpaProbe.cpp
+  - src/IpaSimulator/Probe.cpp
+  - src/IpaSimulator/DynamicLoader.cpp
+  - .github/workflows/trusted-runtime-dwarfs-acceptance.yml
+  - .github/agent-work/runtime-root-dwarfs-acceptance.yml
+
+branch: runtime-root-dwarfs-acceptance
+started_utc: 2026-09-03T21:47:00Z
+updated_utc: 2026-09-03T21:47:00Z
+base_sha: 9fb67da54cb7c13cdea2a68558d9a734215174bb
+expected_pr: draft
+
+next_checkpoint: >-
+  Add explicit DwarFS RuntimeRoot selection without fallback, package the full
+  Xcode 16.4 iOS 18.5 (22F77) RuntimeRoot as a verified DwarFS image on macOS,
+  restore it on Windows, and run the pinned public IPA acceptance through the
+  image-backed RuntimeRootStore.
+
+notes: >-
+  Keep the existing trusted directory/zstd RuntimeRoot path unchanged until the
+  DwarFS-backed acceptance proves parity. No exclusions, path rewriting, mounts,
+  extraction fallback, hidden failures, or suppressed diagnostics.
