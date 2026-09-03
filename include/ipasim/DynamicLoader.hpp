@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <stack>
@@ -20,6 +21,8 @@
 #include <vector>
 
 namespace ipasim {
+
+class RuntimeRootStore;
 
 struct BinaryPath {
   std::string Path;
@@ -93,7 +96,8 @@ private:
 
   bool canSegmentsSlide(LIEF::MachO::Binary &Bin);
   BinaryPath resolvePath(const std::string &Path);
-  LoadedLibrary *loadMachO(const std::string &Path);
+  LoadedLibrary *loadMachO(const std::string &Path,
+                           const std::vector<std::uint8_t> *Data = nullptr);
   LoadedLibrary *loadPE(const std::string &Path);
   void handleMachOs(size_t HdrOffset, size_t HandlerOffset);
   void recordSharedMemory(uint64_t Address, uint64_t Size,
@@ -103,7 +107,7 @@ private:
   Emulator &Emu;
   uint64_t KernelAddr;
   LoadedDylib *MainExecutable = nullptr;
-  std::string RuntimeRoot;
+  std::unique_ptr<RuntimeRootStore> RuntimeStore;
 
   std::mutex SharedMemoryMutex;
   std::vector<SharedMemoryMapping> SharedMemoryMappings;
