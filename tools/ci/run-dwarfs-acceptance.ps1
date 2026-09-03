@@ -10,7 +10,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $AwsCommit = if ($env:AWS_IPA_COMMIT) { $env:AWS_IPA_COMMIT } else { '58e48234db510bd4fbf643643e8808c5d6a13845' }
 $AwsBlob = if ($env:AWS_IPA_BLOB) { $env:AWS_IPA_BLOB } else { '06a33a39286ffd7c9d300c5924750b6f97c4e346' }
-$AwsSize = [Int64](if ($env:AWS_IPA_SIZE) { $env:AWS_IPA_SIZE } else { '2138167' })
+$AwsSizeText = if ($env:AWS_IPA_SIZE) { $env:AWS_IPA_SIZE } else { '2138167' }
+$AwsSize = [Int64]$AwsSizeText
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Log) | Out-Null
 Set-Content -LiteralPath $Log -Value ''
