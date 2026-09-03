@@ -60,9 +60,22 @@ $rng.Dispose()
 The old URL, archive-SHA, and authorization-header secrets are not required by
 this workflow because GitHub itself supplies and caches the runtime.
 
+## Workflow separation
+
+`public-ipa-acceptance.yml` is secret-free. It keeps the frozen no-RuntimeRoot AWS
+baseline available on pull requests and trusted `master` pushes.
+
+`github-runtime-source-preflight.yml` is also secret-free. It runs on pull
+requests that change this runtime-supply infrastructure and proves that GitHub's
+macOS image still exposes the pinned Xcode, iOS simulator runtime, `RuntimeRoot`,
+and SDK identities.
+
+`trusted-github-runtime-acceptance.yml` is master-push only. It is the only new
+workflow that references `IPASIM_RUNTIME_ARCHIVE_PASSWORD`.
+
 ## Trusted runtime flow
 
-On a trusted `master` push, or a workflow dispatch from `master`:
+On a trusted `master` push:
 
 1. a GitHub-hosted macOS runner selects the pinned Xcode;
 2. it inventories the installed `iphoneos` and `iphonesimulator` SDK identities;
@@ -86,13 +99,13 @@ plaintext RuntimeRoot cache.
 ## Pull-request isolation
 
 Pull requests continue to run the frozen AWS loader acceptance without any
-RuntimeRoot or RuntimeRoot secret. The GitHub-hosted runtime source/cache path is
-not available to `pull_request` jobs.
+RuntimeRoot or RuntimeRoot secret. The secret-bearing GitHub-hosted runtime
+source/cache path does not run from pull-request code.
 
-A manual workflow dispatch from a non-`master` ref may request the unprivileged
-runtime-source preflight. That preflight only selects Xcode, locates the installed
-runtime, validates `System`/`usr`, and inventories SDK identities. It does not use
-the password secret, create an archive, or save a cache.
+The separate runtime-source preflight may also be dispatched manually because it
+contains no secret references. It only selects Xcode, locates the installed
+runtime, validates `System`/`usr`, and inventories SDK identities. It does not
+create an archive or save a RuntimeRoot cache.
 
 ## SDK inventory
 
