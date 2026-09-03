@@ -91,14 +91,19 @@ if ($LASTEXITCODE -ne 0) {
     throw 'GitHub CLI is not authenticated. Run: gh auth login'
 }
 
-$secretJson = @(& $gh secret list --repo $Repository --app actions --json name) -join "`n"
+# Ask gh to emit one secret name per line instead of parsing its JSON in
+# PowerShell. This is stable for zero, one, or many secrets and avoids
+# StrictMode property-access failures caused by CLI/PowerShell JSON shape
+# differences.
+$existingSecretNames = @(& $gh secret list --repo $Repository --app actions --json name --jq '.[].name')
 if ($LASTEXITCODE -ne 0) {
     throw "Unable to list GitHub Actions secrets for $Repository."
 }
-$existingSecretNames = @()
-if ($secretJson.Trim()) {
-    $existingSecretNames = @($secretJson | ConvertFrom-Json | ForEach-Object { $_.name })
-}
+$existingSecretNames = @(
+    $existingSecretNames |
+        ForEach-Object { "$($_)".Trim() } |
+        Where-Object { $_ }
+)
 
 if (($existingSecretNames -contains 'IPASIM_RUNTIME_ARCHIVE_PASSWORD') -and -not $Rotate) {
     throw "IPASIM_RUNTIME_ARCHIVE_PASSWORD already exists for $Repository. Refusing to rotate it implicitly. Re-run with -Rotate only when intentionally replacing the encrypted RuntimeRoot archive and cache."
