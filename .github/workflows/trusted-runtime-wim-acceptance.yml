@@ -254,6 +254,7 @@ jobs:
 
       - name: Report WIM source diagnostic to merged PR
         if: always()
+        continue-on-error: true
         uses: actions/github-script@v7
         env:
           DISCOVERY_OUTCOME: ${{ steps.discovery.outcome }}
@@ -582,6 +583,7 @@ jobs:
 
       - name: Report WIM acceptance diagnostic to merged PR
         if: always()
+        continue-on-error: true
         uses: actions/github-script@v7
         env:
           TESTER_OUTCOME: ${{ steps.tester.outcome }}
