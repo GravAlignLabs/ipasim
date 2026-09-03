@@ -24,10 +24,8 @@ type: software
 authors:
   - given-names: Jan
     family-names: Joneš
-repository-code: 'https://github.com/ipasimulator/ipasim'
-url: 'https://janjones.me/projects/ipasim/'
-repository-artifact: >-
-  https://github.com/ipasimulator/ipasim/releases/tag/v1.0
+repository-code: 'https://github.com/GravAlignLabs/ipasim'
+url: 'https://github.com/GravAlignLabs/ipasim'
 abstract: >
   The goal of this thesis is to create a program for
   Windows that takes a compiled iOS application and
