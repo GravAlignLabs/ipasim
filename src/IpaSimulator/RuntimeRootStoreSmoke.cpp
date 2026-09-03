@@ -9,9 +9,9 @@
 
 namespace {
 
-bool fail(const char *Message) {
+int fail(const char *Message) {
   std::fprintf(stderr, "[runtime-root-store-smoke] FAIL: %s\n", Message);
-  return false;
+  return 1;
 }
 
 bool writeBytes(const std::filesystem::path &Path,
@@ -34,7 +34,7 @@ int main() {
   wchar_t TempPath[MAX_PATH];
   const DWORD TempLength = GetTempPathW(MAX_PATH, TempPath);
   if (TempLength == 0 || TempLength >= MAX_PATH)
-    return fail("GetTempPathW failed") ? 0 : 1;
+    return fail("GetTempPathW failed");
 
   const std::filesystem::path Base =
       std::filesystem::path(TempPath) /
@@ -50,7 +50,7 @@ int main() {
   if (!writeBytes(RootA / Relative, Expected) ||
       !writeBytes(RootB / Relative, Expected)) {
     std::filesystem::remove_all(Base, EC);
-    return fail("could not create fixture") ? 0 : 1;
+    return fail("could not create fixture");
   }
 
   std::string Error;
@@ -74,8 +74,7 @@ int main() {
   const std::string IdentityB = StoreB->identity(DarwinPath);
   if (IdentityA.empty() || IdentityB.empty() || IdentityA == IdentityB) {
     std::filesystem::remove_all(Base, EC);
-    return fail("store identities do not distinguish RuntimeRoot sources") ? 0
-                                                                            : 1;
+    return fail("store identities do not distinguish RuntimeRoot sources");
   }
 
   std::vector<std::uint8_t> Data;
@@ -83,20 +82,20 @@ int main() {
     std::fprintf(stderr, "[runtime-root-store-smoke] read error: %s\n",
                  Error.c_str());
     std::filesystem::remove_all(Base, EC);
-    return fail("absolute Darwin path did not return exact bytes") ? 0 : 1;
+    return fail("absolute Darwin path did not return exact bytes");
   }
 
   Data.assign(1, 0xff);
   if (StoreA->readFile("System/Library/Test.dylib", Data, Error) ||
       !Data.empty() || Error.empty()) {
     std::filesystem::remove_all(Base, EC);
-    return fail("relative Darwin path was not rejected explicitly") ? 0 : 1;
+    return fail("relative Darwin path was not rejected explicitly");
   }
 
   if (StoreA->readFile("/System/Library/Missing.dylib", Data, Error) ||
       Error.empty()) {
     std::filesystem::remove_all(Base, EC);
-    return fail("missing RuntimeRoot file was not reported") ? 0 : 1;
+    return fail("missing RuntimeRoot file was not reported");
   }
 
   std::filesystem::remove_all(Base, EC);
