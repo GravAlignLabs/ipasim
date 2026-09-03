@@ -1,0 +1,30 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Add one pinned, redistributable third-party iOS IPA as a public acceptance
+  workload and run it through the published Windows ipaSim tester with a
+  deterministic, self-reporting loader boundary.
+
+scope:
+  - .github/workflows/public-ipa-acceptance.yml
+  - tests/public-ipas/aws-device-farm-sample-app.md
+  - .github/agent-work/public-ipa-acceptance.yml
+
+branch: test/public-ipa-acceptance
+started_utc: 2026-09-03T02:32:00Z
+updated_utc: 2026-09-03T02:32:00Z
+base_sha: 32440b78283ad38d6b915bcabd78782d830746bf
+expected_pr: draft
+
+next_checkpoint: >-
+  Run the pinned AWS Device Farm sample IPA through the current published
+  Windows tester, capture its first non-crashing public loader boundary, then
+  tighten the workflow to require that exact boundary before merge.
+
+notes: >-
+  Test fixture only. The IPA is Apache-2.0 sample material from aws-samples and
+  is referenced by immutable upstream commit/blob identity. Do not add Apple
+  RuntimeRoot material, private IPA data, or application-specific compatibility
+  hooks.
