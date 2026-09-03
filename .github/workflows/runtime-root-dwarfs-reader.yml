@@ -49,11 +49,7 @@ jobs:
           path.write_bytes(bytes([0x49, 0x50, 0x41, 0x53, 0x69, 0x6d, 0x00, 0xff, 0x2f, 0x3a, 0x7f]))
           PY
 
-          "$DWARFS" --tool=mkdwarfs \
-            -i "$FIXTURE_ROOT" \
-            -o "$FIXTURE_IMAGE" \
-            --log-level=warn
-
+          "$DWARFS" --tool=mkdwarfs -i "$FIXTURE_ROOT" -o "$FIXTURE_IMAGE" --log-level=warn
           "$DWARFS" --tool=dwarfsck "$FIXTURE_IMAGE" -l | tee "$RUNNER_TEMP/dwarfs-fixture-list.txt"
           grep -F 'System/Library/Frameworks/UIKit.framework/Versions/A:/UIKit' "$RUNNER_TEMP/dwarfs-fixture-list.txt"
 
@@ -148,9 +144,7 @@ jobs:
             $Package = Join-Path $env:RUNNER_TEMP "dwarfs-$DwarfsVersion-Windows-AMD64.7z"
             $PackageDir = Join-Path $env:RUNNER_TEMP 'dwarfs-package'
 
-            Invoke-WebRequest \
-              -Uri "https://github.com/mhx/dwarfs/releases/download/v$DwarfsVersion/dwarfs-$DwarfsVersion-Windows-AMD64.7z" \
-              -OutFile $Package
+            Invoke-WebRequest -Uri "https://github.com/mhx/dwarfs/releases/download/v$DwarfsVersion/dwarfs-$DwarfsVersion-Windows-AMD64.7z" -OutFile $Package
             $ActualSha = (Get-FileHash -Algorithm SHA256 $Package).Hash.ToLowerInvariant()
             if ($ActualSha -ne $DwarfsSha) {
               throw "DwarFS package SHA-256 mismatch: expected $DwarfsSha got $ActualSha"
@@ -202,14 +196,16 @@ jobs:
 
             $BuildDir = Join-Path $env:RUNNER_TEMP 'ipasim-dwarfs-reader-build'
             $Toolchain = Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake'
-            Invoke-Native cmake \
-              -S "$env:GITHUB_WORKSPACE\src\IpaSimulator\dwarfs-reader" \
-              -B $BuildDir \
-              -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" \
-              -DVCPKG_TARGET_TRIPLET=x64-windows-static \
+            $ConfigureArgs = @(
+              '-S', "$env:GITHUB_WORKSPACE\src\IpaSimulator\dwarfs-reader",
+              '-B', $BuildDir,
+              '-G', 'Ninja',
+              '-DCMAKE_BUILD_TYPE=Release',
+              "-DCMAKE_TOOLCHAIN_FILE=$Toolchain",
+              '-DVCPKG_TARGET_TRIPLET=x64-windows-static',
               "-DCMAKE_PREFIX_PATH=$DwarfsPrefix"
+            )
+            Invoke-Native cmake @ConfigureArgs
             Invoke-Native cmake --build $BuildDir --target DwarfsRuntimeRootStoreSmoke
 
             $Bridge = Join-Path $BuildDir 'bin\IpaSimDwarfsReader.dll'
