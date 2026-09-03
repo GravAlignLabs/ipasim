@@ -1,0 +1,115 @@
+name: RuntimeRoot packaging profile
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/runtime-root-package-profile.yml'
+      - 'tools/ci/runtime-root-package-profile.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-root-package-profile-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUNTIME_XCODE_PATH: /Applications/Xcode_16.4.app
+  RUNTIME_IOS_VERSION: '18.5'
+  RUNTIME_IOS_BUILD: 22F77
+
+jobs:
+  profile:
+    name: Profile ${{ matrix.candidate }}
+    runs-on: macos-15
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate:
+          - 7z1
+          - gzip1
+          - zstd1
+
+    steps:
+      - name: Check out profiler
+        uses: actions/checkout@v4
+
+      - name: Discover pinned GitHub-hosted RuntimeRoot
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -d "$RUNTIME_XCODE_PATH" ]]; then
+            echo "ERROR: pinned Xcode is not installed: $RUNTIME_XCODE_PATH" >&2
+            exit 1
+          fi
+          sudo xcode-select -s "$RUNTIME_XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+
+          runtime_json="$RUNNER_TEMP/simctl-runtimes.json"
+          xcrun simctl list runtimes --json > "$runtime_json"
+          runtime_root="$(python3 - "$runtime_json" "$RUNTIME_IOS_VERSION" "$RUNTIME_IOS_BUILD" <<'PY'
+          import json
+          import os
+          import sys
+
+          source, version, build = sys.argv[1:]
+          with open(source, 'r', encoding='utf-8') as handle:
+              data = json.load(handle)
+          for runtime in data.get('runtimes', []):
+              if runtime.get('version') != version or runtime.get('buildversion') != build:
+                  continue
+              if runtime.get('isAvailable') is False:
+                  continue
+              bundle = runtime.get('bundlePath') or runtime.get('dataPath')
+              if not bundle:
+                  continue
+              root = os.path.join(bundle, 'Contents', 'Resources', 'RuntimeRoot')
+              if os.path.isdir(os.path.join(root, 'System')) and os.path.isdir(os.path.join(root, 'usr')):
+                  print(root)
+                  raise SystemExit(0)
+          print(f'Pinned iOS runtime {version} ({build}) was not found.', file=sys.stderr)
+          raise SystemExit(1)
+          PY
+          )"
+          echo "runtime_root=$runtime_root" >> "$GITHUB_OUTPUT"
+          echo "Pinned RuntimeRoot: $runtime_root"
+
+      - name: Run packaging candidate
+        id: result
+        shell: bash
+        env:
+          RUNTIME_ROOT: ${{ steps.runtime.outputs.runtime_root }}
+          CANDIDATE: ${{ matrix.candidate }}
+        run: |
+          set -euo pipefail
+          bash tools/ci/runtime-root-package-profile.sh \
+            "$CANDIDATE" \
+            "$RUNTIME_ROOT" \
+            "$RUNNER_TEMP/runtime-root-profile-$CANDIDATE"
+
+      - name: Publish candidate result
+        if: always()
+        shell: bash
+        env:
+          CANDIDATE: ${{ matrix.candidate }}
+          LOGICAL_KIB: ${{ steps.result.outputs.logical_kib }}
+          FILE_COUNT: ${{ steps.result.outputs.file_count }}
+          ELAPSED_SECONDS: ${{ steps.result.outputs.elapsed_seconds }}
+          ARCHIVE_BYTES: ${{ steps.result.outputs.archive_bytes }}
+          OUTCOME: ${{ steps.result.outcome }}
+        run: |
+          {
+            echo "## RuntimeRoot packaging profile: $CANDIDATE"
+            echo
+            echo "- Outcome: $OUTCOME"
+            echo "- Runtime: iOS $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)"
+            echo "- Logical size (KiB): ${LOGICAL_KIB:-n/a}"
+            echo "- File count: ${FILE_COUNT:-n/a}"
+            echo "- Packaging time (seconds): ${ELAPSED_SECONDS:-n/a}"
+            echo "- Archive size (bytes): ${ARCHIVE_BYTES:-n/a}"
+            echo
+            echo 'The candidate archive exists only in runner.temp and is deleted by the profiler. No RuntimeRoot bytes are uploaded or cached.'
+          } >> "$GITHUB_STEP_SUMMARY"
