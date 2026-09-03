@@ -24,7 +24,7 @@ env:
   RUNTIME_XCODE_PATH: /Applications/Xcode_16.4.app
   RUNTIME_IOS_VERSION: '18.5'
   RUNTIME_IOS_BUILD: 22F77
-  RUNTIME_CACHE_KEY: ipasim-github-runtime-macos15-xcode16.4-ios18.5-22F77-zstd-v1
+  RUNTIME_CACHE_KEY: ipasim-github-runtime-macos15-xcode16.4-ios18.5-22F77-zstd-v2
 
 jobs:
   runtime-source:
@@ -165,7 +165,7 @@ jobs:
         id: runtime_cache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ runner.temp }}/ipasim-runtime-archive
+          path: ipasim-runtime-archive
           key: ${{ env.RUNTIME_CACHE_KEY }}
           enableCrossOsArchive: true
 
@@ -180,7 +180,7 @@ jobs:
           log="$RUNNER_TEMP/github-runtime-source.log"
           exec > >(tee -a "$log") 2>&1
 
-          archive_dir="$RUNNER_TEMP/ipasim-runtime-archive"
+          archive_dir="$GITHUB_WORKSPACE/ipasim-runtime-archive"
           archive="$archive_dir/RuntimeRoot.tar.zst"
           mkdir -p "$archive_dir"
           rm -f "$archive"
@@ -208,7 +208,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/ipasim-runtime-archive/RuntimeRoot.tar.zst"
+          archive="$GITHUB_WORKSPACE/ipasim-runtime-archive/RuntimeRoot.tar.zst"
           if [[ ! -f "$archive" ]]; then
             echo 'ERROR: RuntimeRoot cache is missing RuntimeRoot.tar.zst.' >&2
             exit 1
@@ -226,7 +226,7 @@ jobs:
         if: steps.runtime_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: ${{ runner.temp }}/ipasim-runtime-archive
+          path: ipasim-runtime-archive
           key: ${{ env.RUNTIME_CACHE_KEY }}
           enableCrossOsArchive: true
 
@@ -260,6 +260,7 @@ jobs:
             echo "- iphonesimulator SDK: ${IPHONESIM_VERSION:-<unavailable>}"
             echo "- iphonesimulator path: ${IPHONESIM_PATH:-<unavailable>}"
             echo "- Cross-OS cache key: $RUNTIME_CACHE_KEY"
+            echo "- Cross-OS cache path: ipasim-runtime-archive"
             echo "- Cross-OS cache hit: ${CACHE_HIT:-n/a}"
             echo "- RuntimeRoot.tar.zst SHA-256: ${ARCHIVE_SHA:-n/a}"
             echo
@@ -362,7 +363,7 @@ jobs:
         id: runtime_cache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ runner.temp }}\ipasim-runtime-archive
+          path: ipasim-runtime-archive
           key: ${{ env.RUNTIME_CACHE_KEY }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
@@ -371,7 +372,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $archive = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive\RuntimeRoot.tar.zst'
+          $archive = Join-Path $env:GITHUB_WORKSPACE 'ipasim-runtime-archive\RuntimeRoot.tar.zst'
           if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
             throw 'RuntimeRoot.tar.zst is missing after the cross-OS cache restore.'
           }
@@ -387,7 +388,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $archive = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-archive\RuntimeRoot.tar.zst'
+          $archive = Join-Path $env:GITHUB_WORKSPACE 'ipasim-runtime-archive\RuntimeRoot.tar.zst'
           $staging = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-zstd'
           $extract = Join-Path $env:RUNNER_TEMP 'ipasim-runtime-expanded'
           foreach ($path in @($staging, $extract)) {
