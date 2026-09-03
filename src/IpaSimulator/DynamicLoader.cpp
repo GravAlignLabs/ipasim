@@ -6,6 +6,7 @@
 #include "ipasim/IpaSimulator.hpp"
 #include "ipasim/IpaSimulator/Config.hpp"
 #include "ipasim/ModernMachO.hpp"
+#include "ipasim/RuntimeRootStore.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -116,7 +117,7 @@ DynamicLoader::DynamicLoader(Emulator &Emu) : Emu(Emu) {
 
 bool DynamicLoader::setRuntimeRoot(const string &Path) {
 #if defined(IPASIM_MODERN_CORE)
-  RuntimeRoot.clear();
+  RuntimeStore.reset();
   // A different RuntimeRoot can legitimately make a previously missing image
   // available. Reset only failure memoization; successfully loaded images keep
   // their normal loader lifetime.
@@ -126,12 +127,12 @@ bool DynamicLoader::setRuntimeRoot(const string &Path) {
   if (Path.empty())
     return true;
 
-  error_code EC;
-  filesystem::path Root = filesystem::absolute(filesystem::path(Path), EC);
-  if (EC || !filesystem::is_directory(Root, EC) || EC)
+  string Error;
+  RuntimeStore = makeDirectoryRuntimeRootStore(Path, Error);
+  if (!RuntimeStore) {
+    Log.error() << Error << Log.end();
     return false;
-
-  RuntimeRoot = Root.lexically_normal().make_preferred().string();
+  }
   return true;
 #else
   (void)Path;
@@ -143,14 +144,20 @@ LoadedLibrary *DynamicLoader::load(const string &Path) {
 #if defined(IPASIM_MODERN_CORE)
   const bool IsSystemInstallName = !Path.empty() && Path[0] == '/';
   const bool IsDarwinHostDependency = isDarwinHostDependency(Path);
-  if (IsSystemInstallName && !IsDarwinHostDependency && RuntimeRoot.empty()) {
+  const bool IsRuntimeImage = IsSystemInstallName && !IsDarwinHostDependency;
+  if (IsRuntimeImage && !RuntimeStore) {
     Log.error() << "iOS runtime root is not configured for dependency " << Path
                 << Log.end();
     return nullptr;
   }
 #endif
 
+#if defined(IPASIM_MODERN_CORE)
+  BinaryPath BP(IsRuntimeImage ? BinaryPath{Path, /* Relative */ false}
+                               : resolvePath(Path));
+#else
   BinaryPath BP(resolvePath(Path));
+#endif
 
   auto I = LLs.find(BP.Path);
   if (I != LLs.end())
@@ -173,19 +180,24 @@ LoadedLibrary *DynamicLoader::load(const string &Path) {
     FailedLoads.insert(BP.Path);
     return nullptr;
   };
-#endif
 
-  // Check that file exists.
+  vector<uint8_t> RuntimeData;
+  if (IsRuntimeImage) {
+    string RuntimeError;
+    if (!RuntimeStore->readFile(Path, RuntimeData, RuntimeError)) {
+      Log.error() << "iOS runtime image missing for " << Path << ": "
+                  << RuntimeError << Log.end();
+      return RememberFailure();
+    }
+  } else
+#endif
+  // Check that host file exists. RuntimeRoot objects are intentionally excluded:
+  // they are immutable byte sources and no longer require a Windows pathname.
   if (!BP.isFileValid()) {
 #if defined(IPASIM_MODERN_CORE)
     if (IsDarwinHostDependency) {
       Log.error() << "Darwin host bridge missing for " << Path << ": "
                   << BP.Path << Log.end();
-      return RememberFailure();
-    }
-    if (IsSystemInstallName) {
-      Log.error() << "iOS runtime image missing for " << Path << ": " << BP.Path
-                  << Log.end();
       return RememberFailure();
     }
 #endif
@@ -200,6 +212,15 @@ LoadedLibrary *DynamicLoader::load(const string &Path) {
   Log.info() << "loading library " << BP.Path << "...\n";
 
   LoadedLibrary *L;
+#if defined(IPASIM_MODERN_CORE)
+  if (IsRuntimeImage) {
+    if (!LIEF::MachO::is_macho(RuntimeData)) {
+      Log.error() << "invalid RuntimeRoot Mach-O: " << Path << Log.end();
+      return RememberFailure();
+    }
+    L = loadMachO(BP.Path, &RuntimeData);
+  } else
+#endif
   if (LIEF::MachO::is_macho(BP.Path))
     L = loadMachO(BP.Path);
   else if (LIEF::PE::is_pe(BP.Path))
@@ -360,12 +381,11 @@ BinaryPath DynamicLoader::resolvePath(const string &Path) {
 #endif
 
   if (!Path.empty() && Path[0] == '/') {
-    // Mach-O system install names normally root at the iOS runtime.
+    // Modern RuntimeRoot install names are handled by RuntimeRootStore before
+    // this function is called. The legacy path still maps them into generated
+    // package-relative wrapper locations.
 #if defined(IPASIM_MODERN_CORE)
-    filesystem::path Relative(Path.substr(1));
-    filesystem::path Resolved =
-        (filesystem::path(RuntimeRoot) / Relative).lexically_normal();
-    return BinaryPath{Resolved.make_preferred().string(), /* Relative */ false};
+    return BinaryPath{Path, /* Relative */ false};
 #else
     return BinaryPath{filesystem::path("gen" + Path).make_preferred().string(),
                       /* Relative */ true};
@@ -376,7 +396,8 @@ BinaryPath DynamicLoader::resolvePath(const string &Path) {
   return BinaryPath{Path, filesystem::path(Path).is_relative()};
 }
 
-LoadedLibrary *DynamicLoader::loadMachO(const string &Path) {
+LoadedLibrary *DynamicLoader::loadMachO(const string &Path,
+                                        const vector<uint8_t> *Data) {
   using namespace LIEF::MachO;
   if (sizeof(void *) != 8) {
     Log.error("ARM64 Mach-O loading requires a 64-bit Windows host");
@@ -385,7 +406,7 @@ LoadedLibrary *DynamicLoader::loadMachO(const string &Path) {
 
   unique_ptr<FatBinary> Parsed;
   try {
-    Parsed = Parser::parse(Path);
+    Parsed = Data ? Parser::parse(*Data, Path) : Parser::parse(Path);
   } catch (const exception &E) {
     Log.error() << "cannot parse Mach-O " << Path << ": " << E.what()
                 << Log.end();
