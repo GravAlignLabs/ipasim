@@ -1,6 +1,23 @@
 name: RuntimeRoot DwarFS Reader and Acceptance
 
 on:
+  # Pull-request caches are scoped to one PR merge ref and cannot accelerate a
+  # later PR. Relevant merges warm the same validated packages in the default
+  # branch scope, which GitHub permits subsequent PRs to restore.
+  push:
+    branches:
+      - master
+    paths:
+      - 'include/ipasim/DwarfsReaderBridgeApi.h'
+      - 'include/ipasim/DwarfsRuntimeRootStore.hpp'
+      - 'src/IpaSimulator/DwarfsReaderBridge.cpp'
+      - 'src/IpaSimulator/DwarfsRuntimeRootStore.cpp'
+      - 'src/IpaSimulator/DwarfsRuntimeRootStoreSmoke.cpp'
+      - 'src/IpaSimulator/dwarfs-reader/**'
+      - 'tools/ci/build-dwarfs-fixture.sh'
+      - 'tools/ci/build-dwarfs-reader.ps1'
+      - 'tools/ci/build-runtime-dwarfs.sh'
+      - '.github/workflows/runtime-root-dwarfs-reader.yml'
   pull_request:
     paths:
       - 'include/ipasim/DynamicLoader.hpp'
@@ -187,6 +204,7 @@ jobs:
 
   resolve-core-tester:
     name: Resolve exact-head Windows Core tester
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     outputs:
@@ -311,6 +329,7 @@ jobs:
 
   dwarfs-boundary:
     name: Validate complete DwarFS RuntimeRoot loader boundary
+    if: github.event_name == 'pull_request'
     needs:
       - reader-smoke
       - runtime-image

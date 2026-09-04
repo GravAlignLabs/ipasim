@@ -155,6 +155,8 @@ PR #78 validates the complete DwarFS path directly. A nonzero probe is accepted 
 
 The Windows reader job caches the finished validated bridge plus its smoke executable under a key derived from the reader sources, build recipe, DwarFS source identity, vcpkg baseline, MSVC version, OS, and architecture. A cache hit still runs the Darwin-only pathname smoke before the DLL is published for acceptance; stale or incomplete packages fail explicitly.
 
+Because GitHub scopes pull-request caches to one PR merge ref, relevant merges also run the reader/image preparation jobs on `master`. That warms validated packages in the default-branch cache scope so later pull requests can restore them instead of rebuilding the reader. The complete RuntimeRoot image remains derived from the pinned GitHub-hosted Xcode runtime and is not committed to or distributed from this repository.
+
 The existing tar/zstd workflow remains unchanged as the historical directory transport baseline, but it is not used as a full-namespace parity oracle after the NTFS limitation is observed. The active Priority 1 checkpoint moves static closure and host-import inventory reads onto the same configured `RuntimeRootStore` used by the loader. This removes their directory-only detour without adding auto-detection, extraction fallback, or a second DwarFS store instance.
 
 ### Why the RuntimeRoot architecture changed
