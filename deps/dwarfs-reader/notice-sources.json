@@ -1,0 +1,79 @@
+{
+  "upstream_dwarfs_source": "https://github.com/mhx/dwarfs/releases/download/v0.15.7/dwarfs-0.15.7.tar.xz",
+  "upstream_dwarfs_sha256": "363c7fdbf7bad490a6b8d63186da8643c1aeb17ca54cce1193d7b0ebc57bc6bd",
+  "notes": "DwarFS-prefixed notices are copied from the pinned archive; the MIT notice is its copyright/license header. The ipaSim notice is the repository license. Other notices come from versioned upstream sources below.",
+  "sources": [
+    {
+      "notice": "notices/boost.txt",
+      "url": "https://raw.githubusercontent.com/boostorg/boost/boost-1.90.0/LICENSE_1_0.txt"
+    },
+    {
+      "notice": "notices/brotli.txt",
+      "url": "https://raw.githubusercontent.com/google/brotli/v1.2.0/LICENSE"
+    },
+    {
+      "notice": "notices/fmt.txt",
+      "url": "https://raw.githubusercontent.com/fmtlib/fmt/12.1.0/LICENSE"
+    },
+    {
+      "notice": "notices/libarchive.txt",
+      "url": "https://raw.githubusercontent.com/libarchive/libarchive/v3.8.5/COPYING"
+    },
+    {
+      "notice": "notices/flac.txt",
+      "url": "https://raw.githubusercontent.com/xiph/flac/1.5.0/COPYING.Xiph"
+    },
+    {
+      "notice": "notices/xz.txt",
+      "url": "https://raw.githubusercontent.com/tukaani-project/xz/v5.8.2/COPYING"
+    },
+    {
+      "notice": "notices/xz-0bsd.txt",
+      "url": "https://raw.githubusercontent.com/tukaani-project/xz/v5.8.2/COPYING.0BSD"
+    },
+    {
+      "notice": "notices/ogg.txt",
+      "url": "https://raw.githubusercontent.com/xiph/ogg/v1.3.6/COPYING"
+    },
+    {
+      "notice": "notices/libressl.txt",
+      "url": "https://raw.githubusercontent.com/libressl/portable/v4.2.1/COPYING"
+    },
+    {
+      "notice": "notices/lz4.txt",
+      "url": "https://raw.githubusercontent.com/lz4/lz4/v1.10.0/lib/LICENSE"
+    },
+    {
+      "notice": "notices/nlohmann-json.txt",
+      "url": "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT"
+    },
+    {
+      "notice": "notices/range-v3.txt",
+      "url": "https://raw.githubusercontent.com/ericniebler/range-v3/0.12.0/LICENSE.txt"
+    },
+    {
+      "notice": "notices/utfcpp.txt",
+      "url": "https://raw.githubusercontent.com/nemtrif/utfcpp/v4.0.9/LICENSE"
+    },
+    {
+      "notice": "notices/xxhash.txt",
+      "url": "https://raw.githubusercontent.com/Cyan4973/xxHash/v0.8.3/LICENSE"
+    },
+    {
+      "notice": "notices/zlib.txt",
+      "url": "https://raw.githubusercontent.com/madler/zlib/v1.3.1/LICENSE"
+    },
+    {
+      "notice": "notices/zstd.txt",
+      "url": "https://raw.githubusercontent.com/facebook/zstd/v1.5.7/LICENSE"
+    },
+    {
+      "notice": "notices/cpptrace.txt",
+      "url": "https://raw.githubusercontent.com/jeremy-rifkin/cpptrace/v1.0.4/LICENSE"
+    },
+    {
+      "notice": "notices/benchmark.txt",
+      "url": "https://raw.githubusercontent.com/google/benchmark/v1.9.5/LICENSE"
+    }
+  ]
+}
