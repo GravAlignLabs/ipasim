@@ -122,6 +122,14 @@ IPASIM_API int ipaSim_setDwarfsRuntimeRoot(const char *ImagePath,
 #endif
 }
 
+IPASIM_API const RuntimeRootStore *ipaSim_getRuntimeRootStore() {
+#if defined(IPASIM_MODERN_CORE)
+  return IpaSim.Dyld.runtimeRootStore();
+#else
+  return nullptr;
+#endif
+}
+
 IPASIM_API int ipaSim_probeImage(const char *Path) {
   if (!Path || !*Path)
     return 64;

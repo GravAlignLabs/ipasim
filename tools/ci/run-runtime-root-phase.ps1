@@ -94,6 +94,12 @@ function Invoke-ProbeForBoundary {
     return [pscustomobject]@{
         ExitCode = [int]$ExitCode
         Boundary = [string]$CanonicalBoundary
+        StaticClosurePreflight = [bool]($Lines | Where-Object {
+            $_ -match '^\[static-symbol-audit\] closure: '
+        } | Select-Object -First 1)
+        HostImportPreflight = [bool]($Lines | Where-Object {
+            $_ -match '^\[host-import-inventory\] simulator host ABI: '
+        } | Select-Object -First 1)
     }
 }
 
@@ -107,6 +113,8 @@ function Publish-BoundaryOutputs {
         "exit_code=$($Result.ExitCode)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
         "boundary_b64=$BoundaryBase64" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
         "boundary_text=$($Result.Boundary)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+        "static_closure_preflight=$($Result.StaticClosurePreflight.ToString().ToLowerInvariant())" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+        "host_import_preflight=$($Result.HostImportPreflight.ToString().ToLowerInvariant())" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
     }
 }
 
@@ -228,6 +236,13 @@ try {
         -Arguments @($AppExecutable, '--runtime-root-dwarfs', $Image, $ReaderBridge)
 
     Publish-BoundaryOutputs $Result
+    if (-not $Result.StaticClosurePreflight) {
+        throw 'DwarFS probe did not report the RuntimeRootStore-backed static closure preflight.'
+    }
+    if (-not $Result.HostImportPreflight) {
+        throw 'DwarFS probe did not report the RuntimeRootStore-backed host-import preflight.'
+    }
+    Write-Log 'DwarFS RuntimeRootStore-backed static closure and host-import preflights passed.'
     if ($Result.ExitCode -eq 0) {
         Write-Log 'DwarFS RuntimeRoot storage acceptance passed: the Mach-O load completed.'
     }

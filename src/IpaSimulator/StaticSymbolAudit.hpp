@@ -60,7 +60,7 @@ struct ExportEntry {
 };
 
 struct Image {
-  std::filesystem::path Path;
+  image_source_detail::ImageSource Source;
   std::string DisplayName;
   std::vector<Dependency> Dependencies;
   std::vector<Import> Imports;
@@ -78,42 +78,51 @@ struct Binding {
 };
 
 struct Context {
-  std::filesystem::path RuntimeRoot;
+  const RuntimeRootStore *RuntimeStore = nullptr;
   std::filesystem::path MainExecutable;
   std::filesystem::path BridgePath;
   HMODULE Bridge = nullptr;
   std::map<std::string, Image> Images;
   std::set<std::string> MissingImageKeys;
+  std::map<std::string, std::string> MissingImageDetails;
   std::vector<std::string> ParseWarnings;
 };
 
 inline std::string pathKey(const std::filesystem::path &Path) {
-  std::error_code EC;
-  std::filesystem::path Absolute = std::filesystem::absolute(Path, EC);
-  if (EC)
-    Absolute = Path;
-  return Absolute.lexically_normal().make_preferred().string();
+  return image_source_detail::hostImageKey(Path);
 }
 
 inline std::string displayName(const std::filesystem::path &Path) {
-  const std::string Name = Path.filename().string();
-  return Name.empty() ? Path.string() : Name;
+  return image_source_detail::hostDisplayName(Path);
 }
 
 inline bool isHostDependency(const std::string &Name) {
   return Name == "IpaSimDarwinHost.dll" || isDarwinHostInstallName(Name);
 }
 
-inline std::filesystem::path resolveDependencyPath(
-    const std::string &Name, const std::filesystem::path &RuntimeRoot,
-    const std::filesystem::path &Bridge) {
-  if (isHostDependency(Name))
-    return Bridge;
-  if (!Name.empty() && Name.front() == '/')
-    return (RuntimeRoot / std::filesystem::path(Name.substr(1))).lexically_normal();
+inline bool dependencySource(const Context &Ctx, const Dependency &Dep,
+                             image_source_detail::ImageSource &Source,
+                             std::string &Error) {
+  if (isHostDependency(Dep.Name)) {
+    Source = image_source_detail::makeHostImageSource(Ctx.BridgePath);
+    Error.clear();
+    return true;
+  }
+  if (!Dep.Name.empty() && Dep.Name.front() == '/') {
+    if (!Ctx.RuntimeStore) {
+      Error = "RuntimeRoot store is not configured for " + Dep.Name;
+      return false;
+    }
+    return image_source_detail::makeRuntimeImageSource(
+        *Ctx.RuntimeStore, Dep.Name, Source, Error);
+  }
+
   // This intentionally mirrors the modern DynamicLoader. It does not invent
   // @rpath/@loader_path behavior that the runtime does not implement yet.
-  return std::filesystem::path(Name).lexically_normal();
+  Source = image_source_detail::makeHostImageSource(
+      std::filesystem::path(Dep.Name).lexically_normal());
+  Error.clear();
+  return true;
 }
 
 inline bool readUleb128(const std::uint8_t *&Cursor, const std::uint8_t *End,
@@ -403,11 +412,15 @@ inline bool parseSymtab(const std::vector<std::uint8_t> &Data,
   return true;
 }
 
-inline bool parseImage(const std::filesystem::path &Path, Image &Result,
-                       std::string &Error) {
+inline bool parseImage(const image_source_detail::ImageSource &Source,
+                       Image &Result, std::string &Error,
+                       bool *ReadFailure = nullptr) {
+  if (ReadFailure)
+    *ReadFailure = false;
   std::vector<std::uint8_t> Data;
-  if (!loadFile(Path, Data)) {
-    Error = "cannot read image";
+  if (!image_source_detail::readImageSource(Source, Data, Error)) {
+    if (ReadFailure)
+      *ReadFailure = true;
     return false;
   }
   std::size_t SliceOffset = 0;
@@ -435,8 +448,8 @@ inline bool parseImage(const std::filesystem::path &Path, Image &Result,
   std::size_t Cursor = CommandsBegin;
   const std::size_t CommandsEnd = CommandsBegin + CommandBytes;
   Result = Image{};
-  Result.Path = Path;
-  Result.DisplayName = displayName(Path);
+  Result.Source = Source;
+  Result.DisplayName = Source.DisplayName;
 
   for (std::uint32_t Index = 0; Index != CommandCount; ++Index) {
     if (!rangeValid(Cursor, 8, CommandsEnd)) {
@@ -530,7 +543,11 @@ inline bool bridgeHasSymbol(HMODULE Bridge, const std::string &MachSymbol) {
 }
 
 inline std::string dependencyKey(const Context &Ctx, const Dependency &Dep) {
-  return pathKey(resolveDependencyPath(Dep.Name, Ctx.RuntimeRoot, Ctx.BridgePath));
+  image_source_detail::ImageSource Source;
+  std::string Error;
+  if (!dependencySource(Ctx, Dep, Source, Error))
+    return "unresolved-runtime-source:" + Dep.Name;
+  return Source.Key;
 }
 
 inline bool providerHasSymbol(Context &Ctx, const std::string &ProviderKey,
@@ -613,26 +630,31 @@ inline bool flatLookupHasSymbol(Context &Ctx, const std::string &Symbol) {
 }
 
 inline void collectClosure(Context &Ctx, const std::filesystem::path &RootImage) {
-  std::vector<std::filesystem::path> Queue{RootImage};
-  std::set<std::string> Queued{pathKey(RootImage)};
+  using namespace image_source_detail;
+
+  ImageSource RootSource = makeHostImageSource(RootImage);
+  std::vector<ImageSource> Queue{RootSource};
+  std::set<std::string> Queued{RootSource.Key};
 
   while (!Queue.empty()) {
-    const std::filesystem::path Path = Queue.back();
+    ImageSource Source = std::move(Queue.back());
     Queue.pop_back();
-    const std::string Key = pathKey(Path);
+    const std::string Key = Source.Key;
     if (Ctx.Images.count(Key) != 0 || Ctx.MissingImageKeys.count(Key) != 0)
       continue;
 
-    std::error_code EC;
-    if (!std::filesystem::is_regular_file(Path, EC) || EC) {
-      Ctx.MissingImageKeys.insert(Key);
-      continue;
-    }
-
     Image Parsed;
     std::string Error;
-    if (!parseImage(Path, Parsed, Error)) {
-      Ctx.ParseWarnings.push_back(Path.string() + ": " + Error);
+    bool ReadFailure = false;
+    if (!parseImage(Source, Parsed, Error, &ReadFailure)) {
+      if (ReadFailure) {
+        Ctx.MissingImageKeys.insert(Key);
+        Ctx.MissingImageDetails[Key] = Source.isRuntimeImage()
+                                                ? Source.DarwinPath + ": " + Error
+                                                : Error;
+      } else {
+        Ctx.ParseWarnings.push_back(Source.DisplayName + ": " + Error);
+      }
       // A parse failure is not equivalent to a missing provider. Keep the key
       // distinct so the report does not overstate certainty.
       continue;
@@ -640,17 +662,20 @@ inline void collectClosure(Context &Ctx, const std::filesystem::path &RootImage)
     auto Inserted = Ctx.Images.emplace(Key, std::move(Parsed));
     const Image &ImageRef = Inserted.first->second;
     if (!ImageRef.ImportCoverageComplete)
-      Ctx.ParseWarnings.push_back(Path.string() +
+      Ctx.ParseWarnings.push_back(Source.DisplayName +
                                   ": no chained imports or classic undefined-symbol table; import coverage incomplete");
 
     for (const Dependency &Dep : ImageRef.Dependencies) {
       if (isHostDependency(Dep.Name))
         continue;
-      const std::filesystem::path Resolved =
-          resolveDependencyPath(Dep.Name, Ctx.RuntimeRoot, Ctx.BridgePath);
-      const std::string DepKey = pathKey(Resolved);
-      if (Queued.insert(DepKey).second)
-        Queue.push_back(Resolved);
+      ImageSource DependencySource;
+      if (!dependencySource(Ctx, Dep, DependencySource, Error)) {
+        Ctx.ParseWarnings.push_back(Source.DisplayName + " dependency " +
+                                    Dep.Name + ": " + Error);
+        continue;
+      }
+      if (Queued.insert(DependencySource.Key).second)
+        Queue.push_back(std::move(DependencySource));
     }
   }
 }
@@ -780,20 +805,25 @@ inline void report(Context &Ctx, const std::vector<Binding> &Missing,
 
   for (const std::string &Warning : Ctx.ParseWarnings)
     std::printf("[static-symbol-audit] WARNING %s\n", Warning.c_str());
-  for (const std::string &MissingKey : Ctx.MissingImageKeys)
-    std::printf("[static-symbol-audit] MISSING IMAGE %s\n", MissingKey.c_str());
+  for (const std::string &MissingKey : Ctx.MissingImageKeys) {
+    const auto Detail = Ctx.MissingImageDetails.find(MissingKey);
+    std::printf("[static-symbol-audit] MISSING IMAGE %s\n",
+                Detail == Ctx.MissingImageDetails.end()
+                    ? MissingKey.c_str()
+                    : Detail->second.c_str());
+  }
 }
 
 } // namespace static_symbol_audit_detail
 
 inline void reportStaticClosureSymbolAudit(const char *ImagePath,
-                                           const char *RuntimeRoot) {
+                                           const RuntimeRootStore &Store) {
   using namespace static_symbol_audit_detail;
-  if (!ImagePath || !*ImagePath || !RuntimeRoot || !*RuntimeRoot)
+  if (!ImagePath || !*ImagePath)
     return;
 
   Context Ctx;
-  Ctx.RuntimeRoot = std::filesystem::path(RuntimeRoot).lexically_normal();
+  Ctx.RuntimeStore = &Store;
   Ctx.MainExecutable = std::filesystem::path(ImagePath).lexically_normal();
   Ctx.BridgePath = bridgePath();
   if (!Ctx.BridgePath.empty())

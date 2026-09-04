@@ -1,9 +1,10 @@
 #pragma once
 
+#include "RuntimeRootImageSource.hpp"
+
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <set>
 #include <string>
 #include <utility>
@@ -93,21 +94,6 @@ inline bool isDarwinHostInstallName(const std::string &Name) {
   return Name == "/usr/lib/system/libsystem_kernel.dylib" ||
          Name == "/usr/lib/system/libsystem_platform.dylib" ||
          Name == "/usr/lib/system/libsystem_pthread.dylib";
-}
-
-inline bool loadFile(const std::filesystem::path &Path,
-                     std::vector<std::uint8_t> &Data) {
-  std::ifstream Input(Path, std::ios::binary | std::ios::ate);
-  if (!Input)
-    return false;
-  const std::streamoff Length = Input.tellg();
-  if (Length <= 0)
-    return false;
-  Data.resize(static_cast<std::size_t>(Length));
-  Input.seekg(0, std::ios::beg);
-  return static_cast<bool>(Input.read(
-      reinterpret_cast<char *>(Data.data()),
-      static_cast<std::streamsize>(Data.size())));
 }
 
 inline bool selectArm64Slice(const std::vector<std::uint8_t> &Data,
@@ -321,26 +307,31 @@ inline std::filesystem::path bridgePath() {
 
 } // namespace host_inventory_detail
 
-inline void reportDarwinHostImportInventory(const char *RuntimeRoot) {
+inline void reportDarwinHostImportInventory(const RuntimeRootStore &Store) {
   using namespace host_inventory_detail;
-  if (!RuntimeRoot || !*RuntimeRoot)
-    return;
+  using namespace image_source_detail;
 
-  const std::filesystem::path KernelImage =
-      std::filesystem::path(RuntimeRoot) / L"usr" / L"lib" / L"system" /
-      L"libsystem_sim_kernel.dylib";
+  constexpr const char *KernelPath =
+      "/usr/lib/system/libsystem_sim_kernel.dylib";
+  ImageSource KernelImage;
+  std::string Error;
+  if (!makeRuntimeImageSource(Store, KernelPath, KernelImage, Error)) {
+    std::fprintf(stderr,
+                 "[host-import-inventory] %s; continuing with normal loader\n",
+                 Error.c_str());
+    return;
+  }
 
   std::vector<std::uint8_t> Data;
-  if (!loadFile(KernelImage, Data)) {
+  if (!readImageSource(KernelImage, Data, Error)) {
     std::fprintf(stderr,
-                 "[host-import-inventory] could not read %s; continuing with normal loader\n",
-                 KernelImage.string().c_str());
+                 "[host-import-inventory] could not read %s: %s; continuing with normal loader\n",
+                 KernelPath, Error.c_str());
     return;
   }
 
   std::size_t SliceOffset = 0;
   std::size_t SliceSize = 0;
-  std::string Error;
   if (!selectArm64Slice(Data, SliceOffset, SliceSize, Error)) {
     std::fprintf(stderr,
                  "[host-import-inventory] %s; continuing with normal loader\n",

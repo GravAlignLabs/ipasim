@@ -46,6 +46,14 @@ public:
   LoadedLibrary *load(const std::string &Path);
   bool setRuntimeRoot(const std::string &Path);
 
+  const RuntimeRootStore *runtimeRootStore() const {
+#if defined(IPASIM_MODERN_CORE)
+    return RuntimeStore.get();
+#else
+    return nullptr;
+#endif
+  }
+
   // Install an already-validated immutable RuntimeRoot source. This is an
   // explicit storage-provider boundary, not a fallback: callers decide which
   // concrete RuntimeRootStore to construct before crossing into the loader.

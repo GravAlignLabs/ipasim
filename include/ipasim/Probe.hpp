@@ -8,6 +8,10 @@
 
 #include <cstdint>
 
+namespace ipasim {
+class RuntimeRootStore;
+}
+
 // Configure a filesystem root that mirrors iOS absolute install names. Passing
 // an empty string clears the root. Returns 0 on success or a non-zero value for
 // an invalid root. No Apple runtime binaries are supplied by ipaSim.
@@ -19,6 +23,11 @@ IPASIM_API int ipaSim_setRuntimeRoot(const char *Path);
 // non-zero value when the image/bridge cannot be opened or validated.
 IPASIM_API int ipaSim_setDwarfsRuntimeRoot(const char *ImagePath,
                                            const char *ReaderBridgePath);
+
+// Borrow the configured immutable RuntimeRoot source for read-only diagnostic
+// preflights. Ownership remains with the emulator and the pointer is invalidated
+// by the next RuntimeRoot configuration call.
+IPASIM_API const ipasim::RuntimeRootStore *ipaSim_getRuntimeRootStore();
 
 // Returns 0 when ipaSim's DynamicLoader successfully loads the supplied Mach-O
 // image and its currently available dependencies. A non-zero result means the

@@ -52,15 +52,12 @@ int main(int argc, char **argv) {
         return 70;
 
     const char *imagePath = argv[imageIndex];
+    bool configuredRuntime = false;
 
     if (directoryRuntime) {
         const char *runtimeRoot = argv[imageIndex + (explicitDirectoryRuntime ? 2 : 1)];
         std::printf("[ipasim-probe] iOS runtime root: %s\n", runtimeRoot);
         std::fflush(stdout);
-
-        ipasim::probe::reportStaticClosureSymbolAuditComplete(imagePath,
-                                                              runtimeRoot);
-        ipasim::probe::reportDarwinHostImportInventoryV2(runtimeRoot);
 
         const int runtimeResult = ipaSim_setRuntimeRoot(runtimeRoot);
         if (runtimeResult != 0) {
@@ -69,6 +66,7 @@ int main(int argc, char **argv) {
                          runtimeResult);
             return runtimeResult;
         }
+        configuredRuntime = true;
     } else if (dwarfsRuntime) {
         const char *runtimeImage = argv[imageIndex + 2];
         const char *readerBridge = argv[imageIndex + 3];
@@ -77,9 +75,6 @@ int main(int argc, char **argv) {
         std::printf("[ipasim-probe] DwarFS reader bridge: %s\n",
                     readerBridge);
         std::fflush(stdout);
-        std::fprintf(
-            stderr,
-            "[ipasim-probe] NOTE: static closure and host-import inventory preflights are currently directory-backed and are not claimed in DwarFS mode; the real DynamicLoader result below remains authoritative for this storage experiment.\n");
 
         const int runtimeResult =
             ipaSim_setDwarfsRuntimeRoot(runtimeImage, readerBridge);
@@ -89,8 +84,24 @@ int main(int argc, char **argv) {
                          runtimeResult);
             return runtimeResult;
         }
+        configuredRuntime = true;
     } else {
         ipaSim_setRuntimeRoot("");
+    }
+
+    if (configuredRuntime) {
+        const ipasim::RuntimeRootStore *runtimeStore =
+            ipaSim_getRuntimeRootStore();
+        if (!runtimeStore) {
+            std::fprintf(
+                stderr,
+                "[ipasim-probe] configured RuntimeRoot store is unavailable to read-side preflights.\n");
+            return 65;
+        }
+
+        ipasim::probe::reportStaticClosureSymbolAuditComplete(imagePath,
+                                                              *runtimeStore);
+        ipasim::probe::reportDarwinHostImportInventoryV2(*runtimeStore);
     }
 
     std::printf("[ipasim-probe] loading: %s\n", imagePath);
