@@ -17,8 +17,9 @@ on:
       - 'tools/ci/build-dwarfs-fixture.sh'
       - 'tools/ci/build-dwarfs-reader.ps1'
       - 'tools/ci/build-runtime-dwarfs.sh'
+      - 'tools/ci/build-runtime-zstd.sh'
       - 'tools/ci/resolve-core-tester.sh'
-      - 'tools/ci/run-dwarfs-acceptance.ps1'
+      - 'tools/ci/run-runtime-root-phase.ps1'
       - 'tools/ci/dwarfs-diagnostic.js'
       - '.github/workflows/runtime-root-dwarfs-reader.yml'
   workflow_dispatch:
@@ -95,7 +96,9 @@ jobs:
 
   reader-smoke:
     name: Windows in-image reader smoke
-    needs: build-fixture
+    needs:
+      - build-fixture
+      - directory-boundary
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
@@ -158,8 +161,218 @@ jobs:
         shell: pwsh
         run: exit 1
 
+  resolve-core-tester:
+    name: Resolve exact-head Windows Core tester
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      run_id: ${{ steps.resolve.outputs.run_id }}
+    steps:
+      - name: Check out ipaSim
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve successful exact-head Core artifact
+        id: resolve
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: bash tools/ci/resolve-core-tester.sh "$RUNNER_TEMP/core-resolve.log"
+
+      - name: Publish Core resolution failure
+        if: steps.resolve.outcome == 'failure' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          DIAGNOSTIC_STAGE: Exact-head Windows Core tester resolution
+          DIAGNOSTIC_OUTCOME: ${{ steps.resolve.outcome }}
+          DIAGNOSTIC_LOG: ${{ runner.temp }}/core-resolve.log
+        with:
+          script: |
+            const run = require(process.env.GITHUB_WORKSPACE + '/tools/ci/dwarfs-diagnostic.js');
+            await run({ github, context, core });
+
+      - name: Fail after Core resolution diagnostic
+        if: steps.resolve.outcome == 'failure'
+        shell: bash
+        run: exit 1
+
+  directory-runtime:
+    name: Prepare trusted directory RuntimeRoot baseline
+    runs-on: macos-15
+    timeout-minutes: 60
+    outputs:
+      archive_sha256: ${{ steps.runtime.outputs.archive_sha256 }}
+      archive_size: ${{ steps.runtime.outputs.archive_size }}
+      build_seconds: ${{ steps.runtime.outputs.build_seconds }}
+      cache_reused: ${{ steps.runtime.outputs.cache_reused }}
+    steps:
+      - name: Check out ipaSim
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Restore trusted directory RuntimeRoot baseline cache
+        id: runtime_cache
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ipasim-runtime-archive
+          key: ${{ env.RUNTIME_DIRECTORY_CACHE_KEY }}
+          enableCrossOsArchive: true
+
+      - name: Build or verify trusted zstd RuntimeRoot baseline
+        id: runtime
+        continue-on-error: true
+        shell: bash
+        run: >-
+          bash tools/ci/build-runtime-zstd.sh
+          "$GITHUB_WORKSPACE/ipasim-runtime-archive/RuntimeRoot.tar.zst"
+          "$RUNNER_TEMP/runtime-directory-source.log"
+
+      - name: Save trusted directory RuntimeRoot baseline cache
+        id: runtime_cache_save
+        if: steps.runtime.outcome == 'success' && steps.runtime_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ipasim-runtime-archive
+          key: ${{ env.RUNTIME_DIRECTORY_CACHE_KEY }}
+          enableCrossOsArchive: true
+
+      - name: Publish directory RuntimeRoot preparation failure
+        if: >-
+          github.event_name == 'pull_request' &&
+          (steps.runtime_cache.outcome == 'failure' ||
+           steps.runtime.outcome == 'failure' ||
+           steps.runtime_cache_save.outcome == 'failure')
+        uses: actions/github-script@v7
+        env:
+          DIAGNOSTIC_STAGE: Trusted directory RuntimeRoot preparation for parity
+          DIAGNOSTIC_OUTCOME: failure
+          DIAGNOSTIC_LOG: ${{ runner.temp }}/runtime-directory-source.log
+        with:
+          script: |
+            const run = require(process.env.GITHUB_WORKSPACE + '/tools/ci/dwarfs-diagnostic.js');
+            await run({ github, context, core });
+
+      - name: Publish trusted directory RuntimeRoot summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Trusted directory RuntimeRoot baseline'
+            echo
+            echo "- Runtime: iOS $RUNTIME_IOS_VERSION ($RUNTIME_IOS_BUILD)"
+            echo "- Cache restore hit: ${{ steps.runtime_cache.outputs.cache-hit }}"
+            echo "- Archive SHA-256: ${{ steps.runtime.outputs.archive_sha256 }}"
+            echo "- Archive bytes: ${{ steps.runtime.outputs.archive_size }}"
+            echo "- First archive build seconds: ${{ steps.runtime.outputs.build_seconds }}"
+            echo "- Archive reused by builder: ${{ steps.runtime.outputs.cache_reused }}"
+            echo '- RuntimeRoot paths excluded: none'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail after directory RuntimeRoot preparation diagnostic
+        if: >-
+          steps.runtime_cache.outcome == 'failure' ||
+          steps.runtime.outcome == 'failure' ||
+          steps.runtime_cache_save.outcome == 'failure'
+        shell: bash
+        run: exit 1
+
+  directory-boundary:
+    name: Capture trusted directory RuntimeRoot loader boundary
+    needs:
+      - directory-runtime
+      - resolve-core-tester
+    runs-on: windows-2025
+    timeout-minutes: 60
+    outputs:
+      exit_code: ${{ steps.acceptance.outputs.exit_code }}
+      boundary_b64: ${{ steps.acceptance.outputs.boundary_b64 }}
+      boundary_text: ${{ steps.acceptance.outputs.boundary_text }}
+    steps:
+      - name: Check out ipaSim
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download exact-head Core tester
+        uses: actions/download-artifact@v4
+        with:
+          name: ipasim-ipa-tester
+          path: tester
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-core-tester.outputs.run_id }}
+
+      - name: Restore trusted directory RuntimeRoot baseline cache
+        id: runtime_cache_windows
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ipasim-runtime-archive
+          key: ${{ env.RUNTIME_DIRECTORY_CACHE_KEY }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Capture exact-head directory RuntimeRoot loader boundary
+        id: acceptance
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\tools\ci\run-runtime-root-phase.ps1" `
+            -Backend Directory `
+            -TesterRoot "$env:GITHUB_WORKSPACE\tester" `
+            -DirectoryArchive "$env:GITHUB_WORKSPACE\ipasim-runtime-archive\RuntimeRoot.tar.zst" `
+            -Log "$env:RUNNER_TEMP\runtime-directory-boundary.log"
+
+      - name: Publish directory boundary failure
+        if: >-
+          github.event_name == 'pull_request' &&
+          (steps.runtime_cache_windows.outcome == 'failure' ||
+           steps.acceptance.outcome == 'failure')
+        uses: actions/github-script@v7
+        env:
+          DIAGNOSTIC_STAGE: Trusted directory RuntimeRoot loader boundary
+          DIAGNOSTIC_OUTCOME: failure
+          DIAGNOSTIC_LOG: ${{ runner.temp }}/runtime-directory-boundary.log
+        with:
+          script: |
+            const run = require(process.env.GITHUB_WORKSPACE + '/tools/ci/dwarfs-diagnostic.js');
+            await run({ github, context, core });
+
+      - name: Publish directory boundary summary
+        if: always()
+        shell: pwsh
+        run: |
+          @"
+          ## Directory RuntimeRoot loader boundary
+
+          - Exact-head Core run: ${{ needs.resolve-core-tester.outputs.run_id }}
+          - Directory baseline cache hit: ${{ steps.runtime_cache_windows.outputs.cache-hit }}
+          - Directory archive SHA-256: ${{ needs.directory-runtime.outputs.archive_sha256 }}
+          - Directory archive bytes: ${{ needs.directory-runtime.outputs.archive_size }}
+          - Exit code: ${{ steps.acceptance.outputs.exit_code }}
+          - Canonical boundary: ${{ steps.acceptance.outputs.boundary_text }}
+          - Boundary capture outcome: ${{ steps.acceptance.outcome }}
+          "@ | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Fail after publishing directory boundary diagnostic
+        if: >-
+          steps.runtime_cache_windows.outcome == 'failure' ||
+          steps.acceptance.outcome == 'failure'
+        shell: pwsh
+        run: exit 1
+
   runtime-image:
     name: Build complete pinned RuntimeRoot DwarFS image
+    needs:
+      - directory-boundary
+      - reader-smoke
     runs-on: macos-15
     timeout-minutes: 90
     outputs:
@@ -242,50 +455,13 @@ jobs:
         shell: bash
         run: exit 1
 
-  resolve-core-tester:
-    name: Resolve exact-head Windows Core tester
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    outputs:
-      run_id: ${{ steps.resolve.outputs.run_id }}
-    steps:
-      - name: Check out ipaSim
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Resolve successful exact-head Core artifact
-        id: resolve
-        continue-on-error: true
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: bash tools/ci/resolve-core-tester.sh "$RUNNER_TEMP/core-resolve.log"
-
-      - name: Publish Core resolution failure
-        if: steps.resolve.outcome == 'failure' && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        env:
-          DIAGNOSTIC_STAGE: Exact-head Windows Core tester resolution
-          DIAGNOSTIC_OUTCOME: ${{ steps.resolve.outcome }}
-          DIAGNOSTIC_LOG: ${{ runner.temp }}/core-resolve.log
-        with:
-          script: |
-            const run = require(process.env.GITHUB_WORKSPACE + '/tools/ci/dwarfs-diagnostic.js');
-            await run({ github, context, core });
-
-      - name: Fail after Core resolution diagnostic
-        if: steps.resolve.outcome == 'failure'
-        shell: bash
-        run: exit 1
-
-  windows-acceptance:
-    name: Compare DwarFS and directory RuntimeRoot loader boundaries
+  dwarfs-boundary:
+    name: Compare DwarFS with trusted directory RuntimeRoot loader boundary
     needs:
       - reader-smoke
       - runtime-image
       - resolve-core-tester
+      - directory-boundary
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
@@ -317,30 +493,23 @@ jobs:
           path: ipasim-runtime-dwarfs
           key: ${{ env.RUNTIME_DWARFS_CACHE_KEY }}
           enableCrossOsArchive: true
-
-      - name: Restore trusted directory RuntimeRoot baseline cache
-        id: directory_runtime_cache_windows
-        continue-on-error: true
-        uses: actions/cache/restore@v4
-        with:
-          path: ipasim-runtime-archive
-          key: ${{ env.RUNTIME_DIRECTORY_CACHE_KEY }}
-          enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      - name: Compare exact-head DwarFS and directory RuntimeRoot loader boundaries
+      - name: Compare exact-head DwarFS loader boundary with directory baseline
         id: acceptance
         if: always()
         continue-on-error: true
         shell: pwsh
         run: |
-          & "$env:GITHUB_WORKSPACE\tools\ci\run-dwarfs-acceptance.ps1" `
+          & "$env:GITHUB_WORKSPACE\tools\ci\run-runtime-root-phase.ps1" `
+            -Backend DwarFS `
+            -TesterRoot "$env:GITHUB_WORKSPACE\tester" `
             -Image "$env:GITHUB_WORKSPACE\ipasim-runtime-dwarfs\RuntimeRoot.dwarfs" `
             -ExpectedImageSha256 '${{ needs.runtime-image.outputs.image_sha256 }}' `
             -ExpectedImageSize '${{ needs.runtime-image.outputs.image_size }}' `
-            -TesterRoot "$env:GITHUB_WORKSPACE\tester" `
             -ReaderBridge "$env:GITHUB_WORKSPACE\reader-bridge\IpaSimDwarfsReader.dll" `
-            -DirectoryArchive "$env:GITHUB_WORKSPACE\ipasim-runtime-archive\RuntimeRoot.tar.zst" `
+            -ExpectedExitCode '${{ needs.directory-boundary.outputs.exit_code }}' `
+            -ExpectedBoundaryBase64 '${{ needs.directory-boundary.outputs.boundary_b64 }}' `
             -Log "$env:RUNNER_TEMP\runtime-dwarfs-acceptance.log"
 
       - name: Publish full RuntimeRoot parity result
@@ -353,10 +522,11 @@ jobs:
           DIAGNOSTIC_LOG: ${{ runner.temp }}/runtime-dwarfs-acceptance.log
           DIAGNOSTIC_SUCCESS_BODY: >-
             The complete pinned iOS 18.5 (22F77) RuntimeRoot remained one DwarFS image
-            for the image-backed probe, and the same exact-head Windows Core tester plus
-            pinned public AWS IPA reached the same loader result through the trusted
-            extracted-directory RuntimeRoot baseline. The DwarFS path used no RuntimeRoot
-            mount, extraction, path exclusion, or path rewriting.
+            for the image-backed probe. A separate earlier Windows job used the same
+            exact-head Core tester plus pinned public AWS IPA against the trusted
+            extracted-directory RuntimeRoot baseline, and both backends reached the
+            same loader result. The DwarFS runtime path used no RuntimeRoot mount,
+            extraction, path exclusion, or path rewriting.
         with:
           script: |
             const run = require(process.env.GITHUB_WORKSPACE + '/tools/ci/dwarfs-diagnostic.js');
@@ -370,8 +540,9 @@ jobs:
           ## Windows RuntimeRoot backend parity
 
           - Exact-head Core run: ${{ needs.resolve-core-tester.outputs.run_id }}
+          - Directory baseline exit code: ${{ needs.directory-boundary.outputs.exit_code }}
+          - Directory baseline boundary: ${{ needs.directory-boundary.outputs.boundary_text }}
           - DwarFS RuntimeRoot cache hit: ${{ steps.runtime_cache_windows.outputs.cache-hit }}
-          - Directory baseline cache hit: ${{ steps.directory_runtime_cache_windows.outputs.cache-hit }}
           - DwarFS RuntimeRoot SHA-256: ${{ needs.runtime-image.outputs.image_sha256 }}
           - DwarFS RuntimeRoot bytes: ${{ needs.runtime-image.outputs.image_size }}
           - DwarFS RuntimeRoot extraction: none
@@ -379,6 +550,8 @@ jobs:
           "@ | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
 
       - name: Fail after publishing RuntimeRoot parity diagnostic
-        if: steps.acceptance.outcome == 'failure'
+        if: >-
+          steps.runtime_cache_windows.outcome == 'failure' ||
+          steps.acceptance.outcome == 'failure'
         shell: pwsh
         run: exit 1
