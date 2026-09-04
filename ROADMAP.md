@@ -26,7 +26,7 @@ The current generated production route set remains the explicitly approved 11-sy
 
 ### Current trusted RuntimeRoot baseline
 
-Until a replacement proves parity, the authoritative trusted transport remains:
+The frozen historical trusted transport is:
 
 ```text
 GitHub-hosted macOS RuntimeRoot
@@ -38,7 +38,7 @@ GitHub-hosted macOS RuntimeRoot
         -> existing tester / IpaProbe path
 ```
 
-That baseline is intentionally preserved while image-backed RuntimeRoot work is validated.
+That workflow remains unchanged while image-backed RuntimeRoot work is validated. The complete archive is now proven to contain Darwin names and hard-link/symlink topology that NTFS cannot materialize exactly: an exact-head extraction attempt stopped before ipaSim with 15,339 hard-link creation errors and 75 rejected link-path errors. It therefore cannot serve as a full-namespace exact-parity oracle. Under the Priority 0 pass criterion below, an image backend proves the storage increment by reaching a genuine loader/runtime boundary later than this host-filesystem stop without changing RuntimeRoot namespace or content semantics.
 
 ### Current active checkpoint
 

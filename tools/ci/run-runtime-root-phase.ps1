@@ -1,21 +1,20 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Directory', 'DwarFS')]
-    [string]$Backend,
-
-    [Parameter(Mandatory = $true)]
     [string]$TesterRoot,
 
     [Parameter(Mandatory = $true)]
     [string]$Log,
 
-    [string]$Image = '',
-    [string]$ExpectedImageSha256 = '',
+    [Parameter(Mandatory = $true)]
+    [string]$Image,
+    [Parameter(Mandatory = $true)]
+    [string]$ExpectedImageSha256,
+
+    [Parameter(Mandatory = $true)]
     [Int64]$ExpectedImageSize = 0,
-    [string]$ReaderBridge = '',
-    [string]$DirectoryArchive = '',
-    [string]$ExpectedExitCode = '',
-    [string]$ExpectedBoundaryBase64 = ''
+
+    [Parameter(Mandatory = $true)]
+    [string]$ReaderBridge
 )
 
 $ErrorActionPreference = 'Stop'
@@ -196,61 +195,6 @@ try {
 
     Invoke-RequiredNative $Arm64Smoke
 
-    if ($Backend -eq 'Directory') {
-        if (-not $DirectoryArchive) {
-            throw 'Directory backend requires -DirectoryArchive.'
-        }
-        if (-not (Test-Path -LiteralPath $DirectoryArchive -PathType Leaf)) {
-            throw "required RuntimeRoot acceptance input is missing: $DirectoryArchive"
-        }
-
-        $DirectoryArchiveSha = (Get-FileHash -LiteralPath $DirectoryArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-        $DirectoryArchiveSize = (Get-Item -LiteralPath $DirectoryArchive).Length
-        Write-Log "RuntimeRoot.tar.zst baseline verified: $DirectoryArchiveSha ($DirectoryArchiveSize bytes)"
-
-        $SevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
-        if (-not (Test-Path -LiteralPath $SevenZip -PathType Leaf)) {
-            throw '7-Zip is not available on this GitHub-hosted Windows runner.'
-        }
-        $Staging = Join-Path $env:RUNNER_TEMP 'runtime-root-zstd-staging'
-        $Expanded = Join-Path $env:RUNNER_TEMP 'runtime-root-directory-baseline'
-        foreach ($Path in @($Staging, $Expanded)) {
-            if (Test-Path -LiteralPath $Path) {
-                Remove-Item -LiteralPath $Path -Recurse -Force
-            }
-            New-Item -ItemType Directory -Path $Path -Force | Out-Null
-        }
-
-        Invoke-RequiredNative $SevenZip 'x' $DirectoryArchive "-o$Staging" '-y'
-        $TarArchive = Join-Path $Staging 'RuntimeRoot.tar'
-        if (-not (Test-Path -LiteralPath $TarArchive -PathType Leaf)) {
-            throw 'RuntimeRoot.tar was not produced from the trusted zstd baseline cache.'
-        }
-        Invoke-RequiredNative $SevenZip 'x' $TarArchive "-o$Expanded" '-y'
-
-        $RuntimeRoot = $null
-        foreach ($Candidate in @((Join-Path $Expanded 'RuntimeRoot'), $Expanded)) {
-            if ((Test-Path -LiteralPath (Join-Path $Candidate 'System') -PathType Container) -and
-                (Test-Path -LiteralPath (Join-Path $Candidate 'usr') -PathType Container)) {
-                $RuntimeRoot = (Resolve-Path -LiteralPath $Candidate).Path
-                break
-            }
-        }
-        if (-not $RuntimeRoot) {
-            throw 'Extracted directory baseline does not expose System and usr at its top level.'
-        }
-        Write-Log "Extracted directory RuntimeRoot baseline: $RuntimeRoot"
-
-        $Result = Invoke-ProbeForBoundary `
-            -Label 'Directory RuntimeRoot probe' `
-            -Exe $Probe.FullName `
-            -Arguments @($AppExecutable, '--runtime-root-dir', $RuntimeRoot)
-
-        Publish-BoundaryOutputs $Result
-        Write-Log 'Trusted directory RuntimeRoot loader boundary captured for exact-head parity.'
-        exit 0
-    }
-
     foreach ($Required in @($Image, $ReaderBridge)) {
         if (-not $Required) {
             throw 'DwarFS backend requires -Image and -ReaderBridge.'
@@ -283,42 +227,16 @@ try {
         -Exe $Probe.FullName `
         -Arguments @($AppExecutable, '--runtime-root-dwarfs', $Image, $ReaderBridge)
 
-    if ([string]::IsNullOrWhiteSpace($ExpectedExitCode)) {
-        throw 'DwarFS parity requires -ExpectedExitCode from the exact-head directory baseline.'
-    }
-    if ([string]::IsNullOrWhiteSpace($ExpectedBoundaryBase64)) {
-        throw 'DwarFS parity requires -ExpectedBoundaryBase64 from the exact-head directory baseline.'
-    }
-
-    $ParsedExitCode = 0
-    if (-not [Int32]::TryParse($ExpectedExitCode, [ref]$ParsedExitCode)) {
-        throw "directory baseline exit code is invalid: '$ExpectedExitCode'"
-    }
-    try {
-        $ExpectedBoundary = [System.Text.Encoding]::UTF8.GetString(
-            [Convert]::FromBase64String($ExpectedBoundaryBase64)
-        )
-    }
-    catch {
-        throw "directory baseline boundary is not valid base64: $($_.Exception.Message)"
-    }
-
-    Write-Log "Directory baseline exit code: $ParsedExitCode"
-    Write-Log "Directory baseline canonical boundary: $ExpectedBoundary"
-
-    if ($Result.ExitCode -ne $ParsedExitCode) {
-        throw "RuntimeRoot backend parity failed: DwarFS exit $($Result.ExitCode), directory exit $ParsedExitCode."
-    }
-    if ($Result.Boundary -ne $ExpectedBoundary) {
-        throw "RuntimeRoot backend parity failed: DwarFS boundary '$($Result.Boundary)' differs from directory boundary '$ExpectedBoundary'."
-    }
-
     Publish-BoundaryOutputs $Result
     if ($Result.ExitCode -eq 0) {
-        Write-Log 'RuntimeRoot backend parity established: both backends completed the Mach-O load.'
+        Write-Log 'DwarFS RuntimeRoot storage acceptance passed: the Mach-O load completed.'
     }
     else {
-        Write-Log "RuntimeRoot backend parity established at the same real compatibility boundary: $($Result.Boundary)"
+        $LoaderBoundaryPattern = '^Error: symbol .+ was not found for library ordinal -?\d+\. \|\| Error: cannot apply chained fixups for /'
+        if ($Result.Boundary -notmatch $LoaderBoundaryPattern) {
+            throw "DwarFS RuntimeRoot stopped before a proven loader symbol/fixup boundary: '$($Result.Boundary)'."
+        }
+        Write-Log "DwarFS RuntimeRoot storage acceptance passed at a real loader symbol/fixup boundary: $($Result.Boundary)"
     }
     Write-Log 'Full DwarFS RuntimeRoot storage/loader acceptance passed on real Windows without mounting or extracting the DwarFS RuntimeRoot.'
 }

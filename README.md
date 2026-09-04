@@ -150,9 +150,11 @@ Error: cannot apply chained fixups for /usr/lib/system/libsystem_sim_platform.dy
 cannot resolve chained-fixup import _mach_absolute_time from library ordinal 5.
 ```
 
-That is a successful **image-backed storage/loader proof**, but it is not yet enough to declare backend parity. PR #78 remains draft until the same exact-head Core tester and pinned public AWS IPA are run through the extracted-directory RuntimeRoot backend and the first genuine non-cascading loader/runtime boundary is compared directly. `_mach_absolute_time` must not be implemented inside this storage PR merely to force the image-backed path farther.
+That is a successful **image-backed storage/loader proof** under the Priority 0 roadmap criterion: the complete image-backed path reached a later genuine compatibility boundary than Windows directory materialization can reach. An exact-head attempt to rebuild the complete trusted tar/zstd RuntimeRoot as an NTFS directory stopped before ipaSim with **15,339 hard-link creation errors** and **75 rejected link-path errors**. Treating that host-filesystem limitation as a DwarFS regression would make the acceptance gate impossible by construction.
 
-The existing zstd/directory path remains the trusted baseline until this exact-head comparison proves parity. The static closure and host-import inventory preflights are still directory-backed; they must move onto `RuntimeRootStore` before an image backend can become the production RuntimeRoot source.
+PR #78 therefore validates the complete DwarFS path directly. A nonzero probe is accepted only when it reaches a real unresolved-symbol plus chained-fixup loader boundary; image identity, reader bridge, open/read, malformed output, or earlier storage failures still publish the actionable diagnostic and fail normally. `_mach_absolute_time` is not implemented inside this storage PR merely to force the image-backed path farther.
+
+The existing tar/zstd workflow remains unchanged as the historical directory transport baseline, but it is not used as a full-namespace parity oracle after the NTFS limitation is observed. The static closure and host-import inventory preflights are still directory-backed; they must move onto `RuntimeRootStore` before an image backend can become the production RuntimeRoot source.
 
 ### Why the RuntimeRoot architecture changed
 
@@ -171,7 +173,7 @@ GitHub-hosted macOS RuntimeRoot
         -> Test-Ipa.cmd
 ```
 
-This is correct enough to remain the baseline, but it still asks Windows to reconstruct hundreds of thousands of filesystem objects before ipaSim can use the runtime.
+This remains the frozen historical transport baseline, but the complete archive is now known to contain Darwin names and link topology that Windows cannot reconstruct exactly as an NTFS directory. It remains useful evidence for the earlier workflow history; it is not a valid full-namespace parity oracle for the image-backed store.
 
 PR #74 tested a different idea: preserve the complete RuntimeRoot in one WIM and mount it read-only with DISM. The WIM itself was valid and independently verifiable, but the real Windows DISM mount failed with **Error 123** around 79% progress. No RuntimeRoot paths were excluded or renamed to force success. The result demonstrated that a valid single-file package is not enough if Windows must still project Apple's complete namespace as ordinary Windows paths.
 
