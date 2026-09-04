@@ -59,9 +59,9 @@ The SDK/compiler side may establish **how** a function is represented and called
 
 If you are picking this project up in a new AI chat or as a new contributor, **start here**, then read [`AGENTS.md`](AGENTS.md), [`ROADMAP.md`](ROADMAP.md), and the active coordination claims under [`.github/agent-work/`](.github/agent-work/). Before editing `src/IpaSimulator/`, also read [`src/IpaSimulator/AGENTS.md`](src/IpaSimulator/AGENTS.md).
 
-### Current merged checkpoint — September 3, 2026
+### Current merged checkpoint — September 4, 2026
 
-**Latest merged compatibility/storage checkpoint: [PR #77 — Prove DwarFS-backed RuntimeRoot reads on Windows](https://github.com/GravAlignLabs/ipasim/pull/77).**
+**Latest merged compatibility/storage checkpoint: [PR #78 — Run full RuntimeRoot directly from DwarFS on Windows](https://github.com/GravAlignLabs/ipasim/pull/78).**
 
 The recent progression is:
 
@@ -82,17 +82,16 @@ The recent progression is:
 - [PR #74](https://github.com/GravAlignLabs/ipasim/pull/74) — isolated read-only WIM RuntimeRoot experiment;
 - [PR #75](https://github.com/GravAlignLabs/ipasim/pull/75) — keep auxiliary WIM diagnostic publishing non-blocking while preserving real acceptance failure;
 - [PR #76](https://github.com/GravAlignLabs/ipasim/pull/76) — decouple RuntimeRoot loading from Windows file paths with an immutable `RuntimeRootStore` byte-source boundary; and
-- [PR #77](https://github.com/GravAlignLabs/ipasim/pull/77) — prove Windows can read an NTFS-unrepresentable Darwin pathname directly from a DwarFS image without mounting, extracting, renaming, or falling back.
+- [PR #77](https://github.com/GravAlignLabs/ipasim/pull/77) — prove Windows can read an NTFS-unrepresentable Darwin pathname directly from a DwarFS image without mounting, extracting, renaming, or falling back; and
+- [PR #78](https://github.com/GravAlignLabs/ipasim/pull/78) — build and verify the complete iOS 18.5 RuntimeRoot as one DwarFS image, then feed the exact-head loader directly from that image on Windows.
 
-PR #77's final head preserved the public Core, Synthetic IPA, Threaded ARM64, and DwarFS-reader regression checks before merge.
+PR #78's final head preserved the public Core, Synthetic IPA, Threaded ARM64, DwarFS-reader, full-image, and exact-head loader acceptance checks before merge.
 
 [`ROADMAP.md`](ROADMAP.md) is a **dependency-oriented subsystem backlog**, not an unconditional execution order. **The first genuine non-cascading runtime failure may override the nominal priority numbering.**
 
-## Immediate objective: full RuntimeRoot directly from DwarFS
+## Immediate objective: complete RuntimeRootStore read path
 
-The current active storage experiment is [draft PR #78](https://github.com/GravAlignLabs/ipasim/pull/78). It is **not merged functionality yet**.
-
-Its goal is to prove the complete pinned GitHub-hosted iOS 18.5 RuntimeRoot can remain one DwarFS image and feed ipaSim's real loader directly on Windows:
+PR #78 proved that the complete pinned GitHub-hosted iOS 18.5 RuntimeRoot can remain one DwarFS image and feed ipaSim's real loader directly on Windows:
 
 ```text
 GitHub macOS runner
@@ -131,9 +130,9 @@ cross-OS Actions cache
 
 The intended path has **no RuntimeRoot mount, full extraction, filename sanitization, path exclusion, or NTFS materialization fallback**.
 
-### Latest PR #78 checkpoint
+### Merged PR #78 checkpoint
 
-The full-image experiment has now crossed the storage boundary on real Windows. On the last pre-documentation head (`8e4236d9fc4530b630673a9bf880075ca14c1025`):
+The full-image experiment crossed the storage boundary on real Windows and merged at `f56db5be4fafb7fb54cf79a7c8906500ec275317`:
 
 - **Windows ARM64 Core**, **Synthetic iOS IPA on Windows**, and **Threaded ARM64 Guest Context** all passed;
 - the Darwin-only illegal-name DwarFS fixture passed;
@@ -152,11 +151,13 @@ cannot resolve chained-fixup import _mach_absolute_time from library ordinal 5.
 
 That is a successful **image-backed storage/loader proof** under the Priority 0 roadmap criterion: the complete image-backed path reached a later genuine compatibility boundary than Windows directory materialization can reach. An exact-head attempt to rebuild the complete trusted tar/zstd RuntimeRoot as an NTFS directory stopped before ipaSim with **15,339 hard-link creation errors** and **75 rejected link-path errors**. Treating that host-filesystem limitation as a DwarFS regression would make the acceptance gate impossible by construction.
 
-PR #78 therefore validates the complete DwarFS path directly. A nonzero probe is accepted only when it reaches a real unresolved-symbol plus chained-fixup loader boundary; image identity, reader bridge, open/read, malformed output, or earlier storage failures still publish the actionable diagnostic and fail normally. `_mach_absolute_time` is not implemented inside this storage PR merely to force the image-backed path farther.
+PR #78 validates the complete DwarFS path directly. A nonzero probe is accepted only when it reaches a real unresolved-symbol plus chained-fixup loader boundary; image identity, reader bridge, open/read, malformed output, or earlier storage failures still publish the actionable diagnostic and fail normally. `_mach_absolute_time` was not implemented inside that storage PR merely to force the image-backed path farther.
 
 The Windows reader job caches the finished validated bridge plus its smoke executable under a key derived from the reader sources, build recipe, DwarFS source identity, vcpkg baseline, MSVC version, OS, and architecture. A cache hit still runs the Darwin-only pathname smoke before the DLL is published for acceptance; stale or incomplete packages fail explicitly.
 
-The existing tar/zstd workflow remains unchanged as the historical directory transport baseline, but it is not used as a full-namespace parity oracle after the NTFS limitation is observed. The static closure and host-import inventory preflights are still directory-backed; they must move onto `RuntimeRootStore` before an image backend can become the production RuntimeRoot source.
+Because GitHub scopes pull-request caches to one PR merge ref, relevant merges also run the reader/image preparation jobs on `master`. That warms validated packages in the default-branch cache scope so later pull requests can restore them instead of rebuilding the reader. The complete RuntimeRoot image remains derived from the pinned GitHub-hosted Xcode runtime and is not committed to or distributed from this repository.
+
+The existing tar/zstd workflow remains unchanged as the historical directory transport baseline, but it is not used as a full-namespace parity oracle after the NTFS limitation is observed. The active Priority 1 checkpoint moves static closure and host-import inventory reads onto the same configured `RuntimeRootStore` used by the loader. This removes their directory-only detour without adding auto-detection, extraction fallback, or a second DwarFS store instance.
 
 ### Why the RuntimeRoot architecture changed
 

@@ -9,9 +9,9 @@ The project uses two complementary evidence loops:
 
 Generated ABI knowledge never grants semantic approval by itself.
 
-## Current checkpoint — September 3, 2026
+## Current checkpoint — September 4, 2026
 
-The latest merged storage/runtime architecture checkpoint is **PR #77**.
+The latest merged storage/runtime architecture checkpoint is **PR #78**.
 
 Important merged state:
 
@@ -20,11 +20,12 @@ Important merged state:
 - PRs #69, #70, and #73 established the trusted GitHub-hosted iOS 18.5 RuntimeRoot `tar + zstd` cross-OS baseline;
 - PRs #74 and #75 tested a complete WIM as an isolated read-only mount experiment while keeping diagnostic publishing secondary to real failure;
 - PR #76 introduced `RuntimeRootStore`, separating guest Darwin install names and immutable RuntimeRoot bytes from Windows host paths; and
-- PR #77 proved a DwarFS-backed store can read a Darwin pathname containing an NTFS-invalid `:` component directly on Windows without mounting, extracting, renaming, or falling back.
+- PR #77 proved a DwarFS-backed store can read a Darwin pathname containing an NTFS-invalid `:` component directly on Windows without mounting, extracting, renaming, or falling back; and
+- PR #78 built the complete pinned iOS 18.5 RuntimeRoot as one verified DwarFS image and drove the exact-head Windows loader through it to the genuine `_mach_absolute_time` chained-fixup boundary.
 
 The current generated production route set remains the explicitly approved 11-symbol process-identity and descriptor-I/O set documented in `README.md`.
 
-### Current trusted RuntimeRoot baseline
+### Historical directory transport baseline
 
 The frozen historical trusted transport is:
 
@@ -38,13 +39,11 @@ GitHub-hosted macOS RuntimeRoot
         -> existing tester / IpaProbe path
 ```
 
-That workflow remains unchanged while image-backed RuntimeRoot work is validated. The complete archive is now proven to contain Darwin names and hard-link/symlink topology that NTFS cannot materialize exactly: an exact-head extraction attempt stopped before ipaSim with 15,339 hard-link creation errors and 75 rejected link-path errors. It therefore cannot serve as a full-namespace exact-parity oracle. Under the Priority 0 pass criterion below, an image backend proves the storage increment by reaching a genuine loader/runtime boundary later than this host-filesystem stop without changing RuntimeRoot namespace or content semantics.
+That workflow remains unchanged as historical transport evidence. The complete archive is proven to contain Darwin names and hard-link/symlink topology that NTFS cannot materialize exactly: an exact-head extraction attempt stopped before ipaSim with 15,339 hard-link creation errors and 75 rejected link-path errors. It therefore cannot serve as a full-namespace exact-parity oracle. PR #78's direct DwarFS path reached a genuine loader/runtime boundary beyond this host-filesystem stop without changing RuntimeRoot namespace or content semantics.
 
 ### Current active checkpoint
 
-Draft **PR #78** is the immediate storage milestone: build the complete pinned iOS 18.5 (22F77) RuntimeRoot as one DwarFS image on macOS, restore that image on Windows, and feed the exact-head ipaSim loader through `RuntimeRootStore` with **no RuntimeRoot mount or full extraction**.
-
-PR #78 is an experiment until it is independently correct and green. Do not document or depend on its behavior as merged functionality before that happens.
+Priority 0 is complete. The active checkpoint is Priority 1: make the static dependency closure and host-import inventory consume the same configured `RuntimeRootStore` as the loader. The change must preserve the directory backend, use one explicitly selected store instance, and prove the DwarFS preflights before accepting the later loader boundary.
 
 ## Architectural rules for future work
 
@@ -76,6 +75,8 @@ Every subsystem must remain target-neutral and fail closed when a required seman
 Runtime evidence may reorder the priorities below. The numbering expresses architectural dependency and expected pressure, not permission to skip an earlier real failure.
 
 ## Priority 0 — prove complete image-backed RuntimeRoot acceptance
+
+**Completed by PR #78.**
 
 Finish the active full-RuntimeRoot DwarFS proof before making the image path authoritative.
 
@@ -109,6 +110,8 @@ The design principle is:
 Windows should not have to materialize Apple's complete filesystem namespace before ipaSim can resolve a framework or dylib.
 
 ## Priority 1 — make RuntimeRootStore the complete read-side source of truth
+
+**Active checkpoint.**
 
 A successful full-image loader proof is not yet sufficient for production switchover because some pre-load analysis still assumes an extracted directory.
 

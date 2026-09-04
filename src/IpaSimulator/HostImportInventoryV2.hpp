@@ -47,23 +47,27 @@ struct PositiveImportKey {
 };
 
 inline void collectImageHostImports(
-    const std::filesystem::path &ImagePath,
+    const image_source_detail::ImageSource &Source,
     std::set<HostImportKey> &RequiredHostImports,
     std::set<HostImportKey> &WeakHostImports,
     std::set<PositiveImportKey> &AllPositiveImports) {
+  using namespace image_source_detail;
+
   std::vector<std::uint8_t> Data;
-  if (!loadFile(ImagePath, Data)) {
-    std::printf("[host-import-inventory] image unavailable, skipped: %s\n",
-                ImagePath.string().c_str());
+  std::string Error;
+  if (!readImageSource(Source, Data, Error)) {
+    std::printf("[host-import-inventory] image unavailable, skipped: %s: %s\n",
+                Source.isRuntimeImage() ? Source.DarwinPath.c_str()
+                                        : Source.HostPath.string().c_str(),
+                Error.c_str());
     return;
   }
 
   std::size_t SliceOffset = 0;
   std::size_t SliceSize = 0;
-  std::string Error;
   if (!selectArm64Slice(Data, SliceOffset, SliceSize, Error)) {
     std::printf("[host-import-inventory] %s: %s; skipped\n",
-                ImagePath.filename().string().c_str(), Error.c_str());
+                Source.DisplayName.c_str(), Error.c_str());
     return;
   }
 
@@ -71,7 +75,7 @@ inline void collectImageHostImports(
   std::vector<Import> Imports;
   if (!parseImage(Data, SliceOffset, SliceSize, Libraries, Imports, Error)) {
     std::printf("[host-import-inventory] %s: %s; skipped\n",
-                ImagePath.filename().string().c_str(), Error.c_str());
+                Source.DisplayName.c_str(), Error.c_str());
     return;
   }
 
@@ -82,8 +86,7 @@ inline void collectImageHostImports(
     const int Ordinal = static_cast<int>(I + 1);
     HostOrdinals.insert(Ordinal);
     std::printf("[host-import-inventory] %s host ordinal %d -> %s\n",
-                ImagePath.filename().string().c_str(), Ordinal,
-                Libraries[I].c_str());
+                Source.DisplayName.c_str(), Ordinal, Libraries[I].c_str());
   }
 
   std::size_t PositiveImports = 0;
@@ -93,7 +96,7 @@ inline void collectImageHostImports(
         static_cast<std::size_t>(ImportEntry.Ordinal) <= Libraries.size()) {
       ++PositiveImports;
       AllPositiveImports.insert(PositiveImportKey{
-          ImagePath.filename().string(), ImportEntry.Ordinal,
+          Source.DisplayName, ImportEntry.Ordinal,
           Libraries[ImportEntry.Ordinal - 1], ImportEntry.Name,
           ImportEntry.Weak});
     }
@@ -105,19 +108,18 @@ inline void collectImageHostImports(
 
     ++MatchedHostImports;
     const std::string &Library = Libraries[ImportEntry.Ordinal - 1];
-    HostImportKey Key{ImagePath.filename().string(), Library,
-                      ImportEntry.Name};
+    HostImportKey Key{Source.DisplayName, Library, ImportEntry.Name};
     (ImportEntry.Weak ? WeakHostImports : RequiredHostImports)
         .insert(std::move(Key));
   }
 
   std::printf("[host-import-inventory] %s chained imports: %zu total, %zu positive-ordinal, %zu host-facing\n",
-              ImagePath.filename().string().c_str(), Imports.size(),
-              PositiveImports, MatchedHostImports);
+              Source.DisplayName.c_str(), Imports.size(), PositiveImports,
+              MatchedHostImports);
 
   if (PositiveImports != 0 && HostOrdinals.empty()) {
     std::printf("[host-import-inventory] WARNING: %s has positive-ordinal imports but no recognized host dependency; dependency list follows\n",
-                ImagePath.filename().string().c_str());
+                Source.DisplayName.c_str());
     for (std::size_t I = 0; I != Libraries.size(); ++I)
       std::printf("[host-import-inventory]   ordinal %zu -> %s\n", I + 1,
                   Libraries[I].c_str());
@@ -148,28 +150,30 @@ inline void reportPositiveImportSurface(
 
 } // namespace host_inventory_v2_detail
 
-inline void reportDarwinHostImportInventoryV2(const char *RuntimeRoot) {
+inline void reportDarwinHostImportInventoryV2(const RuntimeRootStore &Store) {
   using namespace host_inventory_detail;
   using namespace host_inventory_v2_detail;
-
-  if (!RuntimeRoot || !*RuntimeRoot)
-    return;
-
-  const std::filesystem::path SystemDir =
-      std::filesystem::path(RuntimeRoot) / L"usr" / L"lib" / L"system";
+  using namespace image_source_detail;
 
   std::set<HostImportKey> RequiredHostImports;
   std::set<HostImportKey> WeakHostImports;
   std::set<PositiveImportKey> AllPositiveImports;
-  collectImageHostImports(SystemDir / L"libsystem_sim_kernel.dylib",
-                          RequiredHostImports, WeakHostImports,
-                          AllPositiveImports);
-  collectImageHostImports(SystemDir / L"libsystem_sim_platform.dylib",
-                          RequiredHostImports, WeakHostImports,
-                          AllPositiveImports);
-  collectImageHostImports(SystemDir / L"libsystem_sim_pthread.dylib",
-                          RequiredHostImports, WeakHostImports,
-                          AllPositiveImports);
+  constexpr const char *RuntimeImages[] = {
+      "/usr/lib/system/libsystem_sim_kernel.dylib",
+      "/usr/lib/system/libsystem_sim_platform.dylib",
+      "/usr/lib/system/libsystem_sim_pthread.dylib",
+  };
+  for (const char *DarwinPath : RuntimeImages) {
+    ImageSource Source;
+    std::string Error;
+    if (!makeRuntimeImageSource(Store, DarwinPath, Source, Error)) {
+      std::printf("[host-import-inventory] image unavailable, skipped: %s: %s\n",
+                  DarwinPath, Error.c_str());
+      continue;
+    }
+    collectImageHostImports(Source, RequiredHostImports, WeakHostImports,
+                            AllPositiveImports);
+  }
 
   // Print the complete positive-ordinal surface before the loader runs. This is
   // diagnostic only: no import is patched or marked successful here. The goal

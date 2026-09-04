@@ -108,18 +108,18 @@ inline LegacyDyldInfoStats augmentLegacyDyldInfoExports(Context &Ctx) {
   for (auto &Pair : Ctx.Images) {
     Image &ImageRef = Pair.second;
     std::vector<std::uint8_t> Data;
-    if (!loadFile(ImageRef.Path, Data)) {
+    std::string Error;
+    if (!image_source_detail::readImageSource(ImageRef.Source, Data, Error)) {
       Ctx.ParseWarnings.push_back(
-          ImageRef.Path.string() +
-          ": cannot re-read image for LC_DYLD_INFO export coverage");
+          ImageRef.DisplayName +
+          ": cannot re-read image for LC_DYLD_INFO export coverage: " + Error);
       continue;
     }
 
     std::size_t SliceOffset = 0;
     std::size_t SliceSize = 0;
-    std::string Error;
     if (!selectArm64Slice(Data, SliceOffset, SliceSize, Error)) {
-      Ctx.ParseWarnings.push_back(ImageRef.Path.string() + ": " + Error);
+      Ctx.ParseWarnings.push_back(ImageRef.DisplayName + ": " + Error);
       continue;
     }
 
@@ -127,7 +127,7 @@ inline LegacyDyldInfoStats augmentLegacyDyldInfoExports(Context &Ctx) {
     bool FoundDyldInfo = false;
     if (!parseLegacyDyldInfoExports(Data, SliceOffset, SliceSize, LegacyExports,
                                     FoundDyldInfo, Error)) {
-      Ctx.ParseWarnings.push_back(ImageRef.Path.string() + ": " + Error);
+      Ctx.ParseWarnings.push_back(ImageRef.DisplayName + ": " + Error);
       continue;
     }
     if (!FoundDyldInfo || LegacyExports.empty())
@@ -334,12 +334,12 @@ inline bool runLegacyDyldInfoAuditSelfTest() {
 }
 
 inline void reportStaticClosureSymbolAuditComplete(const char *ImagePath,
-                                                   const char *RuntimeRoot) {
-  if (!ImagePath || !*ImagePath || !RuntimeRoot || !*RuntimeRoot)
+                                                   const RuntimeRootStore &Store) {
+  if (!ImagePath || !*ImagePath)
     return;
 
   Context Ctx;
-  Ctx.RuntimeRoot = std::filesystem::path(RuntimeRoot).lexically_normal();
+  Ctx.RuntimeStore = &Store;
   Ctx.MainExecutable = std::filesystem::path(ImagePath).lexically_normal();
   Ctx.BridgePath = bridgePath();
   if (!Ctx.BridgePath.empty())

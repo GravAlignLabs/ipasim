@@ -1,6 +1,23 @@
 name: RuntimeRoot DwarFS Reader and Acceptance
 
 on:
+  # Pull-request caches are scoped to one PR merge ref and cannot accelerate a
+  # later PR. Relevant merges warm the same validated packages in the default
+  # branch scope, which GitHub permits subsequent PRs to restore.
+  push:
+    branches:
+      - master
+    paths:
+      - 'include/ipasim/DwarfsReaderBridgeApi.h'
+      - 'include/ipasim/DwarfsRuntimeRootStore.hpp'
+      - 'src/IpaSimulator/DwarfsReaderBridge.cpp'
+      - 'src/IpaSimulator/DwarfsRuntimeRootStore.cpp'
+      - 'src/IpaSimulator/DwarfsRuntimeRootStoreSmoke.cpp'
+      - 'src/IpaSimulator/dwarfs-reader/**'
+      - 'tools/ci/build-dwarfs-fixture.sh'
+      - 'tools/ci/build-dwarfs-reader.ps1'
+      - 'tools/ci/build-runtime-dwarfs.sh'
+      - '.github/workflows/runtime-root-dwarfs-reader.yml'
   pull_request:
     paths:
       - 'include/ipasim/DynamicLoader.hpp'
@@ -11,8 +28,14 @@ on:
       - 'src/IpaSimulator/DwarfsReaderBridge.cpp'
       - 'src/IpaSimulator/DwarfsRuntimeRootStore.cpp'
       - 'src/IpaSimulator/DwarfsRuntimeRootStoreSmoke.cpp'
+      - 'src/IpaSimulator/HostImportInventory.hpp'
+      - 'src/IpaSimulator/HostImportInventoryV2.hpp'
       - 'src/IpaSimulator/IpaProbe.cpp'
       - 'src/IpaSimulator/IpaSimulator.cpp'
+      - 'src/IpaSimulator/RuntimeRootImageSource.hpp'
+      - 'src/IpaSimulator/StaticSymbolAudit.hpp'
+      - 'src/IpaSimulator/StaticSymbolAuditLegacyDyldInfo.hpp'
+      - 'src/IpaSimulator/StaticSymbolAuditSelfTest.hpp'
       - 'src/IpaSimulator/dwarfs-reader/**'
       - 'tools/ci/build-dwarfs-fixture.sh'
       - 'tools/ci/build-dwarfs-reader.ps1'
@@ -181,6 +204,7 @@ jobs:
 
   resolve-core-tester:
     name: Resolve exact-head Windows Core tester
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     outputs:
@@ -305,6 +329,7 @@ jobs:
 
   dwarfs-boundary:
     name: Validate complete DwarFS RuntimeRoot loader boundary
+    if: github.event_name == 'pull_request'
     needs:
       - reader-smoke
       - runtime-image
@@ -366,9 +391,10 @@ jobs:
           DIAGNOSTIC_LOG: ${{ runner.temp }}/runtime-dwarfs-acceptance.log
           DIAGNOSTIC_SUCCESS_BODY: >-
             The complete pinned iOS 18.5 (22F77) RuntimeRoot remained one DwarFS image
-            for the exact-head image-backed probe, which reached a genuine loader
-            symbol/chained-fixup boundary. The DwarFS runtime path used no RuntimeRoot
-            mount, extraction, path exclusion, or path rewriting.
+            for the exact-head image-backed probe. Static closure and host-import
+            preflights read that same configured RuntimeRootStore before the loader
+            reached a genuine symbol/chained-fixup boundary. The DwarFS runtime path
+            used no RuntimeRoot mount, extraction, path exclusion, or path rewriting.
         with:
           script: |
             const run = require(process.env.GITHUB_WORKSPACE + '/tools/ci/dwarfs-diagnostic.js');
@@ -387,6 +413,8 @@ jobs:
           - DwarFS RuntimeRoot bytes: ${{ needs.runtime-image.outputs.image_size }}
           - DwarFS RuntimeRoot extraction: none
           - Probe exit code: ${{ steps.acceptance.outputs.exit_code }}
+          - Store-backed static closure preflight: ${{ steps.acceptance.outputs.static_closure_preflight }}
+          - Store-backed host-import preflight: ${{ steps.acceptance.outputs.host_import_preflight }}
           - Canonical boundary: ${{ steps.acceptance.outputs.boundary_text }}
           - Storage acceptance outcome: ${{ steps.acceptance.outcome }}
           "@ | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
