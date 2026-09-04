@@ -1,0 +1,24 @@
+status: active
+owner: DeerSpotter
+agent: Codex
+
+task: >-
+  Replace cache-only reader bridge reuse with a durable, checksum-pinned prebuilt
+  package from the successful public DwarFS acceptance artifact.
+scope:
+  - deps/dwarfs-reader/**
+  - tools/ci/*dwarfs-reader*
+  - src/IpaSimulator/dwarfs-reader/CMakeLists.txt
+  - .github/workflows/runtime-root-dwarfs-reader.yml
+  - README.md
+branch: feature/pinned-dwarfs-reader
+started_utc: 2026-09-04T22:50:00Z
+updated_utc: 2026-09-04T22:50:00Z
+base_sha: 13eb24b4678e0eb7de22916601b19e87eed6d9d0
+expected_pr: draft
+next_checkpoint: >-
+  Check in the already-tested reader package, verify its source and binary
+  identity, and run the current smoke without rebuilding DwarFS dependencies.
+notes: >-
+  No Apple RuntimeRoot binaries. No silent rebuild fallback. Preserve public
+  acceptance and self-updating PR failure diagnostics. Do not poll long runs.
