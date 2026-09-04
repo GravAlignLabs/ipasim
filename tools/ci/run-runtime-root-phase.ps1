@@ -239,6 +239,7 @@ try {
         Write-Log "DwarFS RuntimeRoot storage acceptance passed at a real loader symbol/fixup boundary: $($Result.Boundary)"
     }
     Write-Log 'Full DwarFS RuntimeRoot storage/loader acceptance passed on real Windows without mounting or extracting the DwarFS RuntimeRoot.'
+    exit 0
 }
 catch {
     ($_ | Format-List * -Force | Out-String) | Tee-Object -FilePath $Log -Append | Write-Host

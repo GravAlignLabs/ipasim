@@ -115,7 +115,27 @@ jobs:
         with:
           arch: x64
 
+      - name: Capture reader toolchain identity
+        id: toolchain
+        shell: pwsh
+        run: |
+          $Compiler = (Get-Command cl.exe -ErrorAction Stop).Source
+          $Version = (Get-Item -LiteralPath $Compiler).VersionInfo.FileVersion
+          if ([string]::IsNullOrWhiteSpace($Version)) {
+            throw "MSVC file version is unavailable: $Compiler"
+          }
+          "msvc_version=$Version" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+          Write-Host "MSVC compiler: $Compiler ($Version)"
+
+      - name: Restore validated DwarFS reader package cache
+        id: reader_cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\dwarfs-reader-cache
+          key: dwarfs-reader-v1-${{ runner.os }}-x64-msvc-${{ steps.toolchain.outputs.msvc_version }}-dwarfs-${{ env.DWARFS_VERSION }}-${{ env.DWARFS_SOURCE_SHA256 }}-vcpkg-${{ env.VCPKG_BASELINE }}-${{ hashFiles('include/ipasim/DwarfsReaderBridgeApi.h', 'include/ipasim/DwarfsRuntimeRootStore.hpp', 'src/IpaSimulator/DwarfsReaderBridge.cpp', 'src/IpaSimulator/DwarfsRuntimeRootStore.cpp', 'src/IpaSimulator/DwarfsRuntimeRootStoreSmoke.cpp', 'src/IpaSimulator/dwarfs-reader/**', 'tools/ci/build-dwarfs-reader.ps1') }}
+
       - name: Restore DwarFS vcpkg binary cache
+        if: steps.reader_cache.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}\vcpkg-bincache
@@ -130,6 +150,7 @@ jobs:
           & "$env:GITHUB_WORKSPACE\tools\ci\build-dwarfs-reader.ps1" `
             -Fixture "$env:RUNNER_TEMP\fixture\runtime-root-illegal-name.dwarfs" `
             -BridgeOutput "$env:GITHUB_WORKSPACE\IpaSimDwarfsReader.dll" `
+            -ReaderCacheRoot "$env:RUNNER_TEMP\dwarfs-reader-cache" `
             -Log "$env:RUNNER_TEMP\dwarfs-reader-smoke.log"
 
       - name: Publish reader failure

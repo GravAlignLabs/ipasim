@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Fixture,
     [Parameter(Mandatory = $true)][string]$BridgeOutput,
+    [Parameter(Mandatory = $true)][string]$ReaderCacheRoot,
     [Parameter(Mandatory = $true)][string]$Log
 )
 
@@ -31,6 +32,24 @@ function Invoke-Native {
 try {
     if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
         throw "DwarFS fixture is missing: $Fixture"
+    }
+
+    $CachedBridge = Join-Path $ReaderCacheRoot 'IpaSimDwarfsReader.dll'
+    $CachedSmoke = Join-Path $ReaderCacheRoot 'DwarfsRuntimeRootStoreSmoke.exe'
+    $CachedOutputs = @($CachedBridge, $CachedSmoke)
+    $CachedOutputCount = @($CachedOutputs | Where-Object {
+        Test-Path -LiteralPath $_ -PathType Leaf
+    }).Count
+    if ($CachedOutputCount -ne 0 -and $CachedOutputCount -ne $CachedOutputs.Count) {
+        throw "validated reader package cache is incomplete: $ReaderCacheRoot"
+    }
+    if ($CachedOutputCount -eq $CachedOutputs.Count) {
+        Write-Log "Validating cached DwarFS reader package: $ReaderCacheRoot"
+        Invoke-Native $CachedSmoke $CachedBridge $Fixture
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $BridgeOutput) | Out-Null
+        Copy-Item -LiteralPath $CachedBridge -Destination $BridgeOutput -Force
+        Write-Log "Validated cached DwarFS reader bridge: $BridgeOutput"
+        exit 0
     }
 
     $SourceArchive = Join-Path $env:RUNNER_TEMP "dwarfs-$Version.tar.xz"
@@ -139,7 +158,11 @@ try {
 
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $BridgeOutput) | Out-Null
     Copy-Item -LiteralPath $Bridge -Destination $BridgeOutput -Force
+    New-Item -ItemType Directory -Force -Path $ReaderCacheRoot | Out-Null
+    Copy-Item -LiteralPath $Bridge -Destination $CachedBridge -Force
+    Copy-Item -LiteralPath $Smoke -Destination $CachedSmoke -Force
     Write-Log "Validated DwarFS reader bridge: $BridgeOutput"
+    Write-Log "Saved validated DwarFS reader package for cache: $ReaderCacheRoot"
 }
 catch {
     ($_ | Format-List * -Force | Out-String) | Tee-Object -FilePath $Log -Append | Write-Host

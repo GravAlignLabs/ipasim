@@ -154,6 +154,8 @@ That is a successful **image-backed storage/loader proof** under the Priority 0 
 
 PR #78 therefore validates the complete DwarFS path directly. A nonzero probe is accepted only when it reaches a real unresolved-symbol plus chained-fixup loader boundary; image identity, reader bridge, open/read, malformed output, or earlier storage failures still publish the actionable diagnostic and fail normally. `_mach_absolute_time` is not implemented inside this storage PR merely to force the image-backed path farther.
 
+The Windows reader job caches the finished validated bridge plus its smoke executable under a key derived from the reader sources, build recipe, DwarFS source identity, vcpkg baseline, MSVC version, OS, and architecture. A cache hit still runs the Darwin-only pathname smoke before the DLL is published for acceptance; stale or incomplete packages fail explicitly.
+
 The existing tar/zstd workflow remains unchanged as the historical directory transport baseline, but it is not used as a full-namespace parity oracle after the NTFS limitation is observed. The static closure and host-import inventory preflights are still directory-backed; they must move onto `RuntimeRootStore` before an image backend can become the production RuntimeRoot source.
 
 ### Why the RuntimeRoot architecture changed
