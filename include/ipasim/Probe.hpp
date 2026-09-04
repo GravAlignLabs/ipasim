@@ -13,6 +13,13 @@
 // an invalid root. No Apple runtime binaries are supplied by ipaSim.
 IPASIM_API int ipaSim_setRuntimeRoot(const char *Path);
 
+// Configure one immutable DwarFS image as the RuntimeRoot source. The reader
+// bridge is supplied explicitly; ipaSim never guesses between a directory and
+// an image and never falls back to extraction. Returns 0 on success or a
+// non-zero value when the image/bridge cannot be opened or validated.
+IPASIM_API int ipaSim_setDwarfsRuntimeRoot(const char *ImagePath,
+                                           const char *ReaderBridgePath);
+
 // Returns 0 when ipaSim's DynamicLoader successfully loads the supplied Mach-O
 // image and its currently available dependencies. A non-zero result means the
 // loader stopped before execution; no UIKit/SwiftUI application launch occurs.

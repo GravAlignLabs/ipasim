@@ -131,7 +131,32 @@ cross-OS Actions cache
 
 The intended path has **no RuntimeRoot mount, full extraction, filename sanitization, path exclusion, or NTFS materialization fallback**.
 
-The existing zstd/directory path remains the trusted baseline until this image-backed path proves parity. The static closure and host-import inventory preflights are still directory-backed; they must move onto `RuntimeRootStore` before an image backend can become the production RuntimeRoot source.
+### Latest PR #78 checkpoint
+
+The full-image experiment has now crossed the storage boundary on real Windows. On the last pre-documentation head (`8e4236d9fc4530b630673a9bf880075ca14c1025`):
+
+- **Windows ARM64 Core**, **Synthetic iOS IPA on Windows**, and **Threaded ARM64 Guest Context** all passed;
+- the Darwin-only illegal-name DwarFS fixture passed;
+- the Windows in-image DwarFS reader smoke passed;
+- the complete pinned RuntimeRoot was restored as one verified **7,202,038,273-byte** DwarFS image;
+- the exact-head Windows probe loaded real Apple frameworks and dylibs directly from the image without mounting or extracting the RuntimeRoot; and
+- the first real loader stop was an unresolved `_mach_absolute_time` import while applying chained fixups for `/usr/lib/system/libsystem_sim_platform.dylib`.
+
+The relevant boundary is:
+
+```text
+Error: symbol _mach_absolute_time was not found for library ordinal 5.
+Error: cannot apply chained fixups for /usr/lib/system/libsystem_sim_platform.dylib:
+cannot resolve chained-fixup import _mach_absolute_time from library ordinal 5.
+```
+
+That is a successful **image-backed storage/loader proof** under the Priority 0 roadmap criterion: the complete image-backed path reached a later genuine compatibility boundary than Windows directory materialization can reach. An exact-head attempt to rebuild the complete trusted tar/zstd RuntimeRoot as an NTFS directory stopped before ipaSim with **15,339 hard-link creation errors** and **75 rejected link-path errors**. Treating that host-filesystem limitation as a DwarFS regression would make the acceptance gate impossible by construction.
+
+PR #78 therefore validates the complete DwarFS path directly. A nonzero probe is accepted only when it reaches a real unresolved-symbol plus chained-fixup loader boundary; image identity, reader bridge, open/read, malformed output, or earlier storage failures still publish the actionable diagnostic and fail normally. `_mach_absolute_time` is not implemented inside this storage PR merely to force the image-backed path farther.
+
+The Windows reader job caches the finished validated bridge plus its smoke executable under a key derived from the reader sources, build recipe, DwarFS source identity, vcpkg baseline, MSVC version, OS, and architecture. A cache hit still runs the Darwin-only pathname smoke before the DLL is published for acceptance; stale or incomplete packages fail explicitly.
+
+The existing tar/zstd workflow remains unchanged as the historical directory transport baseline, but it is not used as a full-namespace parity oracle after the NTFS limitation is observed. The static closure and host-import inventory preflights are still directory-backed; they must move onto `RuntimeRootStore` before an image backend can become the production RuntimeRoot source.
 
 ### Why the RuntimeRoot architecture changed
 
@@ -150,7 +175,7 @@ GitHub-hosted macOS RuntimeRoot
         -> Test-Ipa.cmd
 ```
 
-This is correct enough to remain the baseline, but it still asks Windows to reconstruct hundreds of thousands of filesystem objects before ipaSim can use the runtime.
+This remains the frozen historical transport baseline, but the complete archive is now known to contain Darwin names and link topology that Windows cannot reconstruct exactly as an NTFS directory. It remains useful evidence for the earlier workflow history; it is not a valid full-namespace parity oracle for the image-backed store.
 
 PR #74 tested a different idea: preserve the complete RuntimeRoot in one WIM and mount it read-only with DISM. The WIM itself was valid and independently verifiable, but the real Windows DISM mount failed with **Error 123** around 79% progress. No RuntimeRoot paths were excluded or renamed to force success. The result demonstrated that a valid single-file package is not enough if Windows must still project Apple's complete namespace as ordinary Windows paths.
 

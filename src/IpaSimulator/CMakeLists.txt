@@ -9,6 +9,11 @@ set (SOURCE_FILES
 
 if (NOT IPASIM_MODERN_CORE)
     list (APPEND SOURCE_FILES TextBlockStream.cpp)
+else ()
+    # The DwarFS RuntimeRoot adapter itself only uses Win32 LoadLibrary and the
+    # stable C bridge ABI. DwarFS C++23/vcpkg dependencies remain isolated in
+    # IpaSimDwarfsReader.dll and are not part of the normal ipaSim core build.
+    list (APPEND SOURCE_FILES DwarfsRuntimeRootStore.cpp)
 endif ()
 
 if (NOT DEFINED IPASIM_RUNTIME_ARCH)
