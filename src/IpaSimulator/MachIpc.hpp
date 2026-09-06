@@ -47,8 +47,8 @@ constexpr KernelReturn KernelSuccess = 0;
 constexpr KernelReturn KernelInvalidArgument = 4;
 constexpr KernelReturn KernelFailure = 5;
 constexpr KernelReturn KernelResourceShortage = 6;
+constexpr KernelReturn KernelMemoryError = 10;
 constexpr KernelReturn KernelInvalidCapability = 20;
-constexpr KernelReturn KernelInvalidHost = 22;
 constexpr KernelReturn KernelNotSupported = 46;
 
 constexpr MessageBits MessageBitsRemoteMask = 0x0000001fU;
@@ -107,11 +107,14 @@ PortName taskSelfPort();
 // can reject arbitrary Mach names rather than treating any non-zero integer as
 // authority.
 PortName hostSelfPort();
+bool isHostPort(PortName Name);
 
 // Create a Mach voucher from the public packed recipe-array ABI. The currently
 // implemented recipe subset is the manager-independent COPY/REMOVE behavior.
 // Manager-specific recipe commands fail KERN_NOT_SUPPORTED rather than creating
-// a voucher whose attributes do not mean what Darwin callers expect.
+// a voucher whose attributes do not mean what Darwin callers expect. This is the
+// kernel-side operation: the libsyscall/trap facade is responsible for Mach trap
+// error translation and guest copyin/copyout ordering.
 KernelReturn createVoucher(PortName Host, const void *Recipes,
                            std::uint32_t RecipeSize, PortName *Voucher);
 
