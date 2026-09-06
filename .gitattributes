@@ -67,3 +67,6 @@
 *.nib filter=lfs diff=lfs merge=lfs -text
 *.pfx filter=lfs diff=lfs merge=lfs -text
 COPYING.LIB -filter=lfs -diff=lfs -merge=lfs text
+
+# The compact, pinned reader package must be available in an ordinary checkout.
+deps/dwarfs-reader/windows-x64/reader.zip -text -filter -diff -merge

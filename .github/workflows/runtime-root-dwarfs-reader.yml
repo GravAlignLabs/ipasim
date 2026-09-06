@@ -1,9 +1,8 @@
 name: RuntimeRoot DwarFS Reader and Acceptance
 
 on:
-  # Pull-request caches are scoped to one PR merge ref and cannot accelerate a
-  # later PR. Relevant merges warm the same validated packages in the default
-  # branch scope, which GitHub permits subsequent PRs to restore.
+  # Keep the RuntimeRoot image in default-branch cache scope. The small reader
+  # DLL is a checked-in, verified dependency and never depends on this cache.
   push:
     branches:
       - master
@@ -14,6 +13,11 @@ on:
       - 'src/IpaSimulator/DwarfsRuntimeRootStore.cpp'
       - 'src/IpaSimulator/DwarfsRuntimeRootStoreSmoke.cpp'
       - 'src/IpaSimulator/dwarfs-reader/**'
+      - 'src/IpaSimulator/dwarfs-reader-smoke/**'
+      - 'deps/dwarfs-reader/**'
+      - 'tools/ci/prepare-dwarfs-reader.py'
+      - 'tools/ci/test-prebuilt-dwarfs-reader.ps1'
+      - 'tools/ci/tests/test_dwarfs_reader_package.py'
       - 'tools/ci/build-dwarfs-fixture.sh'
       - 'tools/ci/build-dwarfs-reader.ps1'
       - 'tools/ci/build-runtime-dwarfs.sh'
@@ -37,6 +41,11 @@ on:
       - 'src/IpaSimulator/StaticSymbolAuditLegacyDyldInfo.hpp'
       - 'src/IpaSimulator/StaticSymbolAuditSelfTest.hpp'
       - 'src/IpaSimulator/dwarfs-reader/**'
+      - 'src/IpaSimulator/dwarfs-reader-smoke/**'
+      - 'deps/dwarfs-reader/**'
+      - 'tools/ci/prepare-dwarfs-reader.py'
+      - 'tools/ci/test-prebuilt-dwarfs-reader.ps1'
+      - 'tools/ci/tests/test_dwarfs_reader_package.py'
       - 'tools/ci/build-dwarfs-fixture.sh'
       - 'tools/ci/build-dwarfs-reader.ps1'
       - 'tools/ci/build-runtime-dwarfs.sh'
@@ -63,9 +72,7 @@ env:
   RUNTIME_IOS_VERSION: '18.5'
   RUNTIME_IOS_BUILD: 22F77
   DWARFS_VERSION: '0.15.7'
-  DWARFS_SOURCE_SHA256: 363c7fdbf7bad490a6b8d63186da8643c1aeb17ca54cce1193d7b0ebc57bc6bd
   DWARFS_UNIVERSAL_SHA256: baa03026e7d2c195fdb78bf261cd7d20f620b20685f8a3e26162ba9d652b0d78
-  VCPKG_BASELINE: 62159a45e18f3a9ac0548628dcaf74fcb60c6ff9
   RUNTIME_DWARFS_CACHE_KEY: ipasim-github-runtime-macos15-xcode16.4-ios18.5-22F77-dwarfs0157-v1
 
 jobs:
@@ -120,7 +127,7 @@ jobs:
     needs:
       - build-fixture
     runs-on: windows-2025
-    timeout-minutes: 60
+    timeout-minutes: 15
     steps:
       - name: Check out ipaSim
         uses: actions/checkout@v4
@@ -138,42 +145,14 @@ jobs:
         with:
           arch: x64
 
-      - name: Capture reader toolchain identity
-        id: toolchain
-        shell: pwsh
-        run: |
-          $Compiler = (Get-Command cl.exe -ErrorAction Stop).Source
-          $Version = (Get-Item -LiteralPath $Compiler).VersionInfo.FileVersion
-          if ([string]::IsNullOrWhiteSpace($Version)) {
-            throw "MSVC file version is unavailable: $Compiler"
-          }
-          "msvc_version=$Version" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
-          Write-Host "MSVC compiler: $Compiler ($Version)"
-
-      - name: Restore validated DwarFS reader package cache
-        id: reader_cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}\dwarfs-reader-cache
-          key: dwarfs-reader-v1-${{ runner.os }}-x64-msvc-${{ steps.toolchain.outputs.msvc_version }}-dwarfs-${{ env.DWARFS_VERSION }}-${{ env.DWARFS_SOURCE_SHA256 }}-vcpkg-${{ env.VCPKG_BASELINE }}-${{ hashFiles('include/ipasim/DwarfsReaderBridgeApi.h', 'include/ipasim/DwarfsRuntimeRootStore.hpp', 'src/IpaSimulator/DwarfsReaderBridge.cpp', 'src/IpaSimulator/DwarfsRuntimeRootStore.cpp', 'src/IpaSimulator/DwarfsRuntimeRootStoreSmoke.cpp', 'src/IpaSimulator/dwarfs-reader/**', 'tools/ci/build-dwarfs-reader.ps1') }}
-
-      - name: Restore DwarFS vcpkg binary cache
-        if: steps.reader_cache.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}\vcpkg-bincache
-          key: dwarfs-v0.15.7-source-vcpkg-62159a45-x64-windows-static-v2
-          save-always: true
-
-      - name: Build and validate DwarFS reader bridge
+      - name: Verify pinned reader and build only the consumer smoke
         id: smoke
         continue-on-error: true
         shell: pwsh
         run: |
-          & "$env:GITHUB_WORKSPACE\tools\ci\build-dwarfs-reader.ps1" `
+          & "$env:GITHUB_WORKSPACE\tools\ci\test-prebuilt-dwarfs-reader.ps1" `
             -Fixture "$env:RUNNER_TEMP\fixture\runtime-root-illegal-name.dwarfs" `
             -BridgeOutput "$env:GITHUB_WORKSPACE\IpaSimDwarfsReader.dll" `
-            -ReaderCacheRoot "$env:RUNNER_TEMP\dwarfs-reader-cache" `
             -Log "$env:RUNNER_TEMP\dwarfs-reader-smoke.log"
 
       - name: Publish reader failure
@@ -201,6 +180,17 @@ jobs:
         if: steps.smoke.outcome == 'failure'
         shell: pwsh
         run: exit 1
+
+      - name: Publish reader reuse summary
+        if: steps.smoke.outcome == 'success'
+        shell: pwsh
+        run: |
+          @"
+          ## DwarFS reader reuse
+          - Source: checksum-pinned package in deps/dwarfs-reader (not Actions cache)
+          - Reader DLL/DwarFS/vcpkg compilation: none
+          - Current-source consumer smoke: passed
+          "@ | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
 
   resolve-core-tester:
     name: Resolve exact-head Windows Core tester
