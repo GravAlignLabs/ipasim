@@ -1,15 +1,23 @@
-// DarwinVoucherBridge.cpp: libkernel/libdispatch Mach-voucher callback ABI for
-// the Windows host bridge.
+// DarwinVoucherBridge.cpp: libkernel/libdispatch Mach-voucher semantics for the
+// Windows host bridge.
 //
 // Darwin libdispatch registers a process-lifetime table of voucher callbacks
 // through __libkernel_voucher_init. libkernel later forwards the public
 // voucher_mach_msg_* operations through that table. Keep the ARM64 LP64 table
 // layout exact and route guest function pointers through IpaSimLibrary's
 // backcaller rather than ever executing ARM64 addresses as x64 code.
+//
+// The same subsystem also owns host_create_mach_voucher: creation is backed by
+// IpaSimMachIpc's typed Mach namespace, validates the packed public recipe ABI,
+// implements manager-independent COPY/REMOVE semantics, and fails explicitly
+// for attribute-manager behavior that ipaSim does not yet model.
 
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+
+#include "DarwinGuestMemory.hpp"
+#include "MachIpc.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -35,6 +43,7 @@ static_assert(offsetof(DarwinLibkernelVoucherFunctions, VoucherMachMsgSet) == 8,
               "Darwin voucher callback table pointer offset changed");
 
 constexpr std::int32_t DarwinKernelSuccess = 0;
+constexpr std::uint32_t DarwinVoucherMaxRawRecipeArraySize = 5120;
 constexpr std::uint64_t DarwinVoucherVersionWithFillAux = 3;
 constexpr std::uintptr_t DarwinVoucherStateUnchanged =
     (std::numeric_limits<std::uintptr_t>::max)();
@@ -143,6 +152,35 @@ __declspec(dllexport) std::int32_t
 __libkernel_voucher_init(const DarwinLibkernelVoucherFunctions *Functions) {
   VoucherFunctions.store(Functions, std::memory_order_release);
   return DarwinKernelSuccess;
+}
+
+// arm64 libsyscall exposes mach_host_self() as a function returning a send right
+// to the host kernel object. Keep that object typed inside the same Mach namespace
+// used by task/message/voucher ports so host_create_mach_voucher can reject an
+// arbitrary Mach name with KERN_INVALID_HOST.
+__declspec(dllexport) std::uint32_t mach_host_self(void) {
+  return ipasim::mach::hostSelfPort();
+}
+
+// Public host_create_mach_voucher takes a packed byte recipe array and writes a
+// mach_voucher_t port name. Validate the entire guest-visible input/output spans
+// before native code dereferences them, then delegate object identity and recipe
+// semantics to IpaSimMachIpc. XNU caps the raw array at 5120 bytes.
+__declspec(dllexport) std::int32_t
+host_create_mach_voucher(std::uint32_t Host, const std::uint8_t *Recipes,
+                         std::uint32_t RecipeSize, std::uint32_t *Voucher) {
+  if (!Voucher ||
+      !ipasim::darwinmem::writableSpan(Voucher, sizeof(*Voucher)))
+    return ipasim::mach::KernelInvalidArgument;
+
+  *Voucher = ipasim::mach::PortNull;
+  if (RecipeSize > DarwinVoucherMaxRawRecipeArraySize)
+    return ipasim::mach::KernelInvalidArgument;
+  if (RecipeSize != 0 &&
+      !ipasim::darwinmem::readableSpan(Recipes, RecipeSize))
+    return ipasim::mach::KernelInvalidArgument;
+
+  return ipasim::mach::createVoucher(Host, Recipes, RecipeSize, Voucher);
 }
 
 __declspec(dllexport) std::int32_t voucher_mach_msg_set(void *Message) {
