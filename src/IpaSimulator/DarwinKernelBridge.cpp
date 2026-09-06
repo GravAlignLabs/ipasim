@@ -645,6 +645,16 @@ __declspec(dllexport) std::uint64_t mach_continuous_time(void) {
   return static_cast<std::uint64_t>(Ticks);
 }
 
+// Darwin's mach_absolute_time is monotonic uptime that excludes time spent in
+// system sleep. QueryUnbiasedInterruptTimePrecise has that Windows semantic and
+// reports the same 100ns tick units as QueryInterruptTimePrecise, so both Mach
+// clocks share one coherent mach_timebase_info conversion.
+__declspec(dllexport) std::uint64_t mach_absolute_time(void) {
+  ULONGLONG Ticks = 0;
+  QueryUnbiasedInterruptTimePrecise(&Ticks);
+  return static_cast<std::uint64_t>(Ticks);
+}
+
 __declspec(dllexport) std::int32_t
 mach_timebase_info(DarwinMachTimebaseInfo *Info) {
   if (!Info)
