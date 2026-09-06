@@ -43,6 +43,7 @@ static_assert(offsetof(DarwinLibkernelVoucherFunctions, VoucherMachMsgSet) == 8,
               "Darwin voucher callback table pointer offset changed");
 
 constexpr std::int32_t DarwinKernelSuccess = 0;
+constexpr std::int32_t DarwinMigArrayTooLarge = -307;
 constexpr std::uint32_t DarwinVoucherMaxRawRecipeArraySize = 5120;
 constexpr std::uint64_t DarwinVoucherVersionWithFillAux = 3;
 constexpr std::uintptr_t DarwinVoucherStateUnchanged =
@@ -156,31 +157,41 @@ __libkernel_voucher_init(const DarwinLibkernelVoucherFunctions *Functions) {
 
 // arm64 libsyscall exposes mach_host_self() as a function returning a send right
 // to the host kernel object. Keep that object typed inside the same Mach namespace
-// used by task/message/voucher ports so host_create_mach_voucher can reject an
-// arbitrary Mach name with KERN_INVALID_HOST.
+// used by task/message/voucher ports so the trap facade can reject arbitrary
+// names with MACH_SEND_INVALID_DEST, matching XNU's host-port conversion path.
 __declspec(dllexport) std::uint32_t mach_host_self(void) {
   return ipasim::mach::hostSelfPort();
 }
 
-// Public host_create_mach_voucher takes a packed byte recipe array and writes a
-// mach_voucher_t port name. Validate the entire guest-visible input/output spans
-// before native code dereferences them, then delegate object identity and recipe
-// semantics to IpaSimMachIpc. XNU caps the raw array at 5120 bytes.
+// Model libsyscall's host_create_mach_voucher -> Mach-trap contract, not merely
+// the deeper XNU host routine. Error ordering matters: host conversion happens
+// first, the trap rejects oversized/copyin-faulting recipes before construction,
+// and the voucher-name copyout happens only after successful construction.
+// Consequently failed calls do not eagerly overwrite the caller's output slot.
 __declspec(dllexport) std::int32_t
 host_create_mach_voucher(std::uint32_t Host, const std::uint8_t *Recipes,
                          std::uint32_t RecipeSize, std::uint32_t *Voucher) {
-  if (!Voucher ||
-      !ipasim::darwinmem::writableSpan(Voucher, sizeof(*Voucher)))
-    return ipasim::mach::KernelInvalidArgument;
-
-  *Voucher = ipasim::mach::PortNull;
+  if (Host != ipasim::mach::hostSelfPort())
+    return ipasim::mach::SendInvalidDestination;
   if (RecipeSize > DarwinVoucherMaxRawRecipeArraySize)
-    return ipasim::mach::KernelInvalidArgument;
+    return DarwinMigArrayTooLarge;
   if (RecipeSize != 0 &&
       !ipasim::darwinmem::readableSpan(Recipes, RecipeSize))
-    return ipasim::mach::KernelInvalidArgument;
+    return ipasim::mach::KernelMemoryError;
 
-  return ipasim::mach::createVoucher(Host, Recipes, RecipeSize, Voucher);
+  ipasim::mach::PortName NewVoucher = ipasim::mach::PortNull;
+  const ipasim::mach::KernelReturn Result =
+      ipasim::mach::createVoucher(Host, Recipes, RecipeSize, &NewVoucher);
+  if (Result == ipasim::mach::KernelInvalidHost)
+    return ipasim::mach::SendInvalidDestination;
+  if (Result != ipasim::mach::KernelSuccess)
+    return Result;
+
+  if (!Voucher ||
+      !ipasim::darwinmem::writableSpan(Voucher, sizeof(*Voucher)))
+    return ipasim::mach::KernelMemoryError;
+  *Voucher = NewVoucher;
+  return ipasim::mach::KernelSuccess;
 }
 
 __declspec(dllexport) std::int32_t voucher_mach_msg_set(void *Message) {
