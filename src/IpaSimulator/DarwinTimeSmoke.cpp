@@ -1,6 +1,6 @@
 // DarwinTimeSmoke.cpp: semantic validation for the Darwin __gettimeofday,
-// mach_continuous_time, mach_timebase_info, _os_alloc_once, and
-// _os_alloc_once_table host bridges. The smoke calls the built DLL exports
+// mach_absolute_time, mach_continuous_time, mach_timebase_info, _os_alloc_once,
+// and _os_alloc_once_table host bridges. The smoke calls the built DLL exports
 // directly so symbol-only shims cannot satisfy CI without real timing, once
 // allocation, and writable global table behavior.
 
@@ -54,8 +54,8 @@ constexpr std::uint64_t TableSentinel = 0xA55A5AA55AA55AA5ULL;
 constexpr std::size_t DarwinAllocOnceKeyMax = 100;
 constexpr int DarwinKernSuccess = 0;
 constexpr int DarwinKernInvalidArgument = 4;
-constexpr std::uint32_t ExpectedContinuousNumer = 100;
-constexpr std::uint32_t ExpectedContinuousDenom = 1;
+constexpr std::uint32_t ExpectedMachTimeNumer = 100;
+constexpr std::uint32_t ExpectedMachTimeDenom = 1;
 
 std::atomic<int> PrimaryInitCalls{0};
 std::atomic<int> SecondaryInitCalls{0};
@@ -216,15 +216,17 @@ int main(int ArgC, char **ArgV) {
     return 10;
   }
 
-  using MachContinuousTime = std::uint64_t (*)();
+  using MachClock = std::uint64_t (*)();
   using MachTimebaseInfo = int (*)(DarwinMachTimebaseInfo *);
-  auto ContinuousTime = reinterpret_cast<MachContinuousTime>(
+  auto AbsoluteTime = reinterpret_cast<MachClock>(
+      GetProcAddress(DarwinHost, "mach_absolute_time"));
+  auto ContinuousTime = reinterpret_cast<MachClock>(
       GetProcAddress(DarwinHost, "mach_continuous_time"));
   auto TimebaseInfo = reinterpret_cast<MachTimebaseInfo>(
       GetProcAddress(DarwinHost, "mach_timebase_info"));
-  if (!ContinuousTime || !TimebaseInfo) {
+  if (!AbsoluteTime || !ContinuousTime || !TimebaseInfo) {
     std::fprintf(stderr,
-                 "[darwin-time-smoke] continuous-time exports were missing\n");
+                 "[darwin-time-smoke] Mach time exports were missing\n");
     FreeLibrary(DarwinHost);
     return 24;
   }
@@ -238,14 +240,45 @@ int main(int ArgC, char **ArgV) {
 
   DarwinMachTimebaseInfo Timebase{};
   if (TimebaseInfo(&Timebase) != DarwinKernSuccess ||
-      Timebase.Numer != ExpectedContinuousNumer ||
-      Timebase.Denom != ExpectedContinuousDenom) {
+      Timebase.Numer != ExpectedMachTimeNumer ||
+      Timebase.Denom != ExpectedMachTimeDenom) {
     std::fprintf(stderr,
                  "[darwin-time-smoke] mach_timebase_info mismatch: got %u/%u, expected %u/%u\n",
-                 Timebase.Numer, Timebase.Denom, ExpectedContinuousNumer,
-                 ExpectedContinuousDenom);
+                 Timebase.Numer, Timebase.Denom, ExpectedMachTimeNumer,
+                 ExpectedMachTimeDenom);
     FreeLibrary(DarwinHost);
     return 26;
+  }
+
+  ULONGLONG AbsoluteBefore = 0;
+  ULONGLONG AbsoluteAfter = 0;
+  QueryUnbiasedInterruptTimePrecise(&AbsoluteBefore);
+  const std::uint64_t DarwinAbsolute = AbsoluteTime();
+  QueryUnbiasedInterruptTimePrecise(&AbsoluteAfter);
+  if (DarwinAbsolute < AbsoluteBefore || DarwinAbsolute > AbsoluteAfter) {
+    std::fprintf(stderr,
+                 "[darwin-time-smoke] mach_absolute_time does not track Windows unbiased interrupt time\n");
+    FreeLibrary(DarwinHost);
+    return 31;
+  }
+
+  Sleep(20);
+  const std::uint64_t DarwinAbsoluteLater = AbsoluteTime();
+  if (DarwinAbsoluteLater <= DarwinAbsolute) {
+    std::fprintf(stderr,
+                 "[darwin-time-smoke] mach_absolute_time was not monotonic\n");
+    FreeLibrary(DarwinHost);
+    return 32;
+  }
+
+  const std::uint64_t AbsoluteElapsedNs =
+      (DarwinAbsoluteLater - DarwinAbsolute) * Timebase.Numer /
+      Timebase.Denom;
+  if (AbsoluteElapsedNs < 1000000ULL) {
+    std::fprintf(stderr,
+                 "[darwin-time-smoke] absolute-time/timebase conversion did not advance plausibly\n");
+    FreeLibrary(DarwinHost);
+    return 33;
   }
 
   ULONGLONG ContinuousBefore = 0;
@@ -412,8 +445,9 @@ int main(int ArgC, char **ArgV) {
     return 23;
   }
 
-  std::printf("Darwin time + continuous time + alloc-once smoke passed: wall=%lld.%06d, continuous=%llu ticks, timebase=%u/%u, west=%d dst=%d.\n",
+  std::printf("Darwin time + absolute/continuous time + alloc-once smoke passed: wall=%lld.%06d, absolute=%llu ticks, continuous=%llu ticks, timebase=%u/%u, west=%d dst=%d.\n",
               static_cast<long long>(Time.Seconds), Time.Microseconds,
+              static_cast<unsigned long long>(DarwinAbsoluteLater),
               static_cast<unsigned long long>(DarwinContinuousLater),
               Timebase.Numer, Timebase.Denom, Timezone.MinutesWest,
               Timezone.DstTime);
