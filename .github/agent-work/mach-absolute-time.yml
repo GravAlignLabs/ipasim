@@ -1,0 +1,24 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT
+
+task: >-
+  Implement Darwin mach_absolute_time semantics on Windows as the next genuine RuntimeRoot compatibility boundary.
+
+scope:
+  - src/IpaSimulator/DarwinKernelBridge.cpp
+  - src/IpaSimulator/DarwinTimeSmoke.cpp
+  - src/IpaSimulator/SysTranslator.cpp
+  - src/IpaSimulator/DarwinHostBridge.def
+
+branch: feature/mach-absolute-time
+started_utc: 2026-09-06T16:59:26Z
+updated_utc: 2026-09-06T16:59:26Z
+base_sha: d17083c87d3d00efd5044274aa777faf776d3be9
+expected_pr: draft
+
+next_checkpoint: >-
+  Add a Windows-backed mach_absolute_time export, verify ABI routing and focused semantic smoke coverage, then run public CI through the RuntimeRoot DwarFS acceptance boundary.
+
+notes: >-
+  Target-neutral timing work only. No application-specific behavior, monkey patching, hidden success, or failure suppression.
