@@ -1,4 +1,4 @@
-// MachIpc.cpp: In-process Mach port/message core for ipaSim's Windows host.
+// MachIpc.cpp: In-process Mach port/message core for ipaSim's Windows host bridge.
 
 #include "MachIpc.hpp"
 
@@ -9,8 +9,10 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <process.h>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <windows.h>
 
@@ -23,6 +25,42 @@ constexpr MessageOption SupportedOptions = MachSendMsg | MachReceiveMsg |
                                            MachReceiveLarge | MachSendTimeout |
                                            MachReceiveTimeout;
 
+// Public mach_voucher_types.h defines a packed 16-byte recipe prefix followed
+// by content_size raw bytes. Keep the parser here, in the Mach object namespace,
+// so later extract/deallocate/transport boundaries can reuse the same voucher
+// identity instead of inventing another registry.
+#pragma pack(push, 1)
+struct VoucherRecipeHeader {
+  std::uint32_t Key;
+  std::uint32_t Command;
+  PortName PreviousVoucher;
+  std::uint32_t ContentSize;
+};
+#pragma pack(pop)
+static_assert(sizeof(VoucherRecipeHeader) == 16,
+              "Darwin mach_voucher_attr_recipe_data_t prefix must be 16 bytes");
+
+constexpr std::uint32_t VoucherKeyAll = 0xffffffffU;
+constexpr std::uint32_t VoucherKeyAtm = 1;
+constexpr std::uint32_t VoucherKeyImportance = 2;
+constexpr std::uint32_t VoucherKeyBank = 3;
+constexpr std::uint32_t VoucherKeyPthreadPriority = 4;
+constexpr std::uint32_t VoucherKeyUserData = 7;
+constexpr std::uint32_t VoucherKeyTest = 8;
+constexpr std::uint32_t VoucherCommandCopy = 1;
+constexpr std::uint32_t VoucherCommandRemove = 2;
+constexpr std::uint32_t MaximumRawVoucherRecipeSize = 5120;
+
+using VoucherAttributes =
+    std::unordered_map<std::uint32_t, std::vector<std::uint8_t>>;
+
+enum class PortKind {
+  Message,
+  Task,
+  Host,
+  Voucher,
+};
+
 struct Port {
   std::mutex Mutex;
   std::condition_variable MessageAvailable;
@@ -31,9 +69,15 @@ struct Port {
   std::uint32_t SendRights = 0;
   bool ReceiveRight = true;
   bool UserOwnsReceiveRight = true;
+  PortKind Kind = PortKind::Message;
   // A non-negative value marks a task port and preserves the task -> BSD
-  // process identity required by pid_for_task. Ordinary message ports remain -1.
+  // process identity required by pid_for_task. Ordinary objects remain -1.
   std::int32_t ProcessId = -1;
+  // Voucher attributes are immutable after publication. The first supported
+  // subset is intentionally manager-independent: COPY and REMOVE can preserve
+  // existing attribute state without pretending to implement an XNU resource
+  // manager. Manager-specific construction remains fail-closed.
+  VoucherAttributes Attributes;
 };
 
 struct PortNamespace {
@@ -65,7 +109,9 @@ std::shared_ptr<Port> findPort(PortName Name) {
 
 PortName allocatePort(bool UserOwnsReceiveRight,
                       std::uint32_t InitialSendRights,
-                      std::int32_t ProcessId = -1) {
+                      std::int32_t ProcessId = -1,
+                      PortKind Kind = PortKind::Message,
+                      VoucherAttributes Attributes = {}) {
   PortNamespace &Namespace = portNamespace();
   std::lock_guard<std::mutex> Guard(Namespace.Mutex);
 
@@ -77,10 +123,135 @@ PortName allocatePort(bool UserOwnsReceiveRight,
     auto NewPort = std::make_shared<Port>();
     NewPort->SendRights = InitialSendRights;
     NewPort->UserOwnsReceiveRight = UserOwnsReceiveRight;
+    NewPort->Kind = Kind;
     NewPort->ProcessId = ProcessId;
+    NewPort->Attributes = std::move(Attributes);
     Namespace.Ports.emplace(Candidate, std::move(NewPort));
     return Candidate;
   }
+}
+
+bool isLivePortOfKind(PortName Name, PortKind Kind) {
+  std::shared_ptr<Port> Target = findPort(Name);
+  if (!Target)
+    return false;
+  std::lock_guard<std::mutex> Guard(Target->Mutex);
+  return Target->ReceiveRight && Target->SendRights != 0 &&
+         Target->Kind == Kind;
+}
+
+KernelReturn snapshotVoucher(PortName Name, VoucherAttributes &Attributes) {
+  Attributes.clear();
+  if (Name == PortNull)
+    return KernelSuccess;
+
+  std::shared_ptr<Port> Target = findPort(Name);
+  if (!Target)
+    return KernelInvalidCapability;
+
+  std::lock_guard<std::mutex> Guard(Target->Mutex);
+  if (!Target->ReceiveRight || Target->SendRights == 0 ||
+      Target->Kind != PortKind::Voucher)
+    return KernelInvalidCapability;
+  Attributes = Target->Attributes;
+  return KernelSuccess;
+}
+
+bool isKnownVoucherKey(std::uint32_t Key) {
+  switch (Key) {
+  case VoucherKeyAll:
+  case VoucherKeyAtm:
+  case VoucherKeyImportance:
+  case VoucherKeyBank:
+  case VoucherKeyPthreadPriority:
+  case VoucherKeyUserData:
+  case VoucherKeyTest:
+    return true;
+  default:
+    return false;
+  }
+}
+
+KernelReturn applyVoucherRecipes(const std::uint8_t *Recipes,
+                                 std::uint32_t RecipeSize,
+                                 VoucherAttributes &Attributes) {
+  std::size_t Used = 0;
+  while (Used < RecipeSize) {
+    const std::size_t Remaining = static_cast<std::size_t>(RecipeSize) - Used;
+    if (Remaining < sizeof(VoucherRecipeHeader))
+      return KernelInvalidArgument;
+
+    VoucherRecipeHeader Recipe{};
+    std::memcpy(&Recipe, Recipes + Used, sizeof(Recipe));
+    if (Recipe.ContentSize > Remaining - sizeof(VoucherRecipeHeader))
+      return KernelInvalidArgument;
+    if (!isKnownVoucherKey(Recipe.Key))
+      return KernelInvalidArgument;
+
+    VoucherAttributes Previous;
+    const KernelReturn PreviousResult =
+        snapshotVoucher(Recipe.PreviousVoucher, Previous);
+    if (PreviousResult != KernelSuccess)
+      return PreviousResult;
+
+    switch (Recipe.Command) {
+    case VoucherCommandCopy:
+      if (Recipe.ContentSize != 0)
+        return KernelInvalidArgument;
+      // XNU treats a null previous voucher as an empty source and leaves the
+      // forming voucher unchanged for COPY.
+      if (Recipe.PreviousVoucher != PortNull) {
+        if (Recipe.Key == VoucherKeyAll) {
+          Attributes = Previous;
+        } else {
+          const auto It = Previous.find(Recipe.Key);
+          if (It == Previous.end())
+            Attributes.erase(Recipe.Key);
+          else
+            Attributes[Recipe.Key] = It->second;
+        }
+      }
+      break;
+
+    case VoucherCommandRemove:
+      if (Recipe.ContentSize != 0)
+        return KernelInvalidArgument;
+      if (Recipe.Key == VoucherKeyAll) {
+        if (Recipe.PreviousVoucher == PortNull) {
+          Attributes.clear();
+        } else {
+          for (auto It = Attributes.begin(); It != Attributes.end();) {
+            const auto PreviousIt = Previous.find(It->first);
+            if (PreviousIt != Previous.end() && PreviousIt->second == It->second)
+              It = Attributes.erase(It);
+            else
+              ++It;
+          }
+        }
+      } else if (Recipe.PreviousVoucher == PortNull) {
+        Attributes.erase(Recipe.Key);
+      } else {
+        const auto CurrentIt = Attributes.find(Recipe.Key);
+        const auto PreviousIt = Previous.find(Recipe.Key);
+        if (CurrentIt != Attributes.end() && PreviousIt != Previous.end() &&
+            CurrentIt->second == PreviousIt->second)
+          Attributes.erase(CurrentIt);
+      }
+      break;
+
+    default:
+      // AUTO_REDEEM, manager-specific BANK/IMPORTANCE/ATM commands, direct
+      // value-handle installation, and arbitrary manager commands require the
+      // corresponding XNU attribute-manager semantics. Do not manufacture an
+      // opaque attribute and report success: that would make subsequent
+      // voucher extraction/importance/accounting behavior observably false.
+      diagnostic("Mach voucher recipe requires an unsupported attribute manager");
+      return KernelNotSupported;
+    }
+
+    Used += sizeof(VoucherRecipeHeader) + Recipe.ContentSize;
+  }
+  return KernelSuccess;
 }
 
 MessageReturn sendInline(MessageHeader *Message, MessageOption Option,
@@ -295,8 +466,51 @@ PortName taskSelfPort() {
   // with one stable port-name entry whose receive right is owned by the
   // emulated kernel side, not by the user process. Preserve the real process id
   // on that port so pid_for_task observes the same task/process relationship.
-  static const PortName TaskSelf = allocatePort(false, 1, _getpid());
+  static const PortName TaskSelf =
+      allocatePort(false, 1, _getpid(), PortKind::Task);
   return TaskSelf;
+}
+
+PortName hostSelfPort() {
+  // mach_host_self() names a kernel host object, not a task or ordinary message
+  // receive right. Keep one stable send right in the same namespace so host_t
+  // consumers can validate capability type instead of accepting arbitrary names.
+  static const PortName HostSelf =
+      allocatePort(false, 1, -1, PortKind::Host);
+  return HostSelf;
+}
+
+KernelReturn createVoucher(PortName Host, const void *Recipes,
+                           std::uint32_t RecipeSize, PortName *Voucher) {
+  if (!Voucher)
+    return KernelInvalidArgument;
+  *Voucher = PortNull;
+
+  if (!isLivePortOfKind(Host, PortKind::Host))
+    return KernelInvalidHost;
+  if (RecipeSize > MaximumRawVoucherRecipeSize)
+    return KernelInvalidArgument;
+
+  // XNU's ipc_create_mach_voucher returns a null voucher with KERN_SUCCESS for
+  // an empty recipe list. Preserve that observable special case exactly.
+  if (RecipeSize == 0)
+    return KernelSuccess;
+  if (!Recipes)
+    return KernelInvalidArgument;
+
+  try {
+    VoucherAttributes Attributes;
+    const auto *Bytes = static_cast<const std::uint8_t *>(Recipes);
+    const KernelReturn Result = applyVoucherRecipes(Bytes, RecipeSize, Attributes);
+    if (Result != KernelSuccess)
+      return Result;
+
+    *Voucher = allocatePort(false, 1, -1, PortKind::Voucher,
+                            std::move(Attributes));
+    return *Voucher == PortNull ? KernelResourceShortage : KernelSuccess;
+  } catch (const std::bad_alloc &) {
+    return KernelResourceShortage;
+  }
 }
 
 KernelReturn pidForTask(PortName Task, std::int32_t *ProcessId) {
@@ -313,7 +527,8 @@ KernelReturn pidForTask(PortName Task, std::int32_t *ProcessId) {
     return KernelFailure;
 
   std::lock_guard<std::mutex> Guard(Target->Mutex);
-  if (!Target->ReceiveRight || Target->ProcessId < 0)
+  if (!Target->ReceiveRight || Target->Kind != PortKind::Task ||
+      Target->ProcessId < 0)
     return KernelFailure;
 
   *ProcessId = Target->ProcessId;
