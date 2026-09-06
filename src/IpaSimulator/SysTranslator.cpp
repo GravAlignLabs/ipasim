@@ -135,6 +135,7 @@ const DarwinHostCallSignature *findDarwinHostCallSignature(
       {"mknod", 3, true},
       {"open", 3, true},
       {"sigsuspend$NOCANCEL", 1, true},
+      {"mach_absolute_time", 0, true},
       {"mach_continuous_time", 0, true},
       {"mach_timebase_info", 1, true},
       {"mach_msg_overwrite", 9, true},
