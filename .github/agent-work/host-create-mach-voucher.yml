@@ -9,19 +9,19 @@ task: >-
 scope:
   - src/IpaSimulator/MachIpc.hpp
   - src/IpaSimulator/MachIpc.cpp
-  - src/IpaSimulator/DarwinHostBridge.cpp
-  - src/IpaSimulator/DarwinKernelSmoke.cpp
+  - src/IpaSimulator/DarwinVoucherBridge.cpp
+  - src/IpaSimulator/DarwinVoucherSmoke.cpp
   - src/IpaSimulator/SysTranslator.cpp
 
 branch: feature/host-create-mach-voucher
 started_utc: 2026-09-06T18:47:35Z
-updated_utc: 2026-09-06T18:49:00Z
+updated_utc: 2026-09-06T18:52:00Z
 base_sha: c45330ea11fb7617f3263327070ec7413dff9157
 expected_pr: draft-or-tbd
 
 next_checkpoint: >-
   Add validated Mach voucher creation backed by the shared Mach port namespace,
-  cover the Darwin ABI in the kernel smoke, and rerun RuntimeRoot acceptance.
+  cover the Darwin ABI in the voucher smoke, and rerun RuntimeRoot acceptance.
 
 notes: >-
   The complete RuntimeRoot now stops while applying libdispatch chained fixups
