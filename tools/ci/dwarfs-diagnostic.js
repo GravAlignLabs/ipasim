@@ -25,9 +25,33 @@ module.exports = async function run({ github, context, core }) {
   ).slice(-180);
   const excerpt = (useful.length ? useful : lines.slice(-180)).join('\n').slice(-20000);
 
+  let canonicalBoundary = '';
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const match = lines[index].match(/canonical boundary:\s*(.+)$/i);
+    if (match) {
+      canonicalBoundary = match[1].trim();
+      break;
+    }
+  }
+
+  const boundaryHeadline = canonicalBoundary
+    ? `\n**NEXT_BOUNDARY:** \`${canonicalBoundary.replace(/`/g, '\\`')}\`\n`
+    : '';
+
   const body = outcome === 'success'
-    ? `${marker}\n## RuntimeRoot DwarFS diagnostic\n\n✅ **${stage} passed** on \`${context.sha}\`.\n\n${successBody}`
+    ? `${marker}\n## RuntimeRoot DwarFS diagnostic\n${boundaryHeadline}\n✅ **${stage} passed** on \`${context.sha}\`.\n\n${successBody}`
     : `${marker}\n## RuntimeRoot DwarFS diagnostic\n\n❌ **${stage} failed** on \`${context.sha}\`.\n\n### Next actionable output\n\`\`\`text\n${excerpt}\n\`\`\`\n\nNo RuntimeRoot path is excluded, rewritten, mounted, or extracted to make this test pass. The workflow fails normally after publishing this diagnostic.`;
+
+  if (canonicalBoundary) {
+    try {
+      await core.summary
+        .addHeading('Next RuntimeRoot boundary', 2)
+        .addCodeBlock(canonicalBoundary, 'text')
+        .write();
+    } catch (error) {
+      core.warning(`Could not publish the one-glance RuntimeRoot boundary summary: ${error.message}`);
+    }
+  }
 
   const { owner, repo } = context.repo;
   const issue_number = context.issue.number;
