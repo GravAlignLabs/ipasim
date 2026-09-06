@@ -34,9 +34,11 @@ static_assert(sizeof(DarwinVoucherRecipe) == 16);
 
 constexpr std::int32_t KernelSuccess = 0;
 constexpr std::int32_t KernelInvalidArgument = 4;
+constexpr std::int32_t KernelMemoryError = 10;
 constexpr std::int32_t KernelInvalidCapability = 20;
-constexpr std::int32_t KernelInvalidHost = 22;
 constexpr std::int32_t KernelNotSupported = 46;
+constexpr std::int32_t MigArrayTooLarge = -307;
+constexpr std::int32_t MachSendInvalidDestination = 0x10000003;
 constexpr std::uint32_t VoucherKeyAll = 0xffffffffU;
 constexpr std::uint32_t VoucherKeyBank = 3;
 constexpr std::uint32_t VoucherCommandCopy = 1;
@@ -138,9 +140,10 @@ int main(int argc, char **argv) {
   }
 
   std::uint32_t Voucher = 0xfeedbeefU;
-  if (CreateVoucher(0, nullptr, 0, &Voucher) != KernelInvalidHost || Voucher != 0) {
+  if (CreateVoucher(0, nullptr, 0, &Voucher) != MachSendInvalidDestination ||
+      Voucher != 0xfeedbeefU) {
     FreeLibrary(Host);
-    return fail("host_create_mach_voucher accepted a non-host Mach name");
+    return fail("invalid host did not return MACH_SEND_INVALID_DEST without copyout");
   }
 
   Voucher = 0xfeedbeefU;
@@ -186,9 +189,9 @@ int main(int argc, char **argv) {
   if (CreateVoucher(HostPort,
                     reinterpret_cast<const std::uint8_t *>(&InvalidPrevious),
                     sizeof(InvalidPrevious), &Voucher) != KernelInvalidCapability ||
-      Voucher != 0) {
+      Voucher != 0xfeedbeefU) {
     FreeLibrary(Host);
-    return fail("invalid previous voucher did not fail KERN_INVALID_CAPABILITY");
+    return fail("invalid previous voucher did not fail without copyout");
   }
 
   DarwinVoucherRecipe Malformed = CopyEmpty;
@@ -197,9 +200,9 @@ int main(int argc, char **argv) {
   if (CreateVoucher(HostPort,
                     reinterpret_cast<const std::uint8_t *>(&Malformed),
                     sizeof(Malformed), &Voucher) != KernelInvalidArgument ||
-      Voucher != 0) {
+      Voucher != 0xfeedbeefU) {
     FreeLibrary(Host);
-    return fail("truncated voucher recipe content was not rejected");
+    return fail("truncated voucher recipe content was not rejected without copyout");
   }
 
   DarwinVoucherRecipe ManagerSpecific{
@@ -212,7 +215,7 @@ int main(int argc, char **argv) {
   if (CreateVoucher(HostPort,
                     reinterpret_cast<const std::uint8_t *>(&ManagerSpecific),
                     sizeof(ManagerSpecific), &Voucher) != KernelNotSupported ||
-      Voucher != 0) {
+      Voucher != 0xfeedbeefU) {
     FreeLibrary(Host);
     return fail("unsupported voucher attribute-manager command did not fail closed");
   }
@@ -220,23 +223,22 @@ int main(int argc, char **argv) {
   std::uint8_t OversizedRecipes[5121]{};
   Voucher = 0xfeedbeefU;
   if (CreateVoucher(HostPort, OversizedRecipes, sizeof(OversizedRecipes),
-                    &Voucher) != KernelInvalidArgument ||
-      Voucher != 0) {
+                    &Voucher) != MigArrayTooLarge ||
+      Voucher != 0xfeedbeefU) {
     FreeLibrary(Host);
-    return fail("oversized raw voucher recipe array was not rejected");
+    return fail("oversized raw voucher recipe did not return MIG_ARRAY_TOO_LARGE");
   }
 
   Voucher = 0xfeedbeefU;
   if (CreateVoucher(HostPort, reinterpret_cast<const std::uint8_t *>(1),
-                    sizeof(DarwinVoucherRecipe), &Voucher) !=
-          KernelInvalidArgument ||
-      Voucher != 0) {
+                    sizeof(DarwinVoucherRecipe), &Voucher) != KernelMemoryError ||
+      Voucher != 0xfeedbeefU) {
     FreeLibrary(Host);
-    return fail("unreadable guest voucher recipe pointer was not rejected");
+    return fail("unreadable guest voucher recipe did not return KERN_MEMORY_ERROR");
   }
-  if (CreateVoucher(HostPort, nullptr, 0, nullptr) != KernelInvalidArgument) {
+  if (CreateVoucher(HostPort, nullptr, 0, nullptr) != KernelMemoryError) {
     FreeLibrary(Host);
-    return fail("null voucher output pointer was not rejected");
+    return fail("null voucher output did not return KERN_MEMORY_ERROR");
   }
 
   DarwinLibkernelVoucherFunctions Version1{
