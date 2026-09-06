@@ -1,0 +1,28 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT
+
+task: >-
+  Implement the first real Mach voucher creation boundary required by modern
+  libdispatch on the Windows ARM64 host bridge.
+
+scope:
+  - src/IpaSimulator/MachIpc.hpp
+  - src/IpaSimulator/MachIpc.cpp
+  - src/IpaSimulator/DarwinKernelBridge.cpp
+  - src/IpaSimulator/DarwinKernelSmoke.cpp
+  - src/IpaSimulator/SysTranslator.cpp
+
+branch: feature/host-create-mach-voucher
+started_utc: 2026-09-06T18:47:35Z
+updated_utc: 2026-09-06T18:47:35Z
+base_sha: c45330ea11fb7617f3263327070ec7413dff9157
+expected_pr: draft-or-tbd
+
+next_checkpoint: >-
+  Add validated Mach voucher creation backed by the shared Mach port namespace,
+  cover the Darwin ABI in the kernel smoke, and rerun RuntimeRoot acceptance.
+
+notes: >-
+  The complete RuntimeRoot now stops while applying libdispatch chained fixups
+  because _host_create_mach_voucher is unresolved.
