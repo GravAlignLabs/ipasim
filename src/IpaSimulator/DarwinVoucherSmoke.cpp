@@ -1,5 +1,5 @@
 // DarwinVoucherSmoke.cpp: semantic checks for the libkernel/libdispatch
-// voucher callback registration boundary.
+// voucher callback registration and Mach voucher creation boundaries.
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -21,6 +21,27 @@ struct DarwinLibkernelVoucherFunctions {
   void *VoucherMachMsgFillAux;
 };
 static_assert(sizeof(DarwinLibkernelVoucherFunctions) == 48);
+
+#pragma pack(push, 1)
+struct DarwinVoucherRecipe {
+  std::uint32_t Key;
+  std::uint32_t Command;
+  std::uint32_t PreviousVoucher;
+  std::uint32_t ContentSize;
+};
+#pragma pack(pop)
+static_assert(sizeof(DarwinVoucherRecipe) == 16);
+
+constexpr std::int32_t KernelSuccess = 0;
+constexpr std::int32_t KernelInvalidArgument = 4;
+constexpr std::int32_t KernelMemoryError = 10;
+constexpr std::int32_t KernelInvalidCapability = 20;
+constexpr std::int32_t KernelNotSupported = 46;
+constexpr std::int32_t MigArrayTooLarge = -307;
+constexpr std::int32_t MachSendInvalidDestination = 0x10000003;
+constexpr std::uint32_t VoucherKeyAll = 0xffffffffU;
+constexpr std::uint32_t VoucherKeyBank = 3;
+constexpr std::uint32_t VoucherCommandCopy = 1;
 
 int SetCalls = 0;
 int ClearCalls = 0;
@@ -84,6 +105,9 @@ int main(int argc, char **argv) {
     return fail("could not load IpaSimDarwinHost.dll");
 
   using Init = std::int32_t (*)(const DarwinLibkernelVoucherFunctions *);
+  using MachHostSelf = std::uint32_t (*)();
+  using HostCreateVoucher = std::int32_t (*)(std::uint32_t, const std::uint8_t *,
+                                              std::uint32_t, std::uint32_t *);
   using Set = std::int32_t (*)(void *);
   using Clear = void (*)(void *);
   using Adopt = void *(*)(void *);
@@ -92,6 +116,9 @@ int main(int argc, char **argv) {
   using FillAuxSupported = std::int32_t (*)();
 
   auto Initialize = reinterpret_cast<Init>(requireExport(Host, "__libkernel_voucher_init"));
+  auto GetHost = reinterpret_cast<MachHostSelf>(requireExport(Host, "mach_host_self"));
+  auto CreateVoucher = reinterpret_cast<HostCreateVoucher>(
+      requireExport(Host, "host_create_mach_voucher"));
   auto SetVoucher = reinterpret_cast<Set>(requireExport(Host, "voucher_mach_msg_set"));
   auto ClearVoucher = reinterpret_cast<Clear>(requireExport(Host, "voucher_mach_msg_clear"));
   auto AdoptVoucher = reinterpret_cast<Adopt>(requireExport(Host, "voucher_mach_msg_adopt"));
@@ -99,10 +126,119 @@ int main(int argc, char **argv) {
   auto FillVoucherAux = reinterpret_cast<FillAux>(requireExport(Host, "voucher_mach_msg_fill_aux"));
   auto IsFillAuxSupported = reinterpret_cast<FillAuxSupported>(
       requireExport(Host, "voucher_mach_msg_fill_aux_supported"));
-  if (!Initialize || !SetVoucher || !ClearVoucher || !AdoptVoucher ||
-      !RevertVoucher || !FillVoucherAux || !IsFillAuxSupported) {
+  if (!Initialize || !GetHost || !CreateVoucher || !SetVoucher ||
+      !ClearVoucher || !AdoptVoucher || !RevertVoucher || !FillVoucherAux ||
+      !IsFillAuxSupported) {
     FreeLibrary(Host);
     return 1;
+  }
+
+  const std::uint32_t HostPort = GetHost();
+  if (HostPort == 0 || GetHost() != HostPort) {
+    FreeLibrary(Host);
+    return fail("mach_host_self did not return one stable host port name");
+  }
+
+  std::uint32_t Voucher = 0xfeedbeefU;
+  if (CreateVoucher(0, nullptr, 0, &Voucher) != MachSendInvalidDestination ||
+      Voucher != 0xfeedbeefU) {
+    FreeLibrary(Host);
+    return fail("invalid host did not return MACH_SEND_INVALID_DEST without copyout");
+  }
+
+  Voucher = 0xfeedbeefU;
+  if (CreateVoucher(HostPort, nullptr, 0, &Voucher) != KernelSuccess ||
+      Voucher != 0) {
+    FreeLibrary(Host);
+    return fail("empty voucher recipe did not preserve XNU null-voucher success");
+  }
+
+  DarwinVoucherRecipe CopyEmpty{
+      VoucherKeyAll,
+      VoucherCommandCopy,
+      0,
+      0,
+  };
+  if (CreateVoucher(HostPort,
+                    reinterpret_cast<const std::uint8_t *>(&CopyEmpty),
+                    sizeof(CopyEmpty), &Voucher) != KernelSuccess ||
+      Voucher == 0) {
+    FreeLibrary(Host);
+    return fail("COPY recipe did not create a real voucher port identity");
+  }
+  const std::uint32_t FirstVoucher = Voucher;
+
+  DarwinVoucherRecipe CopyExisting{
+      VoucherKeyAll,
+      VoucherCommandCopy,
+      FirstVoucher,
+      0,
+  };
+  Voucher = 0;
+  if (CreateVoucher(HostPort,
+                    reinterpret_cast<const std::uint8_t *>(&CopyExisting),
+                    sizeof(CopyExisting), &Voucher) != KernelSuccess ||
+      Voucher == 0) {
+    FreeLibrary(Host);
+    return fail("COPY recipe did not resolve a previous voucher capability");
+  }
+
+  DarwinVoucherRecipe InvalidPrevious = CopyExisting;
+  InvalidPrevious.PreviousVoucher = 0xfffffff0U;
+  Voucher = 0xfeedbeefU;
+  if (CreateVoucher(HostPort,
+                    reinterpret_cast<const std::uint8_t *>(&InvalidPrevious),
+                    sizeof(InvalidPrevious), &Voucher) != KernelInvalidCapability ||
+      Voucher != 0xfeedbeefU) {
+    FreeLibrary(Host);
+    return fail("invalid previous voucher did not fail without copyout");
+  }
+
+  DarwinVoucherRecipe Malformed = CopyEmpty;
+  Malformed.ContentSize = 1;
+  Voucher = 0xfeedbeefU;
+  if (CreateVoucher(HostPort,
+                    reinterpret_cast<const std::uint8_t *>(&Malformed),
+                    sizeof(Malformed), &Voucher) != KernelInvalidArgument ||
+      Voucher != 0xfeedbeefU) {
+    FreeLibrary(Host);
+    return fail("truncated voucher recipe content was not rejected without copyout");
+  }
+
+  DarwinVoucherRecipe ManagerSpecific{
+      VoucherKeyBank,
+      0x7fffffffU,
+      0,
+      0,
+  };
+  Voucher = 0xfeedbeefU;
+  if (CreateVoucher(HostPort,
+                    reinterpret_cast<const std::uint8_t *>(&ManagerSpecific),
+                    sizeof(ManagerSpecific), &Voucher) != KernelNotSupported ||
+      Voucher != 0xfeedbeefU) {
+    FreeLibrary(Host);
+    return fail("unsupported voucher attribute-manager command did not fail closed");
+  }
+
+  std::uint8_t OversizedRecipes[5121]{};
+  Voucher = 0xfeedbeefU;
+  if (CreateVoucher(HostPort, OversizedRecipes, sizeof(OversizedRecipes),
+                    &Voucher) != MigArrayTooLarge ||
+      Voucher != 0xfeedbeefU) {
+    FreeLibrary(Host);
+    return fail("oversized raw voucher recipe did not return MIG_ARRAY_TOO_LARGE");
+  }
+
+  Voucher = 0xfeedbeefU;
+  if (CreateVoucher(HostPort, reinterpret_cast<const std::uint8_t *>(1),
+                    sizeof(DarwinVoucherRecipe), &Voucher) != KernelMemoryError ||
+      Voucher != 0xfeedbeefU) {
+    FreeLibrary(Host);
+    return fail("unreadable guest voucher recipe did not return KERN_MEMORY_ERROR");
+  }
+  if (CreateVoucher(HostPort, nullptr, 0, nullptr) != KernelMemoryError) {
+    FreeLibrary(Host);
+    return fail("null voucher output did not return KERN_MEMORY_ERROR");
   }
 
   DarwinLibkernelVoucherFunctions Version1{
@@ -155,7 +291,7 @@ int main(int argc, char **argv) {
     return fail("version-3 fill_aux callback did not preserve arguments/return");
   }
 
-  std::printf("[darwin-voucher-smoke] callback registration semantics passed\n");
+  std::printf("[darwin-voucher-smoke] creation/callback semantics passed\n");
   FreeLibrary(Host);
   return 0;
 }

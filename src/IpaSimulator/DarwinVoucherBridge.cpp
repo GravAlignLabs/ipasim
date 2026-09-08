@@ -1,15 +1,23 @@
-// DarwinVoucherBridge.cpp: libkernel/libdispatch Mach-voucher callback ABI for
-// the Windows host bridge.
+// DarwinVoucherBridge.cpp: libkernel/libdispatch Mach-voucher semantics for the
+// Windows host bridge.
 //
 // Darwin libdispatch registers a process-lifetime table of voucher callbacks
 // through __libkernel_voucher_init. libkernel later forwards the public
 // voucher_mach_msg_* operations through that table. Keep the ARM64 LP64 table
 // layout exact and route guest function pointers through IpaSimLibrary's
 // backcaller rather than ever executing ARM64 addresses as x64 code.
+//
+// The same subsystem also owns host_create_mach_voucher: creation is backed by
+// IpaSimMachIpc's typed Mach namespace, validates the packed public recipe ABI,
+// implements manager-independent COPY/REMOVE semantics, and fails explicitly
+// for attribute-manager behavior that ipaSim does not yet model.
 
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+
+#include "DarwinGuestMemory.hpp"
+#include "MachIpc.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -35,6 +43,8 @@ static_assert(offsetof(DarwinLibkernelVoucherFunctions, VoucherMachMsgSet) == 8,
               "Darwin voucher callback table pointer offset changed");
 
 constexpr std::int32_t DarwinKernelSuccess = 0;
+constexpr std::int32_t DarwinMigArrayTooLarge = -307;
+constexpr std::uint32_t DarwinVoucherMaxRawRecipeArraySize = 5120;
 constexpr std::uint64_t DarwinVoucherVersionWithFillAux = 3;
 constexpr std::uintptr_t DarwinVoucherStateUnchanged =
     (std::numeric_limits<std::uintptr_t>::max)();
@@ -143,6 +153,45 @@ __declspec(dllexport) std::int32_t
 __libkernel_voucher_init(const DarwinLibkernelVoucherFunctions *Functions) {
   VoucherFunctions.store(Functions, std::memory_order_release);
   return DarwinKernelSuccess;
+}
+
+// arm64 libsyscall exposes mach_host_self() as a function returning a send right
+// to the host kernel object. Keep that object typed inside the same Mach namespace
+// used by task/message/voucher ports so the trap facade can reject arbitrary
+// names with MACH_SEND_INVALID_DEST, matching XNU's host-port conversion path.
+__declspec(dllexport) std::uint32_t mach_host_self(void) {
+  return ipasim::mach::hostSelfPort();
+}
+
+// Model libsyscall's host_create_mach_voucher -> Mach-trap contract, not merely
+// the deeper XNU host routine. Error ordering matters: host conversion happens
+// first, the trap rejects oversized/copyin-faulting recipes before construction,
+// and the voucher-name copyout happens only after successful construction.
+// Consequently failed calls do not eagerly overwrite the caller's output slot.
+__declspec(dllexport) std::int32_t
+host_create_mach_voucher(std::uint32_t Host, const std::uint8_t *Recipes,
+                         std::uint32_t RecipeSize, std::uint32_t *Voucher) {
+  if (Host != ipasim::mach::hostSelfPort())
+    return ipasim::mach::SendInvalidDestination;
+  if (RecipeSize > DarwinVoucherMaxRawRecipeArraySize)
+    return DarwinMigArrayTooLarge;
+  if (RecipeSize != 0 &&
+      !ipasim::darwinmem::readableSpan(Recipes, RecipeSize))
+    return ipasim::mach::KernelMemoryError;
+
+  ipasim::mach::PortName NewVoucher = ipasim::mach::PortNull;
+  const ipasim::mach::KernelReturn Result =
+      ipasim::mach::createVoucher(Host, Recipes, RecipeSize, &NewVoucher);
+  if (Result == ipasim::mach::KernelInvalidHost)
+    return ipasim::mach::SendInvalidDestination;
+  if (Result != ipasim::mach::KernelSuccess)
+    return Result;
+
+  if (!Voucher ||
+      !ipasim::darwinmem::writableSpan(Voucher, sizeof(*Voucher)))
+    return ipasim::mach::KernelMemoryError;
+  *Voucher = NewVoucher;
+  return ipasim::mach::KernelSuccess;
 }
 
 __declspec(dllexport) std::int32_t voucher_mach_msg_set(void *Message) {
