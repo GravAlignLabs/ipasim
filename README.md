@@ -2,7 +2,7 @@
 
 > **Active fork: modern ARM64 iOS compatibility on Windows**
 >
-> This repository is a fork of [`ipasimulator/ipasim`](https://github.com/ipasimulator/ipasim). Jan Joneš's original research remains the foundation of the project. This fork is extending ipaSim toward modern 64-bit ARM64 iOS applications while keeping unsupported behavior explicit and diagnosable.
+> This repository is a fork of [`ipasimulator/ipasim`](https://github.com/ipasimulator/ipasim). Jan Joneš's original research remains the foundation of the project. This fork is extending ipaSim toward modern 64-bit ARM64 iOS applications while keeping unsupported behavior explicit, target-neutral, and diagnosable.
 
 [![Synthetic iOS IPA on Windows](https://github.com/GravAlignLabs/ipasim/actions/workflows/synthetic-hello-ipa.yml/badge.svg?branch=master)](https://github.com/GravAlignLabs/ipasim/actions/workflows/synthetic-hello-ipa.yml)
 [![Windows ARM64 Core](https://github.com/GravAlignLabs/ipasim/actions/workflows/windows-arm64-core.yml/badge.svg?branch=master)](https://github.com/GravAlignLabs/ipasim/actions/workflows/windows-arm64-core.yml)
@@ -59,11 +59,15 @@ The SDK/compiler side may establish **how** a function is represented and called
 
 If you are picking this project up in a new AI chat or as a new contributor, **start here**, then read [`AGENTS.md`](AGENTS.md), [`ROADMAP.md`](ROADMAP.md), and the active coordination claims under [`.github/agent-work/`](.github/agent-work/). Before editing `src/IpaSimulator/`, also read [`src/IpaSimulator/AGENTS.md`](src/IpaSimulator/AGENTS.md).
 
-### Current merged checkpoint — September 4, 2026
+Treat this README as the current merged-runtime handoff. `ROADMAP.md` is a dependency-oriented subsystem backlog rather than a fixed execution order; the first genuine non-cascading runtime failure remains authoritative even when older roadmap checkpoint text has not yet been refreshed.
 
-**Latest merged compatibility/storage checkpoint: [PR #78 — Run full RuntimeRoot directly from DwarFS on Windows](https://github.com/GravAlignLabs/ipasim/pull/78).**
+## Current merged checkpoint — September 19, 2026
 
-The recent progression is:
+**Latest merged runtime checkpoint: [PR #83 — Implement Mach voucher creation semantics](https://github.com/GravAlignLabs/ipasim/pull/83).**
+
+PR #83 merged on September 8, 2026. The current `master` head after the corresponding green Windows tester snapshot is `eeab11f8781e4cf1911ab2820b77c20fba539156`.
+
+The current evidence-driven progression is:
 
 - [PR #58](https://github.com/GravAlignLabs/ipasim/pull/58) — complete pinned `iPhoneOS16.5.sdk` mechanical compatibility preflight;
 - [PR #59](https://github.com/GravAlignLabs/ipasim/pull/59) — deterministic semantic-migration planning from real host exports plus generated adapters;
@@ -78,23 +82,54 @@ The recent progression is:
 - [PR #68](https://github.com/GravAlignLabs/ipasim/pull/68) — pinned public third-party AWS Device Farm IPA acceptance;
 - [PR #69](https://github.com/GravAlignLabs/ipasim/pull/69) — GitHub-hosted iOS simulator RuntimeRoot discovery for trusted acceptance;
 - [PR #70](https://github.com/GravAlignLabs/ipasim/pull/70) — direct `tar + zstd -1` RuntimeRoot cache;
-- [PR #73](https://github.com/GravAlignLabs/ipasim/pull/73) — correct cross-OS RuntimeRoot cache identity by using the same repository-relative cache path on macOS and Windows;
+- [PR #73](https://github.com/GravAlignLabs/ipasim/pull/73) — correct cross-OS RuntimeRoot cache identity;
 - [PR #74](https://github.com/GravAlignLabs/ipasim/pull/74) — isolated read-only WIM RuntimeRoot experiment;
-- [PR #75](https://github.com/GravAlignLabs/ipasim/pull/75) — keep auxiliary WIM diagnostic publishing non-blocking while preserving real acceptance failure;
-- [PR #76](https://github.com/GravAlignLabs/ipasim/pull/76) — decouple RuntimeRoot loading from Windows file paths with an immutable `RuntimeRootStore` byte-source boundary; and
-- [PR #77](https://github.com/GravAlignLabs/ipasim/pull/77) — prove Windows can read an NTFS-unrepresentable Darwin pathname directly from a DwarFS image without mounting, extracting, renaming, or falling back; and
-- [PR #78](https://github.com/GravAlignLabs/ipasim/pull/78) — build and verify the complete iOS 18.5 RuntimeRoot as one DwarFS image, then feed the exact-head loader directly from that image on Windows.
+- [PR #75](https://github.com/GravAlignLabs/ipasim/pull/75) — keep WIM diagnostic publishing secondary to the real acceptance result;
+- [PR #76](https://github.com/GravAlignLabs/ipasim/pull/76) — introduce the immutable `RuntimeRootStore` byte-source boundary;
+- [PR #77](https://github.com/GravAlignLabs/ipasim/pull/77) — prove an NTFS-unrepresentable Darwin pathname can be read directly from DwarFS on Windows;
+- [PR #78](https://github.com/GravAlignLabs/ipasim/pull/78) — run the complete pinned iOS 18.5 RuntimeRoot directly from one DwarFS image on Windows;
+- [PR #79](https://github.com/GravAlignLabs/ipasim/pull/79) — move static dependency closure and host-import preflights onto the same configured `RuntimeRootStore` used by the loader;
+- [PR #80](https://github.com/GravAlignLabs/ipasim/pull/80) — promote the validated Windows DwarFS reader package into the repository so acceptance no longer rebuilds it on cache misses;
+- [PR #81](https://github.com/GravAlignLabs/ipasim/pull/81) — implement Darwin `mach_absolute_time` with a real Windows-backed monotonic uptime source; and
+- [PR #83](https://github.com/GravAlignLabs/ipasim/pull/83) — implement typed Mach host identity and `host_create_mach_voucher` semantics, while folding in the one-glance RuntimeRoot boundary reporting developed in PR #82.
 
-PR #78's final head preserved the public Core, Synthetic IPA, Threaded ARM64, DwarFS-reader, full-image, and exact-head loader acceptance checks before merge.
+[PR #82](https://github.com/GravAlignLabs/ipasim/pull/82) was closed without a separate merge because its `NEXT_BOUNDARY` diagnostic work was incorporated into PR #83.
 
-[`ROADMAP.md`](ROADMAP.md) is a **dependency-oriented subsystem backlog**, not an unconditional execution order. **The first genuine non-cascading runtime failure may override the nominal priority numbering.**
+### Current state at a glance
 
-## Immediate objective: complete RuntimeRootStore read path
+| Area | Current merged state |
+| --- | --- |
+| Complete RuntimeRoot storage | One verified DwarFS image, read directly on Windows without mounting or extracting the RuntimeRoot tree |
+| RuntimeRoot preflights | Static closure, host-import inventory, and loader all use the same explicitly configured `RuntimeRootStore` |
+| DwarFS reader | Pinned validated Windows reader package is committed under `deps/dwarfs-reader/`; acceptance does not silently rebuild it |
+| Timing | `mach_absolute_time` is implemented with `QueryUnbiasedInterruptTimePrecise`; `mach_continuous_time` retains its separate continuous-time path |
+| Mach host identity | `mach_host_self` returns a stable typed host port in the shared Mach namespace |
+| Mach vouchers | `host_create_mach_voucher` validates XNU-style recipe/copyout behavior and implements manager-independent `COPY` / `REMOVE` semantics |
+| CI diagnostics | The persistent RuntimeRoot PR diagnostic and Actions summary surface a canonical `NEXT_BOUNDARY:` line while preserving real failure behavior |
+| Current next boundary | `_host_get_special_port` while applying chained fixups for `/usr/lib/system/libdispatch.dylib` |
 
-PR #78 proved that the complete pinned GitHub-hosted iOS 18.5 RuntimeRoot can remain one DwarFS image and feed ipaSim's real loader directly on Windows:
+## Immediate objective: the `_host_get_special_port` Mach boundary
+
+PR #83's exact-head RuntimeRoot acceptance advanced beyond `_mach_absolute_time` and `_host_create_mach_voucher` to the next genuine loader stop:
 
 ```text
-GitHub macOS runner
+Error: symbol _host_get_special_port was not found for library ordinal 3.
+Error: cannot apply chained fixups for /usr/lib/system/libdispatch.dylib:
+cannot resolve chained-fixup import _host_get_special_port from library ordinal 3.
+```
+
+Full RuntimeRoot DwarFS storage acceptance passed on the PR #83 merge-test commit `f14f4c5be53b1e21272f0bc3ae9487b3531ff390` before reporting that boundary. The complete pinned iOS 18.5 (22F77) RuntimeRoot remained one image; the same configured store fed static closure, host-import inventory, and the real loader.
+
+The next semantic increment should therefore investigate `_host_get_special_port` as part of the **Mach host/special-port model**, not add an application-specific alias or success stub. If the correct XNU semantics require a larger coherent host-port abstraction, implement that abstraction and keep unsupported special-port behavior explicit.
+
+Do not pre-implement unrelated later Mach APIs merely because they are nearby. Runtime evidence selects the next semantic boundary.
+
+## RuntimeRoot architecture
+
+The complete RuntimeRoot path is now:
+
+```text
+GitHub-hosted macOS runner
         |
         |  Xcode 16.4
         |  iOS simulator runtime 18.5 (22F77)
@@ -115,55 +150,43 @@ cross-OS Actions cache
    real Windows runner
         |
         +-> exact-head ipaSim Core tester
-        +-> validated DwarFS reader bridge
+        +-> pinned validated DwarFS reader bridge
         +-> pinned public AWS IPA
         |
         v
-    DynamicLoader
+    RuntimeRootStore
         |
-        v
-   RuntimeRootStore
+        +-> static dependency closure
+        +-> host-import inventory
+        +-> DynamicLoader
         |
         v
  direct immutable reads from the DwarFS image
 ```
 
-The intended path has **no RuntimeRoot mount, full extraction, filename sanitization, path exclusion, or NTFS materialization fallback**.
+The intended path has **no RuntimeRoot mount, full extraction, filename sanitization, path exclusion, path rewriting, or NTFS materialization fallback**.
 
-### Merged PR #78 checkpoint
+### What PRs #78-#80 proved
 
-The full-image experiment crossed the storage boundary on real Windows and merged at `f56db5be4fafb7fb54cf79a7c8906500ec275317`:
+PR #78 crossed the storage boundary on real Windows:
 
-- **Windows ARM64 Core**, **Synthetic iOS IPA on Windows**, and **Threaded ARM64 Guest Context** all passed;
+- public Windows ARM64 Core, Synthetic IPA, and Threaded ARM64 checks passed;
 - the Darwin-only illegal-name DwarFS fixture passed;
-- the Windows in-image DwarFS reader smoke passed;
-- the complete pinned RuntimeRoot was restored as one verified **7,202,038,273-byte** DwarFS image;
-- the exact-head Windows probe loaded real Apple frameworks and dylibs directly from the image without mounting or extracting the RuntimeRoot; and
-- the first real loader stop was an unresolved `_mach_absolute_time` import while applying chained fixups for `/usr/lib/system/libsystem_sim_platform.dylib`.
+- the Windows in-image reader smoke passed;
+- the complete pinned RuntimeRoot was restored as one verified **7,202,038,273-byte** DwarFS image; and
+- the real loader reached a genuine semantic boundary rather than an image/store failure.
 
-The relevant boundary is:
+An exact attempt to materialize the complete trusted tar/zstd RuntimeRoot as NTFS stopped before ipaSim with **15,339 hard-link creation errors** and **75 rejected link-path errors**. That host-filesystem limitation is the reason the image-backed architecture exists; it must not be treated as a DwarFS regression or worked around by renaming/dropping Darwin paths.
 
-```text
-Error: symbol _mach_absolute_time was not found for library ordinal 5.
-Error: cannot apply chained fixups for /usr/lib/system/libsystem_sim_platform.dylib:
-cannot resolve chained-fixup import _mach_absolute_time from library ordinal 5.
-```
+PR #79 removed the remaining directory-only read detour. Static Mach-O closure and host-import inventory now consume the same explicitly selected `RuntimeRootStore` instance as the loader. The image-backed path therefore no longer skips those preflights.
 
-That is a successful **image-backed storage/loader proof** under the Priority 0 roadmap criterion: the complete image-backed path reached a later genuine compatibility boundary than Windows directory materialization can reach. An exact-head attempt to rebuild the complete trusted tar/zstd RuntimeRoot as an NTFS directory stopped before ipaSim with **15,339 hard-link creation errors** and **75 rejected link-path errors**. Treating that host-filesystem limitation as a DwarFS regression would make the acceptance gate impossible by construction.
+PR #80 made the already validated DwarFS reader durable without adding Apple RuntimeRoot bytes to Git. The unchanged validated reader ZIP is stored under `deps/dwarfs-reader/windows-x64/` with source fingerprints, binary checksums, provenance, ABI documentation, and third-party notices. CI validates that package and compiles only the small current-source consumer smoke. Missing/corrupt packages or changed build inputs fail explicitly; there is no silent DwarFS/vcpkg rebuild fallback.
 
-PR #78 validates the complete DwarFS path directly. A nonzero probe is accepted only when it reaches a real unresolved-symbol plus chained-fixup loader boundary; image identity, reader bridge, open/read, malformed output, or earlier storage failures still publish the actionable diagnostic and fail normally. `_mach_absolute_time` was not implemented inside that storage PR merely to force the image-backed path farther.
+The multi-gigabyte RuntimeRoot image remains derived from the pinned GitHub-hosted Xcode runtime and is not committed to or redistributed from this repository.
 
-The Windows reader job uses the [pinned prebuilt reader package](deps/dwarfs-reader/README.md) checked into this repository. Its 1.9 MB ZIP is the unchanged validated DLL artifact from public run `33878644011`, with source fingerprints, binary checksums, provenance, and notices. An ordinary checkout supplies the reader even if all Actions caches/artifacts expire. CI compiles only the small current-source consumer smoke, validates the actual DLL, and then runs full image acceptance. Missing/corrupt packages or changed reader build inputs publish the real diagnostic and fail; they never silently trigger a DwarFS/vcpkg rebuild.
+### Historical directory transport baseline
 
-Relevant merges still prepare the separate RuntimeRoot image in `master` cache scope for later PRs. This image policy is independent of the reader package: the complete RuntimeRoot remains derived from the pinned GitHub-hosted Xcode runtime and is not committed to or distributed from this repository.
-
-The existing tar/zstd workflow remains unchanged as the historical directory transport baseline, but it is not used as a full-namespace parity oracle after the NTFS limitation is observed. The active Priority 1 checkpoint moves static closure and host-import inventory reads onto the same configured `RuntimeRootStore` used by the loader. This removes their directory-only detour without adding auto-detection, extraction fallback, or a second DwarFS store instance.
-
-### Why the RuntimeRoot architecture changed
-
-The trusted GitHub-hosted RuntimeRoot is large as a filesystem tree: the measured iOS 18.5 RuntimeRoot contains roughly **467,540 entries** and **19,398,480 KiB** of logical content. PR #70's measured `zstd -1` package was `9,085,521,586` bytes and took about `142` seconds to create on the profiled GitHub macOS runner.
-
-The current trusted baseline is:
+The earlier trusted transport remains useful historical evidence:
 
 ```text
 GitHub-hosted macOS RuntimeRoot
@@ -176,32 +199,37 @@ GitHub-hosted macOS RuntimeRoot
         -> Test-Ipa.cmd
 ```
 
-This remains the frozen historical transport baseline, but the complete archive is now known to contain Darwin names and link topology that Windows cannot reconstruct exactly as an NTFS directory. It remains useful evidence for the earlier workflow history; it is not a valid full-namespace parity oracle for the image-backed store.
+The measured iOS 18.5 RuntimeRoot contained roughly **467,540 entries** and **19,398,480 KiB** of logical content. PR #70 measured a `zstd -1` package of `9,085,521,586` bytes with about `142` seconds of packaging time on the profiled GitHub macOS runner.
 
-PR #74 tested a different idea: preserve the complete RuntimeRoot in one WIM and mount it read-only with DISM. The WIM itself was valid and independently verifiable, but the real Windows DISM mount failed with **Error 123** around 79% progress. No RuntimeRoot paths were excluded or renamed to force success. The result demonstrated that a valid single-file package is not enough if Windows must still project Apple's complete namespace as ordinary Windows paths.
+The tar/zstd workflow remains historical transport evidence, not a full-namespace parity oracle, because NTFS cannot reproduce the complete Darwin namespace/link topology exactly.
 
-PR #76 therefore moved the architectural boundary **inside ipaSim**:
+PR #74 also tested a WIM-based route. The WIM itself was valid, but real Windows DISM mounting failed with **Error 123** around 79% progress. No RuntimeRoot objects were excluded or renamed to force success. That experiment reinforced the architectural requirement: Windows should not have to project Apple's complete RuntimeRoot as ordinary Windows paths before ipaSim can consume it.
 
-```text
-DynamicLoader
-     |
-     v
-RuntimeRootStore
-   /       \
-  v         v
-Directory   future immutable image source
-baseline
-```
+## Current Mach timing and voucher state
 
-PR #77 then supplied the first image-backed proof. A synthetic DwarFS fixture contains the Darwin path:
+### Darwin timing
 
-```text
-/System/Library/Frameworks/UIKit.framework/Versions/A:/UIKit
-```
+PR #81 implements `mach_absolute_time()` through Windows `QueryUnbiasedInterruptTimePrecise`, preserving monotonic uptime while excluding system sleep. The existing 100 ns Mach tick representation and `mach_timebase_info` value of `100/1` remain coherent with that source.
 
-The `A:` component cannot be materialized as a normal NTFS pathname component, but the Windows reader retrieves the exact bytes directly from the DwarFS image. That proves guest Darwin path identity no longer has to equal host Windows pathname identity.
+`mach_continuous_time` remains a separate continuous-time path backed by `QueryInterruptTimePrecise`.
 
-The permanent direction is therefore: **let ipaSim understand a Darwin RuntimeRoot source directly instead of requiring Windows to pretend the RuntimeRoot is an NTFS tree.**
+The exact zero-argument, 64-bit ARM64 host-call ABI is registered explicitly; timing semantics are validated in the focused Darwin time smoke rather than treated as a trivial alias.
+
+### Mach host and voucher semantics
+
+PR #83 extends the shared Mach namespace with typed host and voucher objects:
+
+- `mach_host_self()` returns a stable host port name;
+- unrelated task/message/voucher names cannot masquerade as a host capability;
+- `host_create_mach_voucher()` validates the complete guest recipe/output spans before host dereference;
+- Darwin's packed 16-byte voucher recipe ABI and 5120-byte raw recipe limit are enforced;
+- manager-independent `COPY` and `REMOVE` recipe behavior is implemented;
+- `previous_voucher` capabilities are validated against the typed Mach namespace;
+- manager-specific attribute behavior fails with `KERN_NOT_SUPPORTED` instead of fabricated success;
+- invalid host conversion, malformed input, oversized recipes, copyin/copyout faults, and failed calls preserve XNU-style error/copyout layering; and
+- the exact XNU zero-recipe behavior is preserved: a valid host plus an empty recipe returns success with `MACH_VOUCHER_NULL` rather than manufacturing a voucher object.
+
+The PR intentionally did **not** pre-implement `host_get_special_port`, `mach_port_deallocate`, voucher attribute managers, or later voucher transport/extraction APIs. The subsequent RuntimeRoot acceptance is what selected `_host_get_special_port` as the next boundary.
 
 ## Public acceptance and frozen regression contracts
 
@@ -219,7 +247,7 @@ Expected boundary diagnostics in these fixtures are evidence, not noise. Do not 
 
 PR #68 pins the Apache-2.0 AWS Device Farm sample IPA at upstream commit `58e48234db510bd4fbf643643e8808c5d6a13845` and Git blob `06a33a39286ffd7c9d300c5924750b6f97c4e346`. CI downloads and verifies the upstream object instead of committing the IPA into this repository.
 
-The no-RuntimeRoot public regression contract is intentionally:
+The no-RuntimeRoot public regression contract remains intentionally:
 
 ```text
 probe_exit=2
@@ -228,9 +256,25 @@ runtime_boundary=Error: iOS runtime root is not configured for dependency /Syste
 loader_stop=[ipasim-probe] loader stopped with code 2 before app execution.
 ```
 
-The relocation diagnostic must remain visible until real target-neutral relocation support replaces it. A later dependency error is not permission to hide the earlier failure.
+The relocation diagnostic must remain visible until real target-neutral relocation support replaces it. A later dependency error is not permission to hide an earlier failure.
 
-Trusted full-RuntimeRoot acceptance is a stronger layer on top of the public baselines. Its purpose is to expose the next genuine loader/runtime/framework boundary using the complete pinned RuntimeRoot; it must not weaken the public contracts to advance farther.
+Trusted full-RuntimeRoot DwarFS acceptance is a stronger layer on top of the public baselines. Its purpose is to expose the next genuine loader/runtime/framework boundary using the complete pinned RuntimeRoot; it must not weaken the public contracts merely to advance farther.
+
+## CI self-reporting contract
+
+Build, compiler, linker, packaging, reader, loader, and runtime failures must remain visible.
+
+For the Windows core and RuntimeRoot acceptance paths:
+
+- capture the real diagnostic output;
+- preserve the real failing exit code;
+- publish the useful actionable failure to the Actions step summary;
+- create or update **one persistent PR diagnostic comment** instead of creating duplicates;
+- keep the comment updated on later pushes;
+- surface the canonical RuntimeRoot boundary directly as `NEXT_BOUNDARY:` when acceptance successfully reaches a later genuine compatibility stop; and
+- after publishing diagnostics, fail CI normally when the underlying step actually failed.
+
+Diagnostic publishing is secondary to the real build/test. It must never suppress a failure, manufacture success, or block a real acceptance job from running.
 
 ## Current generated production routes
 
@@ -268,7 +312,9 @@ real Mach-O import resolution
 
 Generated SDK/ABI evidence determines call mechanics only. It never grants semantic implementation approval.
 
-`guarded_open_np` and `guarded_close_np` remain intentionally outside the generated adapter table because the pinned public SDK evidence does not provide a generator-owned typed callable ABI for those exports. Their current ABI and behavior are backed by authoritative XNU/libdispatch evidence instead of being guessed into the generated route set.
+The 11-route count is unchanged by the newer timing and Mach-voucher work. APIs such as `mach_absolute_time`, `mach_host_self`, and `host_create_mach_voucher` use target-proven explicit ABI/semantic integration at their current subsystem boundary rather than being silently counted as approved SDK-generated routes.
+
+`guarded_open_np` and `guarded_close_np` likewise remain intentionally outside the generated adapter table because the pinned public SDK evidence does not provide a generator-owned typed callable ABI for those exports. Their ABI/behavior is backed by authoritative XNU/libdispatch evidence instead of being guessed into the generated route set.
 
 ## Current Darwin pthread state
 
@@ -345,12 +391,14 @@ Core mechanical rules:
 - shared-memory multi-engine execution;
 - independent secondary guest execution contexts and threaded callbacks;
 - controlled loader selection of explicitly approved generated semantic routes;
-- generated live GPR/SIMD/stack capture and result commit driven by `AdapterRecord`; and
-- immutable RuntimeRoot byte-source abstraction with the existing directory backend preserved as the known-good baseline.
+- generated live GPR/SIMD/stack capture and result commit driven by `AdapterRecord`;
+- immutable RuntimeRoot byte-source abstraction with explicit directory and DwarFS backends;
+- direct complete RuntimeRoot image reads on Windows with no mount/extraction fallback; and
+- store-backed static dependency and host-import preflights.
 
 ### Darwin/runtime work
 
-Implemented coverage includes process identity and selected process information, Mach task/time/VM behavior, ulock synchronization, libplatform memory/string primitives, a coherent guest-visible file-descriptor namespace, regular files/FIFOs, Darwin ARM64 `stat` translation, implemented socket/WinSock send and receive translation, generated scalar and pointer-bearing descriptor I/O, XNU guarded regular-file descriptor semantics, pthread core/QoS/TSD/workloop/workqueue control-plane work, and independent guest worker execution.
+Implemented coverage includes process identity and selected process information, Mach task/time/VM behavior, typed host/voucher identity, initial Mach voucher creation semantics, ulock synchronization, libplatform memory/string primitives, a coherent guest-visible file-descriptor namespace, regular files/FIFOs, Darwin ARM64 `stat` translation, socket/WinSock send and receive translation, generated scalar and pointer-bearing descriptor I/O, XNU guarded regular-file descriptor semantics, pthread core/QoS/TSD/workloop/workqueue control-plane work, and independent guest worker execution.
 
 Unsupported behavior remains explicit rather than being fabricated as success.
 
@@ -359,16 +407,17 @@ Unsupported behavior remains explicit rather than being fabricated as success.
 Use this sequence after every independently correct checkpoint merges:
 
 1. update to current `master`;
-2. inspect `.github/agent-work/` and open/draft PRs;
-3. run the applicable public validation workflows;
-4. run the pinned public acceptance workload through the strongest trusted RuntimeRoot path available;
-5. use private/local application execution only as additional evidence and never expose identifying data publicly;
-6. identify the **first genuine non-cascading semantic/runtime failure**;
-7. map it to the smallest coherent subsystem rather than treating one symbol as the architecture;
-8. create a narrow coordination claim;
-9. implement target-neutral behavior with explicit failure for unsupported semantics;
-10. add or preserve public regression proof; and
-11. delete the claim from the implementation PR before merge.
+2. confirm any PR you were working on has not already merged before continuing it;
+3. inspect `.github/agent-work/` and open/draft PRs for overlapping work;
+4. run the applicable public validation workflows;
+5. run the pinned public acceptance workload through the strongest trusted RuntimeRoot path available;
+6. use private/local application execution only as additional evidence and never expose identifying data publicly;
+7. identify the **first genuine non-cascading semantic/runtime failure**;
+8. map it to the smallest coherent subsystem rather than treating one symbol as the architecture;
+9. create a narrow coordination claim when required;
+10. implement target-neutral behavior with explicit failure for unsupported semantics;
+11. add or preserve public regression proof; and
+12. delete the claim from the implementation PR before merge.
 
 A missing symbol is evidence of a boundary, not automatically the unit of implementation.
 
@@ -380,11 +429,10 @@ Follow [`AGENTS.md`](AGENTS.md) for the authoritative order. The normal public r
 2. **Windows ARM64 Core** — `.github/workflows/windows-arm64-core.yml`
 3. **Threaded ARM64 Guest Context** when guest-thread/callback execution is relevant
 4. **Compatibility Surface Analyzer** when generated compatibility tooling or fixtures change
-5. optional local/private acceptance only after the public results are understood
+5. **RuntimeRoot DwarFS Reader and Acceptance** when RuntimeRoot/store/loader or current semantic boundary files change
+6. optional local/private acceptance only after the public results are understood
 
 Additional public/trusted acceptance workflows may exercise the pinned AWS workload and GitHub-hosted RuntimeRoot. Those layers complement the core regression sequence; they do not replace it.
-
-CI failures should preserve the real compiler/linker/packaging/runtime exit code, publish the most useful diagnostic available, and then fail normally. Auxiliary diagnostic publishing must not convert a real failure into success or prevent the real test from running.
 
 ## Regression and privacy rules
 
@@ -393,20 +441,21 @@ Regression prevention is a hard acceptance criterion.
 - no monkey patching, runtime swapping, or hidden compatibility hooks;
 - no application-specific names, bundle identifiers, local paths, fingerprints, private logs, or private RuntimeRoot data in public history;
 - no fabricated success for unsupported Darwin behavior;
+- no RuntimeRoot object exclusions, filename rewriting, or extraction fallback used to make Windows accept an incompatible path;
 - complete guest pointer/span validation before host dereference when an API requires it;
 - exact Darwin LP64 structure widths and return/error conventions;
 - generated ABI evidence determines mechanics only;
 - semantic approval remains separate and explicit;
 - data exports remain data;
 - prior generated routes and semantic smokes remain green;
-- existing descriptor, Mach IPC, pthread/workqueue, VM, timing, socket, filesystem, loader, and RuntimeRootStore behavior remain regression requirements when applicable; and
+- existing descriptor, Mach IPC, pthread/workqueue, VM, timing, socket, filesystem, loader, RuntimeRootStore, DwarFS-reader, and public-acceptance behavior remain regression requirements when applicable; and
 - public synthetic and AWS acceptance boundaries remain frozen until a real implementation intentionally advances them.
 
 ## Apple SDK metadata for compatibility research
 
 Use the maintained [Theos SDK archive](https://github.com/theos/sdks) as the pinned public provider/header reference for the established iPhoneOS16.5 mechanical preflight.
 
-GitHub's macOS runner also exposes real `iphoneos` and `iphonesimulator` SDK installations. The trusted RuntimeRoot work currently uses the GitHub-hosted Xcode 16.4 / iOS 18.5 environment as runtime source evidence. Do not silently replace the established pinned Theos mechanical pipeline with a different SDK source without a separately claimed, regression-proven migration.
+GitHub's macOS runner also exposes real `iphoneos` and `iphonesimulator` SDK installations. Trusted RuntimeRoot work currently uses the GitHub-hosted Xcode 16.4 / iOS 18.5 environment as runtime source evidence. Do not silently replace the established pinned Theos mechanical pipeline with a different SDK source without a separately claimed, regression-proven migration.
 
 `.tbd` files are useful for exported names, install names, provider/re-export relationships, targets, weak/TLS/Objective-C metadata classes, and SDK-version comparisons. They are **not implementation source**. Function prototypes require SDK headers/compiler evidence, and correct Windows semantics require independent implementation evidence.
 
@@ -418,16 +467,17 @@ See [`LOCAL_THEOS_PREFLIGHT.md`](LOCAL_THEOS_PREFLIGHT.md) for the resumable Win
 
 Before starting substantial work:
 
-1. update your view of `master`;
-2. inspect active claims and open/draft PRs;
-3. publish a narrow non-overlapping claim when required;
-4. keep implementation target-neutral and evidence-driven;
-5. preserve known-good public contracts; and
-6. remove the claim from the implementation PR before merge.
+1. refresh your view of `master`;
+2. verify any prior/current PR is still open before continuing it;
+3. inspect active claims and open/draft PRs;
+4. publish a narrow non-overlapping claim when required;
+5. keep implementation target-neutral and evidence-driven;
+6. preserve known-good public contracts; and
+7. remove the claim from the implementation PR before merge.
 
 For mechanical compatibility work, first ask whether the required evidence belongs in the SDK-wide catalog/generator rather than a handwritten per-symbol table. For semantic/runtime work, the first genuine non-cascading failure remains the truth source.
 
-See [`ROADMAP.md`](ROADMAP.md) for the current subsystem backlog and [`docs/arm64-ios-compatibility.md`](docs/arm64-ios-compatibility.md) for additional compatibility direction.
+For the current merged head, that runtime truth source is `_host_get_special_port` from the full image-backed iOS 18.5 RuntimeRoot acceptance path.
 
 ---
 
@@ -456,7 +506,7 @@ The active ARM64 fork is validated primarily through the public GitHub Actions w
 
 ## Directory structure
 
-- [`deps`](deps) — third-party dependencies
+- [`deps`](deps) — third-party dependencies, including the pinned DwarFS reader package used by RuntimeRoot acceptance
 - [`docs`](docs) — documentation and research material
 - [`include`](include) — C++ headers
 - [`samples`](samples) — sample applications and fixtures
