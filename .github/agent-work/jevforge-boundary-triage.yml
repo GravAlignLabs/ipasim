@@ -1,0 +1,29 @@
+status: active
+owner: DeerSpotter
+agent: ChatGPT GPT-5.6 Sol
+
+task: >-
+  Add an isolated Jev-assisted compatibility-boundary triage prototype that ranks
+  implementation candidates from public ipaSim evidence without changing runtime
+  semantics or deciding pass/fail outcomes.
+
+scope:
+  - tools/jevforge/
+  - .github/agent-work/jevforge-boundary-triage.yml
+
+branch: tools/jevforge-boundary-triage
+started_utc: 2026-09-20T11:24:24Z
+updated_utc: 2026-09-20T11:24:24Z
+base_sha: 59697e4f82ffcbadcc9ac81f9c1d2ac8bbf9b795
+expected_pr: draft
+
+next_checkpoint: >-
+  Add a local-only TypeSafe Jev client, a public _host_get_special_port example,
+  and deterministic candidate-ranking output that never substitutes for compiler,
+  semantic-smoke, or RuntimeRoot evidence.
+
+notes: >-
+  No ipaSim runtime files, workflows, or acceptance behavior are in scope. Jev is
+  advisory only; no monkey patching, stubs, fake success, hidden fallback, or
+  failure suppression. API credentials must come from TYPESAFE_API_KEY and must
+  never be committed.
