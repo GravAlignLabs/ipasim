@@ -1,7 +1,7 @@
 diff --git a/src/IpaSimulator/MachIpc.hpp b/src/IpaSimulator/MachIpc.hpp
 --- a/src/IpaSimulator/MachIpc.hpp
 +++ b/src/IpaSimulator/MachIpc.hpp
-@@ -102,6 +102,15 @@ PortName taskSelfPort();
+@@ -102,6 +102,14 @@ PortName taskSelfPort();
  // authority.
  PortName hostSelfPort();
  
@@ -19,7 +19,7 @@ diff --git a/src/IpaSimulator/MachIpc.hpp b/src/IpaSimulator/MachIpc.hpp
 diff --git a/src/IpaSimulator/MachIpc.cpp b/src/IpaSimulator/MachIpc.cpp
 --- a/src/IpaSimulator/MachIpc.cpp
 +++ b/src/IpaSimulator/MachIpc.cpp
-@@ -466,6 +466,34 @@ PortName hostSelfPort() {
+@@ -466,6 +466,36 @@ PortName hostSelfPort() {
    return HostSelf;
  }
  
@@ -59,7 +59,7 @@ diff --git a/src/IpaSimulator/MachIpc.cpp b/src/IpaSimulator/MachIpc.cpp
 diff --git a/src/IpaSimulator/DarwinVoucherBridge.cpp b/src/IpaSimulator/DarwinVoucherBridge.cpp
 --- a/src/IpaSimulator/DarwinVoucherBridge.cpp
 +++ b/src/IpaSimulator/DarwinVoucherBridge.cpp
-@@ -163,6 +163,32 @@ __declspec(dllexport) std::uint32_t mach_host_self(void) {
+@@ -163,6 +163,30 @@ __declspec(dllexport) std::uint32_t mach_host_self(void) {
    return ipasim::mach::hostSelfPort();
  }
  
@@ -131,7 +131,7 @@ diff --git a/src/IpaSimulator/DarwinVoucherSmoke.cpp b/src/IpaSimulator/DarwinVo
        !ClearVoucher || !AdoptVoucher || !RevertVoucher || !FillVoucherAux ||
        !IsFillAuxSupported) {
      FreeLibrary(Host);
-@@ -143,6 +147,30 @@ int main(int argc, char **argv) {
+@@ -143,6 +147,27 @@ int main(int argc, char **argv) {
      return fail("mach_host_self did not return one stable host port name");
    }
  
