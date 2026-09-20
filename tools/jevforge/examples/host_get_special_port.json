@@ -1,0 +1,109 @@
+{
+  "state": {
+    "project": "ipaSim",
+    "boundary": "_host_get_special_port",
+    "origin": "/usr/lib/system/libdispatch.dylib",
+    "failure_stage": "chained fixups",
+    "diagnostic": "symbol _host_get_special_port was not found for library ordinal 3 while applying chained fixups for libdispatch.dylib",
+    "previous_stages": {
+      "runtime_root_store": "passed",
+      "static_closure": "passed",
+      "host_import_inventory": "passed"
+    },
+    "existing_capabilities": [
+      "typed Mach namespace",
+      "mach_host_self",
+      "host_create_mach_voucher"
+    ],
+    "project_constraints": [
+      "behavior should represent Darwin/XNU semantics",
+      "unsupported behavior must return explicit failure",
+      "application-specific compatibility behavior is not allowed",
+      "successful execution by itself does not prove semantic correctness"
+    ],
+    "candidates": {
+      "W": "Resolve host_get_special_port through an existing host-related function already present in the runtime.",
+      "X": "Represent special ports with a new dedicated typed object. Validate the supplied host capability and requested selector before returning the corresponding object.",
+      "Y": "For a valid host request, return a valid Mach port regardless of which special-port selector was requested.",
+      "Z": "Extend the existing typed Mach namespace to support host_get_special_port. Implement selectors for which correct semantics are available and explicitly reject unsupported selectors."
+    }
+  },
+  "questions": {
+    "best_architecture_fit": {
+      "type": "choice",
+      "instructions": "Which candidate best fits the existing ipaSim architecture while requiring the least unjustified new behavior?",
+      "criteria": {
+        "W": "Candidate W",
+        "X": "Candidate X",
+        "Y": "Candidate Y",
+        "Z": "Candidate Z",
+        "NONE": "None of the candidates can be justified from the supplied evidence."
+      }
+    },
+    "best_semantic_candidate": {
+      "type": "choice",
+      "instructions": "Which candidate is most likely to implement the actual required Darwin/XNU host_get_special_port semantics correctly?",
+      "criteria": {
+        "W": "Candidate W",
+        "X": "Candidate X",
+        "Y": "Candidate Y",
+        "Z": "Candidate Z",
+        "NONE": "The supplied evidence is insufficient to prefer any candidate."
+      }
+    },
+    "greatest_false_success_risk": {
+      "type": "choice",
+      "instructions": "Which candidate has the greatest risk of making execution advance while failing to implement the real required semantics?",
+      "criteria": {
+        "W": "Candidate W",
+        "X": "Candidate X",
+        "Y": "Candidate Y",
+        "Z": "Candidate Z",
+        "NONE": "None has substantially greater false-success risk than the others."
+      }
+    },
+    "investigate_first": {
+      "type": "choice",
+      "instructions": "Given only the supplied evidence, which candidate should receive the first implementation and compile experiment?",
+      "criteria": {
+        "W": "Candidate W",
+        "X": "Candidate X",
+        "Y": "Candidate Y",
+        "Z": "Candidate Z",
+        "NONE": "More evidence should be gathered before implementing any candidate."
+      }
+    },
+    "w_semantically_justified": {
+      "type": "noul",
+      "instructions": "Is Candidate W sufficiently justified as a semantically correct implementation approach?",
+      "criteria": {
+        "true": "There is enough evidence that its behavior represents the required API contract.",
+        "false": "There is not enough evidence that its behavior represents the required API contract."
+      }
+    },
+    "x_semantically_justified": {
+      "type": "noul",
+      "instructions": "Is Candidate X sufficiently justified as a semantically correct implementation approach?",
+      "criteria": {
+        "true": "There is enough evidence that its behavior represents the required API contract.",
+        "false": "There is not enough evidence that its behavior represents the required API contract."
+      }
+    },
+    "y_semantically_justified": {
+      "type": "noul",
+      "instructions": "Is Candidate Y sufficiently justified as a semantically correct implementation approach?",
+      "criteria": {
+        "true": "There is enough evidence that its behavior represents the required API contract.",
+        "false": "There is not enough evidence that its behavior represents the required API contract."
+      }
+    },
+    "z_semantically_justified": {
+      "type": "noul",
+      "instructions": "Is Candidate Z sufficiently justified as a semantically correct implementation approach?",
+      "criteria": {
+        "true": "There is enough evidence that its behavior represents the required API contract.",
+        "false": "There is not enough evidence that its behavior represents the required API contract."
+      }
+    }
+  }
+}
