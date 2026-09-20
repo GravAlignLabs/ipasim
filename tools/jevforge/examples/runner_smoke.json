@@ -1,0 +1,32 @@
+{
+  "name": "JevForge isolated-runner smoke",
+  "base_ref": "HEAD",
+  "commands": [
+    {
+      "name": "Python syntax",
+      "argv": [
+        "py",
+        "-m",
+        "py_compile",
+        "tools/jevforge/jevforge.py",
+        "tools/jevforge/runner.py"
+      ],
+      "timeout_seconds": 60
+    },
+    {
+      "name": "Git diff check",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "timeout_seconds": 60
+    }
+  ],
+  "candidates": {
+    "runner-smoke": {
+      "description": "Infrastructure-only smoke proving detached worktree creation, command execution, diagnostic capture, and cleanup. This is not a compatibility candidate and applies no runtime patch.",
+      "patches": []
+    }
+  }
+}
