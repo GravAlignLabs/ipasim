@@ -1,0 +1,161 @@
+diff --git a/src/IpaSimulator/MachIpc.hpp b/src/IpaSimulator/MachIpc.hpp
+--- a/src/IpaSimulator/MachIpc.hpp
++++ b/src/IpaSimulator/MachIpc.hpp
+@@ -102,6 +102,15 @@ PortName taskSelfPort();
+ // authority.
+ PortName hostSelfPort();
+ 
++// Resolve the target-proven host special-port subset through the existing typed
++// Mach namespace. Current libdispatch evidence calls HOST_PORT (selector 1)
++// using mach_host_self() and HOST_LOCAL_NODE (-1). XNU ignores node for this
++// operation. Distinct host capabilities that ipaSim does not model must fail
++// closed rather than aliasing to the ordinary host object.
++KernelReturn getHostSpecialPort(PortName Host, std::int32_t Node,
++                                std::int32_t Selector, PortName *Port);
++
+ // Create a Mach voucher from the public packed recipe-array ABI. The currently
+ // implemented recipe subset is the manager-independent COPY/REMOVE behavior.
+ // Manager-specific recipe commands fail KERN_NOT_SUPPORTED rather than creating
+diff --git a/src/IpaSimulator/MachIpc.cpp b/src/IpaSimulator/MachIpc.cpp
+--- a/src/IpaSimulator/MachIpc.cpp
++++ b/src/IpaSimulator/MachIpc.cpp
+@@ -466,6 +466,34 @@ PortName hostSelfPort() {
+   return HostSelf;
+ }
+ 
++KernelReturn getHostSpecialPort(PortName Host, std::int32_t Node,
++                                std::int32_t Selector, PortName *Port) {
++  if (!Port)
++    return KernelInvalidArgument;
++  if (!isLivePortOfKind(Host, PortKind::Host))
++    return KernelInvalidHost;
++
++  // XNU currently ignores the node argument. HOST_LOCAL_NODE (-1) is the
++  // public call shape used by the target, but node does not change selection.
++  (void)Node;
++
++  // HOST_PORT == 1. XNU returns another send right to the same host kernel
++  // object. A Mach namespace may expose the copied right under the same name;
++  // increment the send-right reference count rather than manufacturing a new
++  // object identity.
++  if (Selector == 1) {
++    const PortName Result = hostSelfPort();
++    if (!insertSendRight(Result))
++      return KernelFailure;
++    *Port = Result;
++    return KernelSuccess;
++  }
++
++  if (Selector <= 0)
++    return KernelInvalidArgument;
++
++  diagnostic("requested host special-port selector is not implemented yet");
++  return KernelNotSupported;
++}
++
+ KernelReturn createVoucher(PortName Host, const void *Recipes,
+                            std::uint32_t RecipeSize, PortName *Voucher) {
+   if (!Voucher)
+diff --git a/src/IpaSimulator/DarwinVoucherBridge.cpp b/src/IpaSimulator/DarwinVoucherBridge.cpp
+--- a/src/IpaSimulator/DarwinVoucherBridge.cpp
++++ b/src/IpaSimulator/DarwinVoucherBridge.cpp
+@@ -163,6 +163,32 @@ __declspec(dllexport) std::uint32_t mach_host_self(void) {
+   return ipasim::mach::hostSelfPort();
+ }
+ 
++// Target libdispatch calls host_get_special_port(mach_host_self(), -1,
++// HOST_PORT, &port). Route only that proven capability through the typed Mach
++// namespace. Unsupported selectors remain explicit failures so HOST_PRIV_PORT,
++// HOST_IO_MAIN_PORT, and service ports are never forged from the ordinary host.
++__declspec(dllexport) std::int32_t
++host_get_special_port(std::uint32_t Host, std::int32_t Node,
++                      std::int32_t Selector, std::uint32_t *Port) {
++  if (Host != ipasim::mach::hostSelfPort())
++    return ipasim::mach::SendInvalidDestination;
++
++  ipasim::mach::PortName SpecialPort = ipasim::mach::PortNull;
++  const ipasim::mach::KernelReturn Result =
++      ipasim::mach::getHostSpecialPort(Host, Node, Selector, &SpecialPort);
++  if (Result == ipasim::mach::KernelInvalidHost)
++    return ipasim::mach::SendInvalidDestination;
++  if (Result != ipasim::mach::KernelSuccess)
++    return Result;
++
++  if (!Port || !ipasim::darwinmem::writableSpan(Port, sizeof(*Port)))
++    return ipasim::mach::KernelMemoryError;
++  *Port = SpecialPort;
++  return ipasim::mach::KernelSuccess;
++}
++
+ // Model libsyscall's host_create_mach_voucher -> Mach-trap contract, not merely
+ // the deeper XNU host routine. Error ordering matters: host conversion happens
+ // first, the trap rejects oversized/copyin-faulting recipes before construction,
+diff --git a/src/IpaSimulator/SysTranslator.cpp b/src/IpaSimulator/SysTranslator.cpp
+--- a/src/IpaSimulator/SysTranslator.cpp
++++ b/src/IpaSimulator/SysTranslator.cpp
+@@ -137,6 +137,7 @@ const DarwinHostCallSignature *findDarwinHostCallSignature(
+       {"open", 3, true},
+       {"sigsuspend$NOCANCEL", 1, true},
+       {"host_create_mach_voucher", 4, true},
++      {"host_get_special_port", 4, true},
+       {"mach_absolute_time", 0, true},
+       {"mach_continuous_time", 0, true},
+       {"mach_host_self", 0, true},
+diff --git a/src/IpaSimulator/DarwinVoucherSmoke.cpp b/src/IpaSimulator/DarwinVoucherSmoke.cpp
+--- a/src/IpaSimulator/DarwinVoucherSmoke.cpp
++++ b/src/IpaSimulator/DarwinVoucherSmoke.cpp
+@@ -107,6 +107,8 @@ int main(int argc, char **argv) {
+ 
+   using Init = std::int32_t (*)(const DarwinLibkernelVoucherFunctions *);
+   using MachHostSelf = std::uint32_t (*)();
++  using HostGetSpecialPort = std::int32_t (*)(std::uint32_t, std::int32_t,
++                                               std::int32_t, std::uint32_t *);
+   using HostCreateVoucher = std::int32_t (*)(std::uint32_t, const std::uint8_t *,
+                                               std::uint32_t, std::uint32_t *);
+   using Set = std::int32_t (*)(void *);
+@@ -119,6 +121,8 @@ int main(int argc, char **argv) {
+ 
+   auto Initialize = reinterpret_cast<Init>(requireExport(Host, "__libkernel_voucher_init"));
+   auto GetHost = reinterpret_cast<MachHostSelf>(requireExport(Host, "mach_host_self"));
++  auto GetSpecialPort = reinterpret_cast<HostGetSpecialPort>(
++      requireExport(Host, "host_get_special_port"));
+   auto CreateVoucher = reinterpret_cast<HostCreateVoucher>(
+       requireExport(Host, "host_create_mach_voucher"));
+   auto SetVoucher = reinterpret_cast<Set>(requireExport(Host, "voucher_mach_msg_set"));
+@@ -129,7 +133,7 @@ int main(int argc, char **argv) {
+   auto FillVoucherAux = reinterpret_cast<FillAux>(requireExport(Host, "voucher_mach_msg_fill_aux"));
+   auto IsFillAuxSupported = reinterpret_cast<FillAuxSupported>(
+       requireExport(Host, "voucher_mach_msg_fill_aux_supported"));
+-  if (!Initialize || !GetHost || !CreateVoucher || !SetVoucher ||
++  if (!Initialize || !GetHost || !GetSpecialPort || !CreateVoucher || !SetVoucher ||
+       !ClearVoucher || !AdoptVoucher || !RevertVoucher || !FillVoucherAux ||
+       !IsFillAuxSupported) {
+     FreeLibrary(Host);
+@@ -143,6 +147,30 @@ int main(int argc, char **argv) {
+     return fail("mach_host_self did not return one stable host port name");
+   }
+ 
++  std::uint32_t SpecialPort = 0xfeedbeefU;
++  if (GetSpecialPort(HostPort, -1, 1, &SpecialPort) != KernelSuccess ||
++      SpecialPort != HostPort) {
++    FreeLibrary(Host);
++    return fail("HOST_PORT did not return a copied send right to the typed host");
++  }
++
++  SpecialPort = 0xfeedbeefU;
++  if (GetSpecialPort(0, -1, 1, &SpecialPort) != MachSendInvalidDestination ||
++      SpecialPort != 0xfeedbeefU) {
++    FreeLibrary(Host);
++    return fail("invalid host special-port request changed the output slot");
++  }
++
++  SpecialPort = 0xfeedbeefU;
++  if (GetSpecialPort(HostPort, -1, 2, &SpecialPort) != KernelNotSupported ||
++      SpecialPort != 0xfeedbeefU) {
++    FreeLibrary(Host);
++    return fail("unmodeled HOST_PRIV_PORT did not fail closed");
++  }
++
+   std::uint32_t Voucher = 0xfeedbeefU;
+   if (CreateVoucher(0, nullptr, 0, &Voucher) != MachSendInvalidDestination ||
+       Voucher != 0xfeedbeefU) {
